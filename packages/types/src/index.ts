@@ -1,0 +1,9 @@
+// Re-export all shared types
+export * from "./agent.js";
+export * from "./skill.js";
+export * from "./team.js";
+export * from "./session.js";
+export * from "./gate.js";
+export * from "./design.js";
+export * from "./sprint.js";
+export * from "./api.js";

@@ -1,0 +1,40 @@
+import type { AgentDefinition, AgentRole } from "@game-studio/types";
+
+export const leadershipAgents: Partial<Record<AgentRole, AgentDefinition>> = {
+  "creative-director": {
+    name: "creative-director",
+    description: "Vision, pillars, player experience, scope arbitration.",
+    tier: 1,
+    model: "opus",
+    tools: ["Read", "Write", "Edit", "Glob", "Grep", "Task", "AskUserQuestion"],
+    maxTurns: 50,
+    skills: ["brainstorm", "design-system", "design-review", "gate-check", "project-stage-detect", "team-combat", "team-narrative", "team-ui", "team-level"],
+    memory: "project",
+    reportsTo: [],
+    delegates: ["game-designer", "art-director", "audio-director", "narrative-director"],
+  },
+  "technical-director": {
+    name: "technical-director",
+    description: "Architecture, technology choices, performance strategy.",
+    tier: 1,
+    model: "opus",
+    tools: ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Task", "AskUserQuestion"],
+    maxTurns: 50,
+    skills: ["create-architecture", "architecture-decision", "architecture-review", "perf-profile", "code-review", "gate-check"],
+    memory: "project",
+    reportsTo: [],
+    delegates: ["lead-programmer", "devops-engineer", "performance-analyst", "technical-artist"],
+  },
+  producer: {
+    name: "producer",
+    description: "Sprint planning, milestone tracking, cross-department coordination.",
+    tier: 1,
+    model: "opus",
+    tools: ["Read", "Write", "Edit", "Glob", "Grep", "Task", "AskUserQuestion"],
+    maxTurns: 40,
+    skills: ["sprint-plan", "create-epics", "create-stories", "milestone-review", "retrospective", "scope-check", "estimate", "bug-triage", "gate-check"],
+    memory: "project",
+    reportsTo: [],
+    delegates: [],
+  },
+};

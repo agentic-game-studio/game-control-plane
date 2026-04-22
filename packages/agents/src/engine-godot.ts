@@ -1,0 +1,48 @@
+import type { AgentDefinition, AgentRole } from "@game-studio/types";
+
+export const godotAgents: Partial<Record<AgentRole, AgentDefinition>> = {
+  "godot-specialist": {
+    name: "godot-specialist",
+    description: "Godot 4 lead: GDScript, node/scene, signals, resources.",
+    tier: 3,
+    model: "sonnet",
+    tools: ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
+    maxTurns: 35,
+    skills: ["dev-story", "code-review"],
+    memory: "session",
+    reportsTo: ["lead-programmer"],
+  },
+  "godot-gdscript-specialist": {
+    name: "godot-gdscript-specialist",
+    description: "GDScript: static typing, patterns, signals, performance.",
+    tier: 3,
+    model: "sonnet",
+    tools: ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
+    maxTurns: 30,
+    skills: ["dev-story"],
+    memory: "session",
+    reportsTo: ["godot-specialist"],
+  },
+  "godot-shader-specialist": {
+    name: "godot-shader-specialist",
+    description: "Godot shading language, visual shaders, VFX.",
+    tier: 3,
+    model: "sonnet",
+    tools: ["Read", "Write", "Edit", "Glob", "Grep"],
+    maxTurns: 25,
+    skills: [],
+    memory: "session",
+    reportsTo: ["godot-specialist", "technical-artist"],
+  },
+  "godot-gdextension-specialist": {
+    name: "godot-gdextension-specialist",
+    description: "Native: C++/Rust bindings, GDExtension, build systems.",
+    tier: 3,
+    model: "sonnet",
+    tools: ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
+    maxTurns: 30,
+    skills: ["dev-story"],
+    memory: "session",
+    reportsTo: ["godot-specialist"],
+  },
+};

@@ -1,0 +1,32 @@
+{
+  "name": "@game-studio/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx --require ./node_modules/dotenv/lib/main.js src/index.ts",
+    "start": "tsx src/index.ts",
+    "build": "tsc --noEmit",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@game-studio/types": "workspace:*",
+    "@game-studio/config": "workspace:*",
+    "@game-studio/agents": "workspace:*",
+    "@game-studio/skills": "workspace:*",
+    "@game-studio/state": "workspace:*",
+    "express": "^4.21.2",
+    "ws": "^8.18.2",
+    "cors": "^2.8.5",
+    "zod": "^3.24.2",
+    "dotenv": "^16.4.7"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.2",
+    "@types/express": "^5.0.2",
+    "@types/ws": "^8.5.14",
+    "@types/cors": "^2.8.17",
+    "@types/node": "^22.13.5",
+    "tsx": "^4.19.3"
+  }
+}

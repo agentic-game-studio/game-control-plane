@@ -1,0 +1,60 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+.next/
+out/
+
+# Environment variables (keep .env.example)
+.env
+.env.local
+.env.*.local
+
+# Workspace — game development files (session state, game code, sessions)
+# NOTE: workspace/CLAUDE.md IS committed — it's the AI agent context file
+workspace/.claude/agents/
+workspace/.claude/skills/
+workspace/.claude/hooks/
+workspace/design/gdd/
+workspace/docs/architecture/
+workspace/production/
+workspace/src/
+# Keep the workspace CLAUDE.md
+!workspace/CLAUDE.md
+
+# Logs
+*.log
+logs/
+*.pid
+*.seed
+
+# Editor
+.DS_Store
+*.swp
+*.swo
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-settings
+
+# Test coverage
+coverage/
+.nyc_output/
+
+# Turbo cache
+.turbo/
+
+# Claude Code artifacts
+claude/
+.cache/
+
+# Misc
+*.bak
+*.tmp
+*.temp
+Thumbs.db
+/.claude
+/Claude-Code-Game-Studios-main
+/godot-mcp-pro-v1.11.0
+plan.md

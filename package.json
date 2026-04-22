@@ -1,0 +1,27 @@
+{
+  "name": "game-control-plane",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@10.33.0",
+  "scripts": {
+    "build": "turbo build",
+    "dev": "turbo dev",
+    "lint": "turbo lint",
+    "typecheck": "turbo typecheck",
+    "test": "turbo test",
+    "clean": "turbo clean",
+    "generate:agents": "pnpm --filter @game-studio/agents run generate",
+    "generate:skills": "pnpm --filter @game-studio/skills run generate",
+    "generate": "pnpm generate:agents && pnpm generate:skills"
+  },
+  "devDependencies": {
+    "dotenv": "^16.4.7",
+    "turbo": "^2.4.4",
+    "typescript": "^5.8.2",
+    "@types/node": "^22.13.5"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=10.0.0"
+  }
+}
