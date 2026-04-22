@@ -11,17 +11,20 @@ out/
 .env.local
 .env.*.local
 
-# Workspace — game development files (session state, game code, sessions)
-# NOTE: workspace/CLAUDE.md IS committed — it's the AI agent context file
-workspace/.claude/agents/
-workspace/.claude/skills/
-workspace/.claude/hooks/
-workspace/design/gdd/
-workspace/docs/architecture/
-workspace/production/
-workspace/src/
-# Keep the workspace CLAUDE.md
+# Workspace — game development files
+# NOTE: Some .claude files are committed as they serve as AI agent context
+workspace/.claude/agents/      # Agent system prompt .md files (committed)
+workspace/.claude/docs/         # Coordination rules, gates, context docs (committed)
+workspace/.claude/skills/       # Skill definitions (committed)
+workspace/.claude/hooks/       # Hook scripts (committed)
+workspace/design/gdd/          # Game Design Documents (gitignored)
+workspace/docs/architecture/   # Architecture Decision Records (gitignored)
+workspace/production/           # Session state & logs (gitignored)
+workspace/src/                 # Game source code (gitignored)
+# Keep workspace context files
 !workspace/CLAUDE.md
+!workspace/.claude/agents/
+!workspace/.claude/docs/
 
 # Logs
 *.log
@@ -54,7 +57,9 @@ claude/
 *.tmp
 *.temp
 Thumbs.db
-/.claude
-/Claude-Code-Game-Studios-main
-/godot-mcp-pro-v1.11.0
+
+# Reference and dev files
+Claude-Code-Game-Studios-main/
+godot-mcp-pro-v1.11.0/
 plan.md
+postcss.config.mjs
