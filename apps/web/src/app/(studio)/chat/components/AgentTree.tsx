@@ -1,0 +1,279 @@
+"use client";
+
+import { useState } from "react";
+import { AGENT_TREE, getAgentIcon } from "@/lib/agent-icons";
+import type { AgentTreeNode } from "@/lib/agent-icons";
+import type { AgentSession } from "@/hooks/useCommandRoom";
+
+interface AgentTreeProps {
+  sessions: Map<string, AgentSession>;
+  currentSession: string;
+  totalProgress: number;
+  onSelectSession: (role: string) => void;
+}
+
+/* ─── Hierarchy Tree ─── */
+
+function TreeNode({ node, activeRoles }: { node: AgentTreeNode; activeRoles: string[] }) {
+  const isActive = activeRoles.includes(node.role);
+  const icon = getAgentIcon(node.role);
+  const label = node.role.replace(/-/g, "_").toUpperCase();
+  const hasChildren = node.children.length > 0;
+
+  if (node.tier === 1) {
+    return (
+      <div className="mb-2">
+        <div className="flex items-center gap-3 mb-4 relative z-10 group">
+          <div className={`w-10 h-10 border-2 border-black flex items-center justify-center relative shadow-[4px_4px_0_0_rgba(0,85,255,1)] group-hover:shadow-[2px_2px_0_0_rgba(0,0,0,1)] transition-all cursor-pointer ${
+            isActive ? "bg-[#0055FF] text-white" : "bg-black text-white"
+          }`}>
+            <span className="material-symbols-outlined">{icon}</span>
+            {isActive && <div className="absolute -right-1 -top-1 w-2 h-2 bg-[#df2b31] border border-black animate-pulse" />}
+          </div>
+          <div className={`border-2 px-3 py-1 cursor-pointer group-hover:bg-[#0055FF] group-hover:text-white transition-colors ${
+            isActive ? "bg-[#0055FF] text-white border-black" : "bg-white border-black"
+          }`}>
+            <span className="font-[var(--font-label)] text-xs font-bold uppercase">{label}</span>
+          </div>
+        </div>
+        {hasChildren && (
+          <div className="relative ml-8 z-10">
+            {node.children.map((child, i) => {
+              const isLast = i === node.children.length - 1;
+              return (
+                <div key={child.role} className="relative">
+                  {!isLast && <div className="absolute left-[11px] top-8 bottom-0 w-[2px] bg-black z-0" />}
+                  <TreeNode node={child} activeRoles={activeRoles} />
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (node.tier === 2) {
+    return (
+      <div className="relative mb-4">
+        <div className="absolute -left-8 top-5 w-8 h-[2px] bg-black" />
+        <div className="flex items-center gap-3 group">
+          <div className={`w-8 h-8 border-2 border-black flex items-center justify-center text-sm cursor-pointer group-hover:bg-black group-hover:text-white transition-colors relative ${
+            isActive ? "bg-[#0055FF] text-white shadow-[2px_2px_0_0_rgba(0,0,0,1)]" : "bg-white text-black"
+          }`}>
+            <span className="material-symbols-outlined text-sm">{icon}</span>
+            {isActive && <div className="absolute -right-1 -top-1 w-2 h-2 bg-[#df2b31] border border-black animate-pulse" />}
+          </div>
+          <div className={`border-2 px-2 py-1 cursor-pointer group-hover:bg-black group-hover:text-white transition-colors ${
+            isActive ? "bg-[#0055FF] text-white border-black" : "bg-white border-black"
+          }`}>
+            <span className="font-[var(--font-label)] text-xs font-bold uppercase">{label}</span>
+          </div>
+        </div>
+        {hasChildren && (
+          <div className="relative ml-8 mt-2 z-10">
+            {node.children.map((child, i) => {
+              const isLast = i === node.children.length - 1;
+              return (
+                <div key={child.role} className="relative">
+                  {!isLast && <div className="absolute left-[7px] top-4 bottom-0 w-[2px] bg-black z-0" />}
+                  <TreeNode node={child} activeRoles={activeRoles} />
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="relative mb-2 z-10">
+      <div className="absolute -left-8 top-3 w-8 h-[2px] bg-black" />
+      <div className={`flex items-center gap-2 group ${isActive ? "opacity-100" : "opacity-60 hover:opacity-100"} transition-opacity`}>
+        <div className={`w-6 h-6 border-2 border-black flex items-center justify-center cursor-pointer relative ${
+          isActive ? "bg-[#0055FF] text-white" : "bg-[#e7e7f5] text-[#434656]"
+        }`}>
+          <span className="material-symbols-outlined" style={{ fontSize: 12 }}>{icon}</span>
+          {isActive && <div className="absolute -right-0.5 -top-0.5 w-1.5 h-1.5 bg-[#df2b31] border border-black animate-pulse" />}
+        </div>
+        <span className={`font-[var(--font-label)] text-xs ${isActive ? "text-black font-bold" : "text-[#434656] group-hover:text-black"}`}>{label}</span>
+      </div>
+      {hasChildren && (
+        <div className="relative ml-6 mt-1 z-10">
+          {node.children.map((child, i) => {
+            const isLast = i === node.children.length - 1;
+            return (
+              <div key={child.role} className="relative">
+                {!isLast && <div className="absolute left-[5px] top-3 bottom-0 w-[2px] bg-black z-0" />}
+                <TreeNode node={child} activeRoles={activeRoles} />
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function filterActiveTree(nodes: AgentTreeNode[], activeRoles: string[]): AgentTreeNode[] {
+  return nodes
+    .map((node) => {
+      const isActive = activeRoles.includes(node.role);
+      const filteredChildren = filterActiveTree(node.children, activeRoles);
+      if (isActive || filteredChildren.length > 0) return { ...node, children: filteredChildren };
+      return null;
+    })
+    .filter((n): n is AgentTreeNode => n !== null);
+}
+
+/* ─── Main Sidebar ─── */
+
+export default function AgentTree({ sessions, currentSession, totalProgress, onSelectSession }: AgentTreeProps) {
+  const [showHierarchy, setShowHierarchy] = useState(false);
+  const activeRoles = [...sessions.values()]
+    .filter((s) => s.role !== "game-director" && s.status === "active")
+    .map((s) => s.role);
+
+  // Derive sessions list (exclude game-director, it's shown separately)
+  const agentSessions = [...sessions.values()].filter((s) => s.role !== "game-director");
+
+  const treeData = showHierarchy ? AGENT_TREE : [];
+
+  return (
+    <aside className="w-80 border-r-2 border-black bg-white flex flex-col h-full shrink-0">
+      {/* Header */}
+      <div className="p-4 border-b-2 border-black bg-[#ededfb] flex justify-between items-center shrink-0">
+        <h2 className="font-[var(--font-terminal)] text-lg font-semibold uppercase tracking-tighter">AGENTS</h2>
+        <button
+          onClick={() => setShowHierarchy((s) => !s)}
+          className={`border-2 border-black p-1 retro-press ${showHierarchy ? "bg-[#0055FF] text-white hover:bg-black" : "bg-white hover:bg-black hover:text-white"}`}
+          title={showHierarchy ? "Hide Hierarchy" : "Show Hierarchy"}
+        >
+          <span className="material-symbols-outlined text-base">{showHierarchy ? "unfold_less" : "account_tree"}</span>
+        </button>
+      </div>
+
+      {/* Scrollable content */}
+      <div
+        className="flex-1 overflow-y-auto"
+        style={{ backgroundImage: "radial-gradient(#d9d9e6 2px, transparent 2px)", backgroundSize: "16px 16px" }}
+      >
+        {/* Game Director — always at top */}
+        <div className="p-4 pb-2">
+          <button
+            onClick={() => onSelectSession("game-director")}
+            className={`w-full flex items-center gap-3 p-3 border-2 border-black transition-colors ${
+              currentSession === "game-director"
+                ? "bg-[#0055FF] text-white shadow-[4px_4px_0_0_rgba(0,0,0,1)]"
+                : "bg-white hover:bg-[#e7e7f5]"
+            }`}
+          >
+            <div className={`w-10 h-10 border-2 border-black flex items-center justify-center shrink-0 ${
+              currentSession === "game-director" ? "bg-black text-white" : "bg-[#0055FF] text-white"
+            }`}>
+              <span className="material-symbols-outlined">stadia_controller</span>
+            </div>
+            <div className="text-left flex-1 min-w-0">
+              <div className="font-[var(--font-label)] text-xs font-bold uppercase">GAME_DIRECTOR</div>
+              <div className="font-[var(--font-terminal)] text-[10px] flex items-center gap-1">
+                <span className="w-1.5 h-1.5 bg-[#df2b31] border border-black inline-block animate-pulse" />
+                ORCHESTRATOR — ONLINE
+              </div>
+            </div>
+          </button>
+        </div>
+
+        {/* Agent Sessions */}
+        {agentSessions.length > 0 && (
+          <div className="px-4 pb-2">
+            <span className="font-[var(--font-label)] text-[10px] uppercase text-[#434656] tracking-widest block mb-2">
+              Sessions ({agentSessions.length})
+            </span>
+            <div className="space-y-1">
+              {agentSessions.map((session) => {
+                const icon = getAgentIcon(session.role);
+                const label = session.role.replace(/-/g, "_").toUpperCase();
+                const isSelected = currentSession === session.role;
+                const isDone = session.status === "done";
+
+                return (
+                  <button
+                    key={session.role}
+                    onClick={() => onSelectSession(session.role)}
+                    className={`w-full flex items-center gap-2 p-2 border-2 border-black transition-colors ${
+                      isSelected
+                        ? "bg-[#0055FF] text-white shadow-[2px_2px_0_0_rgba(0,0,0,1)]"
+                        : isDone
+                        ? "bg-white opacity-50 hover:opacity-80"
+                        : "bg-white hover:bg-[#e7e7f5]"
+                    }`}
+                  >
+                    <div className={`w-7 h-7 border-2 border-black flex items-center justify-center shrink-0 ${
+                      isSelected ? "bg-black text-white" : "bg-white text-black"
+                    }`}>
+                      <span className="material-symbols-outlined" style={{ fontSize: 14 }}>{icon}</span>
+                    </div>
+                    <div className="text-left flex-1 min-w-0">
+                      <div className="font-[var(--font-label)] text-[11px] font-bold uppercase truncate">{label}</div>
+                      {session.status === "active" && session.progress > 0 && (
+                        <div className="w-full h-1.5 border border-black bg-white mt-1">
+                          <div className="h-full bg-[#0055FF] transition-all duration-500" style={{ width: `${session.progress}%` }} />
+                        </div>
+                      )}
+                      {isDone && (
+                        <span className="font-[var(--font-terminal)] text-[9px] text-[#737688] uppercase">Complete</span>
+                      )}
+                    </div>
+                    <div className={`w-2 h-2 border border-black shrink-0 ${
+                      isDone ? "bg-[#737688]" : "bg-[#0055FF] animate-pulse"
+                    }`} />
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Hierarchy Tree (toggleable) */}
+        {showHierarchy && (
+          <div className="px-4 pb-8 border-t-2 border-black pt-3">
+            <span className="font-[var(--font-label)] text-[10px] uppercase text-[#434656] tracking-widest block mb-3">
+              Studio Hierarchy
+            </span>
+            {treeData.map((node) => (
+              <TreeNode key={node.role} node={node} activeRoles={activeRoles} />
+            ))}
+          </div>
+        )}
+
+        {!showHierarchy && <div className="pb-8" />}
+      </div>
+
+      {/* Status Panel */}
+      <div className="border-t-2 border-black bg-[#f3f2ff] p-4 shrink-0">
+        {activeRoles.length > 0 ? (
+          <>
+            <div className="flex items-center gap-2 mb-2">
+              <span className="w-2 h-2 bg-[#0055FF] border border-black inline-block" />
+              <span className="font-[var(--font-label)] text-xs uppercase font-bold">
+                Active: {activeRoles.length}
+              </span>
+            </div>
+            <div className="w-full h-2 border-2 border-black bg-white">
+              <div className="h-full bg-[#0055FF] transition-all duration-500" style={{ width: `${totalProgress}%` }} />
+            </div>
+            <span className="font-[var(--font-terminal)] text-[10px] uppercase mt-1 block">
+              CPU_LOAD: {totalProgress}%
+            </span>
+          </>
+        ) : (
+          <div className="flex items-center gap-2">
+            <span className="w-2 h-2 bg-[#737688] border border-black inline-block" />
+            <span className="font-[var(--font-label)] text-xs uppercase text-[#737688]">No agents active</span>
+          </div>
+        )}
+      </div>
+    </aside>
+  );
+}
