@@ -6,25 +6,24 @@ dist/
 .next/
 out/
 
-# Environment variables (keep .env.example)
+# Environment variables
 .env
 .env.local
 .env.*.local
 
-# Workspace — game development files
-# NOTE: Some .claude files are committed as they serve as AI agent context
-workspace/.claude/agents/      # Agent system prompt .md files (committed)
-workspace/.claude/docs/         # Coordination rules, gates, context docs (committed)
-workspace/.claude/skills/       # Skill definitions (committed)
-workspace/.claude/hooks/       # Hook scripts (committed)
-workspace/design/gdd/          # Game Design Documents (gitignored)
-workspace/docs/architecture/   # Architecture Decision Records (gitignored)
-workspace/production/           # Session state & logs (gitignored)
-workspace/src/                 # Game source code (gitignored)
-# Keep workspace context files
+# Workspace — game development output (gitignored)
+# NOTE: Agent framework files (below) ARE committed
+workspace/
 !workspace/CLAUDE.md
 !workspace/.claude/agents/
 !workspace/.claude/docs/
+!workspace/.claude/skills/
+!workspace/.claude/hooks/
+
+# Claude Code artifacts
+.claude/
+claude/
+.cache/
 
 # Logs
 *.log
@@ -38,8 +37,6 @@ logs/
 *.swo
 .vscode/
 .idea/
-*.sublime-workspace
-*.sublime-settings
 
 # Test coverage
 coverage/
@@ -48,18 +45,14 @@ coverage/
 # Turbo cache
 .turbo/
 
-# Claude Code artifacts
-claude/
-.cache/
-
 # Misc
 *.bak
 *.tmp
 *.temp
 Thumbs.db
+postcss.config.mjs
 
 # Reference and dev files
 Claude-Code-Game-Studios-main/
 godot-mcp-pro-v1.11.0/
 plan.md
-postcss.config.mjs
