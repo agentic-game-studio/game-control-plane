@@ -1,36 +1,186 @@
 @import "tailwindcss";
 
-@theme {
-  --color-background: hsl(0 0% 100%);
-  --color-foreground: hsl(222.2 84% 4.9%);
-  --color-card: hsl(0 0% 100%);
-  --color-card-foreground: hsl(222.2 84% 4.9%);
-  --color-popover: hsl(0 0% 100%);
-  --color-popover-foreground: hsl(222.2 84% 4.9%);
-  --color-primary: hsl(221.2 83.2% 53.3%);
-  --color-primary-foreground: hsl(210 40% 98%);
-  --color-secondary: hsl(210 40% 96.1%);
-  --color-secondary-foreground: hsl(222.2 47.4% 11.2%);
-  --color-muted: hsl(210 40% 96.1%);
-  --color-muted-foreground: hsl(215.4 16.3% 46.9%);
-  --color-accent: hsl(210 40% 96.1%);
-  --color-accent-foreground: hsl(222.2 47.4% 11.2%);
-  --color-destructive: hsl(0 84.2% 60.2%);
-  --color-destructive-foreground: hsl(210 40% 98%);
-  --color-border: hsl(214.3 31.8% 91.4%);
-  --color-input: hsl(214.3 31.8% 91.4%);
-  --color-ring: hsl(221.2 83.2% 53.3%);
-  --radius-lg: 0.5rem;
-  --radius-md: 0.375rem;
-  --radius-sm: 0.25rem;
+@theme inline {
+  /* Clean Retro-Computing Color System */
+  --color-surface: #faf8ff;
+  --color-surface-dim: #d9d9e6;
+  --color-surface-bright: #faf8ff;
+  --color-surface-container-lowest: #ffffff;
+  --color-surface-container-low: #f3f2ff;
+  --color-surface-container: #ededfb;
+  --color-surface-container-high: #e7e7f5;
+  --color-surface-container-highest: #e1e1ef;
+  --color-surface-variant: #e1e1ef;
+  --color-on-surface: #191b25;
+  --color-on-surface-variant: #434656;
+  --color-inverse-surface: #2e303a;
+  --color-inverse-on-surface: #f0f0fd;
+  --color-outline: #737688;
+  --color-outline-variant: #c3c5d9;
+  --color-surface-tint: #004dea;
+  --color-primary: #0041c8;
+  --color-on-primary: #ffffff;
+  --color-primary-container: #0055ff;
+  --color-on-primary-container: #e3e6ff;
+  --color-inverse-primary: #b6c4ff;
+  --color-primary-fixed: #dce1ff;
+  --color-primary-fixed-dim: #b6c4ff;
+  --color-on-primary-fixed: #001551;
+  --color-on-primary-fixed-variant: #0039b3;
+  --color-secondary: #ba061b;
+  --color-on-secondary: #ffffff;
+  --color-secondary-container: #df2b31;
+  --color-on-secondary-container: #fffbff;
+  --color-secondary-fixed: #ffdad7;
+  --color-secondary-fixed-dim: #ffb3ad;
+  --color-on-secondary-fixed: #410004;
+  --color-on-secondary-fixed-variant: #930012;
+  --color-tertiary: #972500;
+  --color-on-tertiary: #ffffff;
+  --color-tertiary-container: #c13301;
+  --color-on-tertiary-container: #ffe1d9;
+  --color-tertiary-fixed: #ffdbd1;
+  --color-tertiary-fixed-dim: #ffb5a0;
+  --color-on-tertiary-fixed: #3b0900;
+  --color-on-tertiary-fixed-variant: #872100;
+  --color-error: #ba1a1a;
+  --color-on-error: #ffffff;
+  --color-error-container: #ffdad6;
+  --color-on-error-container: #93000a;
+  --color-background: #faf8ff;
+  --color-on-background: #191b25;
+
+  /* Spacing (8px grid system) */
+  --spacing-xs: 4px;
+  --spacing-sm: 8px;
+  --spacing-base: 8px;
+  --spacing-md: 16px;
+  --spacing-gutter: 24px;
+  --spacing-lg: 32px;
+  --spacing-xl: 64px;
+  --spacing-margin: 32px;
+
+  /* Typography - reference next/font CSS variables */
+  --font-terminal: var(--font-space-grotesk), "Space Grotesk", monospace;
+  --font-body: var(--font-inter), "Inter", sans-serif;
+  --font-headline: var(--font-space-grotesk), "Space Grotesk", sans-serif;
+  --font-label: var(--font-inter), "Inter", sans-serif;
+
+  /* Font sizes with line heights */
+  --font-size-headline-xl: 48px;
+  --font-size-headline-md: 24px;
+  --font-size-terminal: 16px;
+  --font-size-body-lg: 18px;
+  --font-size-body-md: 16px;
+  --font-size-label-sm: 12px;
+
+  /* Border radius - ALL SHARP (0px) */
+  --radius-sm: 0px;
+  --radius-md: 0px;
+  --radius-lg: 0px;
+  --radius-xl: 0px;
+  --radius-full: 9999px;
 }
 
+/* Global retro-computing styles */
 * {
-  border-color: var(--color-border);
+  border-radius: 0 !important;
 }
 
 body {
   background-color: var(--color-background);
-  color: var(--color-foreground);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  color: var(--color-on-background);
+  font-family: var(--font-body);
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+/* Material Symbols - outlined style */
+.material-symbols-outlined {
+  font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+}
+
+.material-symbols-outlined.fill {
+  font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+}
+
+/* Selection highlight */
+::selection {
+  background-color: var(--color-primary-container);
+  color: white;
+}
+
+/* Pixel art rendering */
+.pixel-art {
+  image-rendering: pixelated;
+}
+
+/* Custom scrollbar for terminal look */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #ffffff;
+  border-left: 2px solid #000;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #000;
+  border: 2px solid #ffffff;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #0055ff;
+}
+
+::-webkit-scrollbar-corner {
+  background: #ffffff;
+  border-left: 2px solid #000;
+  border-top: 2px solid #000;
+}
+
+/* Retro button press effect */
+.retro-press:active {
+  transform: translate(2px, 2px);
+}
+
+/* Terminal text styling */
+.terminal-text {
+  font-family: var(--font-terminal);
+  font-size: 16px;
+  line-height: 1.5;
+  letter-spacing: 0.05em;
+  font-weight: 400;
+}
+
+/* Striped progress bar pattern */
+.stripe-pattern {
+  background-image: repeating-linear-gradient(
+    45deg,
+    transparent,
+    transparent 4px,
+    rgba(0, 0, 0, 0.2) 4px,
+    rgba(0, 0, 0, 0.2) 8px
+  );
+}
+
+/* Typewriter cursor */
+.typewriter-cursor {
+  display: inline-block;
+  width: 1ch;
+  height: 1.2em;
+  background-color: #191b25;
+  vertical-align: text-bottom;
+}
+
+/* Blinking cursor */
+.blinking-cursor {
+  animation: blink 1s step-end infinite;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
 }
