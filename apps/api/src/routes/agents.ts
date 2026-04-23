@@ -2,6 +2,7 @@ import { Router } from "express";
 import type { Request, Response } from "express";
 import { agents } from "@game-studio/agents";
 import { broadcast } from "../services/websocket.js";
+import { getAgentSystemPrompt } from "../prompts/agent-prompt-loader.js";
 import type { AgentRole } from "@game-studio/types";
 
 export const agentsRouter: Router = Router();
@@ -20,6 +21,16 @@ agentsRouter.get("/:id", (req: Request, res: Response) => {
     return;
   }
   res.json({ success: true, data: agent });
+});
+
+// GET /agents/:id/prompt — get system prompt from .md file
+agentsRouter.get("/:id/prompt", async (req: Request, res: Response) => {
+  try {
+    const prompt = await getAgentSystemPrompt(req.params.id as string);
+    res.json({ success: true, data: { role: req.params.id as string, systemPrompt: prompt } });
+  } catch (err) {
+    res.status(404).json({ success: false, error: `Prompt not found for agent: ${req.params.id}` });
+  }
 });
 
 // POST /agents/spawn — spawn an agent in a session

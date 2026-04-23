@@ -9,6 +9,7 @@ import { skillsRouter } from "./routes/skills.js";
 import { teamsRouter } from "./routes/teams.js";
 import { gatesRouter } from "./routes/gates.js";
 import { designRouter } from "./routes/design.js";
+import { promptsRouter } from "./routes/prompts.js";
 import { errorHandler } from "./middleware/error-handler.js";
 import { authMiddleware } from "./middleware/auth.js";
 import { broadcast, wss, sseClients } from "./services/websocket.js";
@@ -36,6 +37,7 @@ app.use("/api/skills", skillsRouter);
 app.use("/api/teams", teamsRouter);
 app.use("/api/gates", gatesRouter);
 app.use("/api/design", designRouter);
+app.use("/api/prompts", promptsRouter);
 
 // Health check
 app.get("/health", (_req, res) => {

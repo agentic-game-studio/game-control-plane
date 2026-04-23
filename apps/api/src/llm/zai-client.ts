@@ -5,10 +5,11 @@
  * Key differences from the reference:
  * - Game studio tools (Read, Write, Edit, Glob, Grep, Bash, Task)
  * - Session-scoped tool execution
- * - No code graph (security-focused tools removed)
+ * - Agent prompts loaded from workspace/.claude/agents/*.md files
  */
 
 import { loadConfig } from "../config.js";
+import { getAgentSystemPrompt, loadAgentPrompts } from "../prompts/agent-prompt-loader.js";
 
 export interface LLMMessage {
   role: "system" | "user" | "assistant" | "tool";
@@ -52,6 +53,8 @@ export interface LLMRequest {
   maxTokens?: number;
   temperature?: number;
   systemPrompt?: string;
+  /** Agent role — automatically loads system prompt from workspace/.claude/agents/ */
+  agentRole?: string;
 }
 
 const MAX_RETRIES = 10;
@@ -152,6 +155,17 @@ export async function callZAI(request: LLMRequest): Promise<LLMResponse> {
   const config = loadConfig();
   const model = request.model ?? config.DEFAULT_MODEL;
 
+  // Load agent system prompt if agentRole is provided
+  let systemPrompt = request.systemPrompt ?? "";
+  if (request.agentRole) {
+    try {
+      const agentPrompt = await getAgentSystemPrompt(request.agentRole);
+      systemPrompt = systemPrompt ? `${agentPrompt}\n\n${systemPrompt}` : agentPrompt;
+    } catch {
+      // Fall back to provided systemPrompt or empty
+    }
+  }
+
   const messages = request.messages.map((m) => {
     if (Array.isArray(m.content)) {
       const toolResult = m.content[0] as ToolResultContent | undefined;
@@ -164,9 +178,10 @@ export async function callZAI(request: LLMRequest): Promise<LLMResponse> {
       }
     }
     if (m.role === "system") {
+      const existingSystem = typeof m.content === "string" ? m.content : JSON.stringify(m.content);
       return {
         role: "system" as const,
-        content: typeof m.content === "string" ? m.content : JSON.stringify(m.content),
+        content: systemPrompt ? `${systemPrompt}\n\n${existingSystem}` : existingSystem,
       };
     }
     return {
@@ -175,14 +190,9 @@ export async function callZAI(request: LLMRequest): Promise<LLMResponse> {
     };
   });
 
-  // Add system prompt if provided
-  if (request.systemPrompt) {
-    const existingSystem = messages.find((m) => m.role === "system");
-    if (existingSystem) {
-      existingSystem.content += `\n\n${request.systemPrompt}`;
-    } else {
-      messages.unshift({ role: "system", content: request.systemPrompt });
-    }
+  // Add system prompt if provided but no system message exists
+  if (systemPrompt && !messages.some((m) => m.role === "system")) {
+    messages.unshift({ role: "system", content: systemPrompt });
   }
 
   const body: Record<string, unknown> = {
@@ -253,7 +263,6 @@ export async function callLLMWithTools(
 ): Promise<LLMResponse> {
   const config = loadConfig();
   const maxTools = config.MAX_TOOL_CALLS;
-  const checkpointInterval = config.TOOL_CHECKPOINT_INTERVAL;
 
   let iteration = 0;
   let totalTools = 0;
@@ -390,3 +399,6 @@ export const GAME_STUDIO_TOOLS: LLMTool[] = [
     },
   },
 ];
+
+/** Pre-load agent prompts on module init */
+loadAgentPrompts().catch(console.error);
