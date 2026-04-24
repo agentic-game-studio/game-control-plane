@@ -276,26 +276,56 @@ export function useCommandRoom() {
 
   // Approve agent — called from decision buttons, does NOT auto-switch view
   const approveAgent = useCallback((role: string) => {
-    let progress = 15;
+    // 6-step progress: 10% -> 30% -> 50% -> 70% -> 90% -> 100%
+    const STEPS = [10, 30, 50, 70, 90, 100];
+    const STEP_LABELS = [
+      "Initializing task execution...",
+      "Analyzing requirements and dependencies...",
+      "Implementing core functionality...",
+      "Running validation checks...",
+      "Finalizing and testing...",
+      "Task completed successfully.",
+    ];
+    let stepIndex = 0;
 
-    setSessions((prev) => {
-      const next = new Map(prev);
-      const session = next.get(role);
-      if (!session || session.status !== "active") return prev;
-      next.set(role, {
-        ...session,
-        progress: 15,
-        messages: [...session.messages, {
-          id: uid(),
-          type: "progress" as const,
-          sender: role,
-          content: "Commencing work on the assigned task...",
-          timestamp: timestamp(),
-          progress: 15,
-        }],
+    const updateProgress = () => {
+      const progress = STEPS[stepIndex];
+      const isLastStep = stepIndex >= STEPS.length - 1;
+
+      setSessions((prev) => {
+        const next = new Map(prev);
+        const session = next.get(role);
+        if (!session) return prev;
+
+        next.set(role, {
+          ...session,
+          progress,
+          status: isLastStep ? "done" : "active",
+          messages: [...session.messages, {
+            id: uid(),
+            type: "progress" as const,
+            sender: role,
+            content: STEP_LABELS[stepIndex],
+            timestamp: timestamp(),
+            progress,
+          }],
+        });
+        return next;
       });
-      return next;
-    });
+
+      if (isLastStep) {
+        addSessionMessage("game-director", {
+          type: "navigate" as const,
+          sender: role,
+          content: "Task complete.",
+          navigate: { targetSession: "game-director", label: "Back to Game Director" },
+        });
+        return;
+      }
+
+      stepIndex++;
+      setTimeout(updateProgress, 1500);
+    };
 
     // Call API to approve
     apiFetch<{ invocationId: string; status: string }>("/api/chat/approve", {
@@ -306,49 +336,8 @@ export function useCommandRoom() {
       console.error("Failed to approve agent via API:", error);
     });
 
-    // Local progress simulation
-    const interval = setInterval(() => {
-      progress += Math.floor(Math.random() * 20 + 5);
-      if (progress >= 100) {
-        progress = 100;
-        clearInterval(interval);
-        setSessions((prev) => {
-          const next = new Map(prev);
-          const session = next.get(role);
-          if (session) {
-            next.set(role, {
-              ...session,
-              progress: 100,
-              status: "done",
-              messages: [...session.messages, {
-                id: uid(),
-                type: "system" as const,
-                sender: "SYSTEM",
-                content: "Task completed successfully.",
-                timestamp: timestamp(),
-              }],
-            });
-          }
-          return next;
-        });
-        // Notify Game Director
-        addSessionMessage("game-director", {
-          type: "agent",
-          sender: "game-director",
-          content: `${role.replace(/-/g, " ")} reports task complete.`,
-          showActions: false,
-        });
-      } else {
-        setSessions((prev) => {
-          const next = new Map(prev);
-          const session = next.get(role);
-          if (session) {
-            next.set(role, { ...session, progress });
-          }
-          return next;
-        });
-      }
-    }, 1500);
+    // Start the step-based workflow
+    setTimeout(updateProgress, 500);
   }, [addSessionMessage]);
 
   const executeCommand = useCallback((input: string) => {
