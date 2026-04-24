@@ -159,6 +159,67 @@ function UserMessage({ msg }: { msg: ChatMessage }) {
   );
 }
 
+function DiffMessage({ msg }: { msg: ChatMessage }) {
+  if (!msg.diffBlocks?.length) return null;
+
+  return (
+    <div className="my-4 px-8">
+      <div className="border-2 border-black bg-[#1e1e1e] shadow-[4px_4px_0_0_rgba(0,0,0,1)]">
+        <div className="bg-[#2d2d2d] border-b border-[#404040] px-4 py-2 flex items-center gap-2">
+          <span className="material-symbols-outlined text-sm text-[#a0a0a0]">description</span>
+          <span className="font-[var(--font-terminal)] text-xs text-[#a0a0a0] uppercase">
+            {msg.diffBlocks.length} file(s) changed
+          </span>
+        </div>
+        {msg.diffBlocks.map((block, bi) => (
+          <div key={bi} className="border-b border-[#404040] last:border-b-0">
+            <div className="bg-[#2d2d2d] px-4 py-1 text-[#e0e0e0] font-[var(--font-terminal)] text-xs border-b border-[#404040]">
+              {block.filePath}
+            </div>
+            {block.hunks.map((hunk, hi) => (
+              <div key={hi} className="font-mono text-xs">
+                {hunk.lines.map((line, li) => (
+                  <div
+                    key={li}
+                    className={`px-4 py-0.5 flex ${
+                      hunk.type === "add"
+                        ? "bg-[#1c3a1c] text-[#7ec67e]"
+                        : hunk.type === "remove"
+                          ? "bg-[#3a1c1c] text-[#e06c75]"
+                          : "bg-transparent text-[#a0a0a0]"
+                    }`}
+                  >
+                    <span className="w-12 text-right pr-4 text-[#606060] select-none">
+                      {hunk.lineNum ? hunk.lineNum + li : ""}
+                    </span>
+                    <span className="w-6 text-right pr-2 select-none">
+                      {hunk.type === "add" ? "+" : hunk.type === "remove" ? "-" : " "}
+                    </span>
+                    <span>{line}</span>
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function NavigateMessage({ msg }: { msg: ChatMessage }) {
+  if (!msg.navigate) return null;
+
+  return (
+    <div className="flex justify-center my-4 px-8">
+      <button className="border-2 border-[#0055FF] bg-white px-6 py-3 font-[var(--font-label)] text-xs font-bold uppercase text-[#0055FF] hover:bg-[#0055FF] hover:text-white retro-press flex items-center gap-3 shadow-[2px_2px_0_0_rgba(0,85,255,1)] transition-colors">
+        <span className="material-symbols-outlined text-sm">arrow_forward</span>
+        {msg.navigate.label}
+      </button>
+    </div>
+  );
+}
+
 export default function ChatThread({ messages, threadId, threadTitle, currentSession, onDecision }: ChatThreadProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -206,6 +267,10 @@ export default function ChatThread({ messages, threadId, threadTitle, currentSes
               return <UserMessage key={msg.id} msg={msg} />;
             case "progress":
               return <AgentMessage key={msg.id} msg={msg} onDecision={onDecision} />;
+            case "diff":
+              return <DiffMessage key={msg.id} msg={msg} />;
+            case "navigate":
+              return <NavigateMessage key={msg.id} msg={msg} />;
             default:
               return null;
           }

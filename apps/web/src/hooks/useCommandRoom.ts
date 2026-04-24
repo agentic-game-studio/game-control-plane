@@ -5,15 +5,32 @@ import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "./useWebSocket";
 import type { WSEvent } from "@game-studio/types";
 
+export interface DiffBlock {
+  filePath: string;
+  hunks: { lines: string[]; type: "add" | "remove" | "context"; lineNum?: number }[];
+}
+
+export interface ToolCall {
+  tool: string;
+  status: "pending" | "success" | "error";
+  input?: string;
+  output?: string;
+  duration?: number;
+}
+
 export interface ChatMessage {
   id: string;
-  type: "system" | "agent" | "user" | "progress" | "welcome";
+  type: "system" | "agent" | "user" | "progress" | "welcome" | "diff" | "navigate";
   sender: string;
   content: string;
   timestamp: string;
   showActions?: boolean;
   progress?: number;
   codeBlock?: string;
+  diffBlocks?: DiffBlock[];
+  toolCalls?: ToolCall[];
+  thinking?: string;
+  navigate?: { targetSession: string; label: string };
 }
 
 export interface AgentSession {
@@ -394,6 +411,32 @@ export function useCommandRoom() {
         type: "system",
         sender: "SYSTEM",
         content: `${role.toUpperCase()} completed task and despawned.`,
+      });
+      return;
+    }
+
+    // /clear - clear chat history
+    if (lower === "/clear" || lower === "clear") {
+      addSessionMessage("game-director", {
+        type: "system",
+        sender: "SYSTEM",
+        content: "Chat history cleared.",
+      });
+      return;
+    }
+
+    // /help - show help
+    if (lower === "/help" || lower === "help") {
+      addSessionMessage("game-director", {
+        type: "agent",
+        sender: "game-director",
+        content: `Available commands:
+• spawn <agent> — Bring an agent online
+• approve — Approve last agent's request
+• done <agent> — Complete agent task
+• /clear — Clear chat history
+• /cost — Show estimated costs`,
+        showActions: false,
       });
       return;
     }

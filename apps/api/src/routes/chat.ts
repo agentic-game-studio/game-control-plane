@@ -219,3 +219,33 @@ chatRouter.post("/approve", (req: Request, res: Response) => {
 
   res.json({ success: true, data: { invocationId, status: "approved" } });
 });
+
+// POST /api/chat/diff - Save or retrieve diffs
+chatRouter.post("/diff", (req: Request, res: Response) => {
+  const { sessionId, diffBlocks } = req.body as { sessionId?: string; diffBlocks?: unknown[] };
+
+  // Store diff for the session
+  const diffId = `diff-${Date.now()}`;
+
+  broadcastEvent({
+    type: "chat:message",
+    sessionId: sessionId ?? "game-director",
+    message: {
+      id: diffId,
+      type: "diff" as const,
+      sender: "SYSTEM",
+      content: "Diff generated",
+      timestamp: new Date().toISOString(),
+      diffBlocks: diffBlocks as import("@game-studio/types").DiffBlock[],
+    },
+  } as WSEvent);
+
+  res.json({ success: true, data: { diffId, diffBlocks } });
+});
+
+// GET /api/chat/diff/:id - Get diff by ID
+chatRouter.get("/diff/:id", (req: Request, res: Response) => {
+  const id = String(req.params.id);
+  // Return the diff (in real implementation, would fetch from store)
+  res.json({ success: true, data: { id, diffBlocks: [] } });
+});
