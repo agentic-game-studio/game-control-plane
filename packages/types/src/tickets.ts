@@ -14,6 +14,31 @@ export interface Ticket {
   updatedAt: string;
 }
 
+export interface CreateTicketRequest {
+  title: string;
+  description?: string;
+  area: string;
+  subarea: string;
+  credits?: number;
+  estimateHours?: number;
+  status?: TicketStatus;
+}
+
+export interface UpdateTicketRequest {
+  title?: string;
+  description?: string;
+  area?: string;
+  subarea?: string;
+  credits?: number;
+  estimateHours?: number;
+  status?: TicketStatus;
+  assignee?: string;
+}
+
+export interface MoveTicketRequest {
+  status: TicketStatus;
+}
+
 export interface TicketsColumn {
   id: TicketStatus;
   label: string;

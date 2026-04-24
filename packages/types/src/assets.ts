@@ -12,6 +12,22 @@ export interface GameAsset {
   updatedAt: string;
 }
 
+export interface CreateAssetRequest {
+  filename: string;
+  type: AssetType;
+  category: AssetCategory;
+  sizeBytes?: number;
+  tags?: string[];
+}
+
+export interface UpdateAssetRequest {
+  filename?: string;
+  type?: AssetType;
+  category?: AssetCategory;
+  sizeBytes?: number;
+  tags?: string[];
+}
+
 export interface ArtBibleConfig {
   baseTextureRes: number;
   maxPolycount: number;

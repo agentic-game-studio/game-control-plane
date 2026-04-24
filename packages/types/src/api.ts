@@ -3,9 +3,11 @@ import type { SessionState, SessionConfig } from "./session.js";
 import type { GateResult, GateStatus } from "./gate.js";
 import type { ReviewMode } from "./gate.js";
 import type { DocumentCategory, DocumentEntry, DocumentDetail, CategoryMeta, GraphData } from "./document.js";
-import type { DashboardSummary } from "./dashboard.js";
-import type { TicketStatus } from "./tickets.js";
+import type { Project } from "./dashboard.js";
+import type { Ticket, TicketStatus } from "./tickets.js";
 import type { GameAsset } from "./assets.js";
+import type { SettingsConfig } from "./settings.js";
+import type { ChatSession, ChatMessage } from "./chat.js";
 
 /** WebSocket event types for real-time frontend updates */
 export type WSEvent =
@@ -19,9 +21,20 @@ export type WSEvent =
   | { type: "log:entry"; sessionId: string; level: string; message: string; timestamp: string }
   | { type: "document:created"; documentId: string; category: DocumentCategory; title: string }
   | { type: "document:updated"; documentId: string; category: DocumentCategory; title: string }
-  | { type: "dashboard:updated"; summary: DashboardSummary }
-  | { type: "ticket:updated"; ticketId: string; status: TicketStatus }
+  | { type: "project:created"; project: Project }
+  | { type: "project:updated"; project: Project }
+  | { type: "project:deleted"; projectId: string }
+  | { type: "ticket:created"; ticket: Ticket }
+  | { type: "ticket:updated"; ticket: Ticket }
+  | { type: "ticket:deleted"; ticketId: string }
+  | { type: "ticket:moved"; ticket: Ticket; fromColumn: string; toColumn: string }
   | { type: "asset:created"; asset: GameAsset }
+  | { type: "asset:updated"; asset: GameAsset }
+  | { type: "asset:deleted"; assetId: string }
+  | { type: "settings:updated"; settings: SettingsConfig }
+  | { type: "chat:message"; sessionId: string; message: ChatMessage }
+  | { type: "chat:session:created"; session: ChatSession }
+  | { type: "chat:session:deleted"; sessionId: string }
   | { type: "credits:updated"; credits: { current: number; max: number } }
   | { type: "error"; error: string; sessionId?: string };
 

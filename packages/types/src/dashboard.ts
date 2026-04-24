@@ -12,6 +12,20 @@ export interface Project {
   updatedAt: string;
 }
 
+export interface CreateProjectRequest {
+  name: string;
+  description?: string;
+  engine: ProjectEngine;
+}
+
+export interface UpdateProjectRequest {
+  name?: string;
+  description?: string;
+  engine?: ProjectEngine;
+  progress?: number;
+  status?: ProjectStatus;
+}
+
 export interface CreditSummary {
   current: number;
   max: number;

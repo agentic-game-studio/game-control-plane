@@ -17,6 +17,15 @@ export interface ChatMessage {
   codeBlock?: CodeBlock;
 }
 
+export interface CreateMessageRequest {
+  type: MessageType;
+  sender: string;
+  content: string;
+  showActions?: boolean;
+  progress?: number;
+  codeBlock?: CodeBlock;
+}
+
 export interface ChatSession {
   id: string;
   role: string;
@@ -24,6 +33,10 @@ export interface ChatSession {
   status: ChatSessionStatus;
   progress: number;
   spawnedAt: string;
+}
+
+export interface CreateChatSessionRequest {
+  role?: string;
 }
 
 export interface ChatState {
