@@ -1,6 +1,80 @@
+"use client";
+
+import { useEffect, useState, useCallback } from "react";
+import { apiFetch } from "@/lib/api";
+import type { SettingsConfig } from "@game-studio/types";
+import { DataLoader } from "@/components/DataLoader";
+
+const engines = ["Unity", "Unreal", "Godot"] as const;
+const models = [
+  "Studio XYZ Optimized (Fast)",
+  "Studio XYZ Ultra (High-Res)",
+  "Standard Legacy Model",
+];
+
 export default function SettingsPage() {
+  const [settings, setSettings] = useState<SettingsConfig | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [retryCount, setRetryCount] = useState(0);
+
+  const fetchData = useCallback(async (isInitial = false) => {
+    if (isInitial) setLoading(true);
+    setError(null);
+    try {
+      const settingsData = await apiFetch<SettingsConfig>("/api/settings");
+      setSettings(settingsData);
+      setError(null);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to load settings";
+      setError(message);
+      console.error("Failed to fetch settings:", err);
+    } finally {
+      if (isInitial) setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchData(true);
+  }, [fetchData, retryCount]);
+
+  const handleRetry = () => {
+    setRetryCount((c) => c + 1);
+  };
+
+  const handleSave = async () => {
+    if (!settings) return;
+    setSaving(true);
+    try {
+      await apiFetch<SettingsConfig>("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(settings),
+      });
+    } catch (error) {
+      console.error("Failed to save settings:", error);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleReset = async () => {
+    if (!confirm("Reset all settings to default? This cannot be undone.")) return;
+    setSaving(true);
+    try {
+      const data = await apiFetch<SettingsConfig>("/api/settings/reset", { method: "POST" });
+      setSettings(data);
+    } catch (error) {
+      console.error("Failed to reset settings:", error);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
-    <div className="p-[var(--spacing-margin)] min-h-full bg-background">
+    <DataLoader loading={loading} error={error} onRetry={handleRetry}>
+      <div className="p-[var(--spacing-margin)] min-h-full bg-background">
       {/* Page Header */}
       <header className="mb-[var(--spacing-lg)] border-b-4 border-black pb-[var(--spacing-sm)]">
         <h1 className="font-[var(--font-headline)] text-5xl font-bold text-on-background uppercase tracking-tight leading-none">
@@ -36,7 +110,7 @@ export default function SettingsPage() {
                   className="font-[var(--font-headline)] font-black block tracking-tighter leading-none"
                   style={{ fontSize: "80px", textShadow: "0 0 10px rgba(0,85,255,0.5)" }}
                 >
-                  84,200
+                  {settings?.creditBalance.current.toLocaleString() ?? "—"}
                 </span>
               </div>
             </div>
@@ -47,8 +121,12 @@ export default function SettingsPage() {
               Insert Coin
             </button>
             <div className="w-full max-w-[400px] border-t-2 border-black pt-[var(--spacing-md)] mt-[var(--spacing-sm)] flex justify-between font-[var(--font-terminal)] text-sm">
-              <span className="uppercase">Burn Rate: 120/hr</span>
-              <span className="uppercase">Est. Depletion: 28 Days</span>
+              <span className="uppercase">
+                Burn Rate: {settings?.creditBalance.burnRatePerHour ?? "—"}/hr
+              </span>
+              <span className="uppercase">
+                Est. Depletion: {settings?.creditBalance.estimatedDepletionDays ?? "—"} Days
+              </span>
             </div>
           </div>
         </section>
@@ -68,13 +146,14 @@ export default function SettingsPage() {
                 Target Engine
               </label>
               <div className="flex border-2 border-black">
-                {["Unity", "Unreal", "Godot"].map((engine, i) => (
+                {engines.map((engine, i) => (
                   <label
                     key={engine}
                     className="flex-1 text-center border-r-2 border-black last:border-r-0 cursor-pointer group relative"
                   >
                     <input
-                      defaultChecked={i === 0}
+                      checked={settings?.targetEngine === engine}
+                      onChange={() => setSettings((prev) => prev ? { ...prev, targetEngine: engine } : null)}
                       className="peer sr-only"
                       name="engine"
                       type="radio"
@@ -93,10 +172,14 @@ export default function SettingsPage() {
                 Asset Generation Model
               </label>
               <div className="relative w-full">
-                <select className="w-full appearance-none border-2 border-black bg-white p-[var(--spacing-sm)] px-[var(--spacing-md)] font-[var(--font-terminal)] text-base uppercase focus:outline-none focus:ring-0 focus:bg-surface-container hover:bg-surface-container cursor-pointer">
-                  <option>Studio XYZ Optimized (Fast)</option>
-                  <option>Studio XYZ Ultra (High-Res)</option>
-                  <option>Standard Legacy Model</option>
+                <select
+                  value={settings?.assetModel ?? ""}
+                  onChange={(e) => setSettings((prev) => prev ? { ...prev, assetModel: e.target.value } : null)}
+                  className="w-full appearance-none border-2 border-black bg-white p-[var(--spacing-sm)] px-[var(--spacing-md)] font-[var(--font-terminal)] text-base uppercase focus:outline-none focus:ring-0 focus:bg-surface-container hover:bg-surface-container cursor-pointer"
+                >
+                  {models.map((model) => (
+                    <option key={model} value={model}>{model}</option>
+                  ))}
                 </select>
                 <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-[var(--spacing-md)] border-l-2 border-black bg-black text-white">
                   <span className="material-symbols-outlined">expand_more</span>
@@ -121,7 +204,8 @@ export default function SettingsPage() {
                     className="border-2 border-black bg-white p-[var(--spacing-sm)] font-[var(--font-terminal)] text-base focus:outline-none focus:bg-primary-fixed w-full"
                     placeholder="ENTER KEY..."
                     type="password"
-                    defaultValue="************************"
+                    value={settings?.externalApiKey ?? ""}
+                    onChange={(e) => setSettings((prev) => prev ? { ...prev, externalApiKey: e.target.value } : null)}
                   />
                 </div>
                 <div className="flex flex-col gap-[var(--spacing-xs)]">
@@ -131,17 +215,32 @@ export default function SettingsPage() {
                   <input
                     className="border-2 border-black bg-white p-[var(--spacing-sm)] font-[var(--font-terminal)] text-base focus:outline-none focus:bg-primary-fixed w-full"
                     type="text"
-                    defaultValue="https://api.studio-xyz.com/v1/hook"
+                    value={settings?.webhookUrl ?? ""}
+                    onChange={(e) => setSettings((prev) => prev ? { ...prev, webhookUrl: e.target.value } : null)}
                   />
                 </div>
-                <button className="border-2 border-black bg-white text-black font-[var(--font-label)] text-xs font-bold uppercase px-[var(--spacing-md)] py-[var(--spacing-sm)] hover:bg-black hover:text-white retro-press transition-all self-end mt-[var(--spacing-sm)]">
-                  Save Config
-                </button>
+                <div className="flex gap-2 self-end mt-[var(--spacing-sm)]">
+                  <button
+                    onClick={handleReset}
+                    disabled={saving}
+                    className="border-2 border-black bg-surface text-black font-[var(--font-label)] text-xs font-bold uppercase px-[var(--spacing-md)] py-[var(--spacing-sm)] hover:bg-black hover:text-white retro-press transition-all disabled:opacity-50"
+                  >
+                    Reset
+                  </button>
+                  <button
+                    onClick={handleSave}
+                    disabled={saving}
+                    className="border-2 border-black bg-white text-black font-[var(--font-label)] text-xs font-bold uppercase px-[var(--spacing-md)] py-[var(--spacing-sm)] hover:bg-black hover:text-white retro-press transition-all disabled:opacity-50"
+                  >
+                    {saving ? "Saving..." : "Save Config"}
+                  </button>
+                </div>
               </div>
             </div>
           </div>
         </section>
       </div>
-    </div>
+      </div>
+    </DataLoader>
   );
 }

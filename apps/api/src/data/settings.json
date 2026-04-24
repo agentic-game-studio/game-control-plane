@@ -1,0 +1,11 @@
+{
+  "targetEngine": "Unity",
+  "assetModel": "Studio XYZ Optimized (Fast)",
+  "externalApiKey": "",
+  "webhookUrl": "",
+  "creditBalance": {
+    "current": 50000,
+    "burnRatePerHour": 120,
+    "estimatedDepletionDays": 30
+  }
+}

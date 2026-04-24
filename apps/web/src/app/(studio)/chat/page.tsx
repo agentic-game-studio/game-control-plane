@@ -16,6 +16,7 @@ export default function ChatPage() {
     executeCommand,
     selectSession,
     approveAgent,
+    initialized,
   } = useCommandRoom();
 
   const handleDecision = (action: string, sender: string) => {
@@ -23,6 +24,19 @@ export default function ChatPage() {
       approveAgent(sender);
     }
   };
+
+  if (!initialized) {
+    return (
+      <div className="flex h-full items-center justify-center bg-surface">
+        <div className="text-center">
+          <div className="w-12 h-12 border-4 border-black border-t-primary animate-spin mx-auto mb-4" />
+          <span className="font-[var(--font-terminal)] text-sm uppercase text-outline">
+            Initializing Board Room...
+          </span>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-full overflow-hidden relative">

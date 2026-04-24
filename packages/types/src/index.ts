@@ -8,3 +8,8 @@ export * from "./design.js";
 export * from "./sprint.js";
 export * from "./api.js";
 export * from "./document.js";
+export * from "./dashboard.js";
+export * from "./chat.js";
+export * from "./tickets.js";
+export * from "./assets.js";
+export * from "./settings.js";

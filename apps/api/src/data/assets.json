@@ -1,0 +1,171 @@
+{
+  "assets": [
+    {
+      "id": "asset-001",
+      "filename": "Iron_Sword_Tier1.obj",
+      "type": "3d",
+      "category": "weapon",
+      "sizeBytes": 1258291,
+      "tags": [
+        "weapon",
+        "melee",
+        "sword",
+        "low-poly"
+      ],
+      "createdAt": "2026-04-10T10:00:00Z",
+      "updatedAt": "2026-04-10T10:00:00Z"
+    },
+    {
+      "id": "asset-002",
+      "filename": "Terminal_Sprite_Sheet.png",
+      "type": "2d",
+      "category": "env",
+      "sizeBytes": 262144,
+      "tags": [
+        "sprite",
+        "environment",
+        "computer",
+        "retro"
+      ],
+      "createdAt": "2026-04-12T14:00:00Z",
+      "updatedAt": "2026-04-12T14:00:00Z"
+    },
+    {
+      "id": "asset-003",
+      "filename": "Fireball_Impact.png",
+      "type": "vfx",
+      "category": "tex",
+      "sizeBytes": 524288,
+      "tags": [
+        "vfx",
+        "fire",
+        "impact",
+        "texture"
+      ],
+      "createdAt": "2026-04-14T09:00:00Z",
+      "updatedAt": "2026-04-14T09:00:00Z"
+    },
+    {
+      "id": "asset-004",
+      "filename": "Player_Character.fbx",
+      "type": "3d",
+      "category": "character",
+      "sizeBytes": 2097152,
+      "tags": [
+        "character",
+        "player",
+        "rigged"
+      ],
+      "createdAt": "2026-04-08T11:00:00Z",
+      "updatedAt": "2026-04-18T15:00:00Z"
+    },
+    {
+      "id": "asset-005",
+      "filename": "Health_Potion.obj",
+      "type": "3d",
+      "category": "prop",
+      "sizeBytes": 512000,
+      "tags": [
+        "prop",
+        "item",
+        "consumable",
+        "low-poly"
+      ],
+      "createdAt": "2026-04-15T16:00:00Z",
+      "updatedAt": "2026-04-15T16:00:00Z"
+    },
+    {
+      "id": "asset-006",
+      "filename": "UI_Button_Set.png",
+      "type": "2d",
+      "category": "ui",
+      "sizeBytes": 786432,
+      "tags": [
+        "ui",
+        "buttons",
+        "interface",
+        "brutalist"
+      ],
+      "createdAt": "2026-04-16T10:00:00Z",
+      "updatedAt": "2026-04-20T12:00:00Z"
+    },
+    {
+      "id": "asset-007",
+      "filename": "Stone_Wall_Normal.png",
+      "type": "texture",
+      "category": "tex",
+      "sizeBytes": 1048576,
+      "tags": [
+        "texture",
+        "normal-map",
+        "stone",
+        "wall"
+      ],
+      "createdAt": "2026-04-17T08:00:00Z",
+      "updatedAt": "2026-04-17T08:00:00Z"
+    },
+    {
+      "id": "asset-008",
+      "filename": "Metal_Door.fbx",
+      "type": "3d",
+      "category": "prop",
+      "sizeBytes": 768000,
+      "tags": [
+        "prop",
+        "door",
+        "metal",
+        "environment"
+      ],
+      "createdAt": "2026-04-18T13:00:00Z",
+      "updatedAt": "2026-04-18T13:00:00Z"
+    },
+    {
+      "id": "asset-009",
+      "filename": "Explosion_SFX.wav",
+      "type": "audio",
+      "category": "sfx",
+      "sizeBytes": 102400,
+      "tags": [
+        "audio",
+        "sfx",
+        "explosion",
+        "impact"
+      ],
+      "createdAt": "2026-04-19T11:00:00Z",
+      "updatedAt": "2026-04-19T11:00:00Z"
+    },
+    {
+      "id": "asset-010",
+      "filename": "Ambient_Dungeon_Music.mp3",
+      "type": "audio",
+      "category": "music",
+      "sizeBytes": 5242880,
+      "tags": [
+        "audio",
+        "music",
+        "ambient",
+        "dungeon"
+      ],
+      "createdAt": "2026-04-20T15:00:00Z",
+      "updatedAt": "2026-04-20T15:00:00Z"
+    },
+    {
+      "id": "asset-1777009878898",
+      "filename": "New_Model.obj",
+      "type": "3d",
+      "category": "prop",
+      "sizeBytes": 500000,
+      "tags": [],
+      "createdAt": "2026-04-24T05:51:18.898Z",
+      "updatedAt": "2026-04-24T05:51:18.898Z"
+    }
+  ],
+  "artBible": {
+    "baseTextureRes": 256,
+    "maxPolycount": 1500,
+    "enforcePalette": true,
+    "strictOrthographic": false,
+    "snapToGrid": true,
+    "gridSize": 8
+  }
+}

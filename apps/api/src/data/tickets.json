@@ -1,0 +1,145 @@
+{
+  "sprint": "Sprint_04",
+  "milestone": "Alpha_Milestone",
+  "columns": [
+    {
+      "id": "available",
+      "label": "Available",
+      "tickets": [
+        {
+          "id": "ticket-002",
+          "title": "Model Terminal Props",
+          "description": "Create low-poly computer terminal assets with sharp edges and emission maps for screens.",
+          "area": "ENV_ART",
+          "subarea": "SECTOR_7",
+          "credits": 300,
+          "estimateHours": 8,
+          "status": "available",
+          "createdAt": "2026-04-19T14:00:00Z",
+          "updatedAt": "2026-04-19T14:00:00Z"
+        },
+        {
+          "id": "ticket-003",
+          "title": "Implement Particle System",
+          "description": "Create reusable particle effects for explosions, fire, and smoke.",
+          "area": "VFX",
+          "subarea": "SYSTEMS",
+          "credits": 400,
+          "estimateHours": 12,
+          "status": "available",
+          "createdAt": "2026-04-21T09:00:00Z",
+          "updatedAt": "2026-04-21T09:00:00Z"
+        },
+        {
+          "id": "ticket-1777009745224",
+          "title": "New Feature",
+          "description": "",
+          "area": "UI_CORE",
+          "subarea": "FEATURES",
+          "credits": 200,
+          "status": "available",
+          "createdAt": "2026-04-24T05:49:05.224Z",
+          "updatedAt": "2026-04-24T05:49:05.224Z"
+        }
+      ]
+    },
+    {
+      "id": "in_progress",
+      "label": "Processing",
+      "tickets": [
+        {
+          "id": "ticket-004",
+          "title": "Optimize Sync Loop",
+          "description": "Refactor the state synchronization loop to reduce bandwidth overhead by 15%.",
+          "area": "SYS_ENG",
+          "subarea": "NET_CODE",
+          "credits": 500,
+          "status": "in_progress",
+          "assignee": "Agent_03",
+          "createdAt": "2026-04-18T11:00:00Z",
+          "updatedAt": "2026-04-23T08:00:00Z"
+        },
+        {
+          "id": "ticket-005",
+          "title": "Character Animation Rig",
+          "description": "Set up IK rig for humanoid characters with proper bone structure.",
+          "area": "CHAR_ART",
+          "subarea": "RIGGING",
+          "credits": 350,
+          "status": "in_progress",
+          "assignee": "Agent_05",
+          "createdAt": "2026-04-17T15:00:00Z",
+          "updatedAt": "2026-04-22T16:00:00Z"
+        }
+      ]
+    },
+    {
+      "id": "qa",
+      "label": "Verify",
+      "tickets": [
+        {
+          "id": "ticket-006",
+          "title": "Plasma Rifle Decals",
+          "description": "Implement scorch mark decals for plasma projectile impacts on metal surfaces.",
+          "area": "VFX",
+          "subarea": "WEAPONS",
+          "credits": 100,
+          "status": "qa",
+          "assignee": "Agent_02",
+          "createdAt": "2026-04-15T10:00:00Z",
+          "updatedAt": "2026-04-21T14:00:00Z"
+        }
+      ]
+    },
+    {
+      "id": "completed",
+      "label": "Archived",
+      "tickets": [
+        {
+          "id": "ticket-007",
+          "title": "Server Room Hum",
+          "description": "Mix and master looping drone sound for the mainframe level.",
+          "area": "AUDIO",
+          "subarea": "AMBIENCE",
+          "credits": 50,
+          "status": "completed",
+          "createdAt": "2026-04-10T09:00:00Z",
+          "updatedAt": "2026-04-16T11:00:00Z"
+        },
+        {
+          "id": "ticket-008",
+          "title": "Main Menu UI",
+          "description": "Design and implement the main menu screen with start button.",
+          "area": "UI_CORE",
+          "subarea": "MENUS",
+          "credits": 200,
+          "status": "completed",
+          "createdAt": "2026-04-08T10:00:00Z",
+          "updatedAt": "2026-04-14T15:00:00Z"
+        },
+        {
+          "id": "ticket-009",
+          "title": "Player Controller",
+          "description": "Implement basic player movement and collision detection.",
+          "area": "GAMEPLAY",
+          "subarea": "PLAYER",
+          "credits": 300,
+          "status": "completed",
+          "createdAt": "2026-04-05T08:00:00Z",
+          "updatedAt": "2026-04-12T16:00:00Z"
+        },
+        {
+          "id": "ticket-010",
+          "title": "Environment Lighting",
+          "description": "Set up dynamic lighting system for outdoor scenes.",
+          "area": "ENV_ART",
+          "subarea": "LIGHTING",
+          "credits": 250,
+          "status": "completed",
+          "createdAt": "2026-04-03T11:00:00Z",
+          "updatedAt": "2026-04-10T09:00:00Z"
+        }
+      ]
+    }
+  ]
+}
