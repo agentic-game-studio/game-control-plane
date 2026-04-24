@@ -22,7 +22,14 @@ export default function ChatPage() {
   const handleDecision = (action: string, sender: string) => {
     if (action === "approve") {
       approveAgent(sender);
+    } else if (action === "navigate") {
+      // Navigate back to game-director or specified session
+      selectSession(sender === "game-director" ? "game-director" : sender);
     }
+  };
+
+  const handleNavigate = (targetSession: string) => {
+    selectSession(targetSession);
   };
 
   if (!initialized) {
@@ -52,6 +59,7 @@ export default function ChatPage() {
         threadTitle={threadTitle}
         currentSession={currentSession}
         onDecision={handleDecision}
+        onNavigate={handleNavigate}
       />
       <CommandInput onSend={executeCommand} />
     </div>

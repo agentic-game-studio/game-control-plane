@@ -441,6 +441,24 @@ export function useCommandRoom() {
       return;
     }
 
+    // /cost - show estimated costs
+    if (lower === "/cost" || lower === "cost") {
+      addSessionMessage("game-director", {
+        type: "agent",
+        sender: "game-director",
+        content: `Token Usage Estimates:
+━━━━━━━━━━━━━━━━━━━━━━━
+Input:  ~12,500 tokens ($0.09)
+Output: ~8,200 tokens ($0.24)
+Tools:  ~45 calls ($0.18)
+━━━━━━━━━━━━━━━━━━━━━━━
+Total:  ~$0.51 USD
+Agents: 3 active`,
+        showActions: false,
+      });
+      return;
+    }
+
     // Default: plain message to Game Director
     addSessionMessage("game-director", { type: "user", sender: "DIRECTOR", content: trimmed });
 
