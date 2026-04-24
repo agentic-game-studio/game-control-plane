@@ -35,7 +35,6 @@ export type WSEvent =
   | { type: "chat:message"; sessionId: string; message: ChatMessage }
   | { type: "chat:session:created"; session: ChatSession }
   | { type: "chat:session:deleted"; sessionId: string }
-  | { type: "credits:updated"; credits: { current: number; max: number } }
   | { type: "error"; error: string; sessionId?: string };
 
 /** API request/response types */

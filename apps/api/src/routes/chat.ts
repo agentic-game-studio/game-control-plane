@@ -19,7 +19,7 @@ const chatStore: ChatState = {
   sessions: {
     "game-director": {
       id: "game-director",
-      role: "creative-director",
+      role: "game-director",
       messages: [
         {
           id: "msg-welcome",
@@ -160,6 +160,37 @@ chatRouter.delete("/sessions/:id", (req: Request, res: Response) => {
   res.json({ success: true });
 });
 
+// POST /api/chat/sessions/:id/clear — Clear all messages in a session
+chatRouter.post("/sessions/:id/clear", (req: Request, res: Response) => {
+  const id = String(req.params.id);
+
+  const session = chatStore.sessions[id];
+  if (!session) {
+    res.status(404).json({ success: false, error: "Session not found" });
+    return;
+  }
+
+  session.messages = [];
+  session.conversationHistory = [];
+  session.progress = 0;
+  session.status = "active";
+
+  broadcast({
+    type: "chat:message",
+    sessionId: id,
+    message: {
+      id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      type: "system" as const,
+      sender: "SYSTEM",
+      content: "Session cleared.",
+      timestamp: new Date().toISOString(),
+      showActions: false,
+    },
+  } as WSEvent);
+
+  res.json({ success: true });
+});
+
 // POST /api/chat/sessions/:id/messages — Add message and get LLM response
 chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) => {
   const id = String(req.params.id);
@@ -176,7 +207,7 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
     return;
   }
 
-  const userMessageId = `msg-${Date.now()}`;
+  const userMessageId = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const userMessage: ChatMessage = {
     id: userMessageId,
     type: body.type ?? "user",
@@ -186,6 +217,7 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
     showActions: body.showActions,
     progress: body.progress,
     codeBlock: body.codeBlock,
+    images: body.images,
   };
 
   session.messages.push(userMessage);
@@ -210,29 +242,35 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
   }
 
   // Get response from LLM
+  const agentRole = session.role as AgentRole;
+
+  // Add thinking/progress message
+  const progressMsgId = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const progressMessage: ChatMessage = {
+    id: progressMsgId,
+    type: "progress",
+    sender: agentRole,
+    content: `${agentRole} is thinking...`,
+    timestamp: new Date().toISOString(),
+    showActions: false,
+    progress: 0,
+  };
+  session.messages.push(progressMessage);
+  broadcast({
+    type: "chat:message",
+    sessionId: id,
+    message: progressMessage,
+  } as WSEvent);
+
   try {
-    const agentRole = session.role as AgentRole;
-
-    // Add thinking/progress message
-    const progressMsgId = `msg-${Date.now()}`;
-    const progressMessage: ChatMessage = {
-      id: progressMsgId,
-      type: "progress",
-      sender: agentRole,
-      content: `${agentRole} is thinking...`,
-      timestamp: new Date().toISOString(),
-      showActions: false,
-      progress: 0,
-    };
-    session.messages.push(progressMessage);
-    broadcast({
-      type: "chat:message",
-      sessionId: id,
-      message: progressMessage,
-    } as WSEvent);
-
     // Call the LLM
     const result = await continueConversation(agentRole, session.conversationHistory, id);
+
+    // Remove the progress placeholder before adding the real response
+    const progressIndex = session.messages.findIndex((m) => m.id === progressMsgId);
+    if (progressIndex !== -1) {
+      session.messages.splice(progressIndex, 1);
+    }
 
     // Add assistant response to conversation
     session.conversationHistory.push({
@@ -242,12 +280,12 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
 
     // Create assistant message
     const assistantMessage: ChatMessage = {
-      id: `msg-${Date.now()}`,
+      id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       type: "agent",
       sender: agentRole,
       content: result.content,
       timestamp: new Date().toISOString(),
-      showActions: true,
+      showActions: false,
       progress: 100,
       toolCalls: result.toolCalls?.map((tc) => ({
         tool: tc.name,
@@ -275,8 +313,14 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
   } catch (err: unknown) {
     const error = err as Error;
 
+    // Remove the progress placeholder before adding the error message
+    const progressIndex = session.messages.findIndex((m) => m.id === progressMsgId);
+    if (progressIndex !== -1) {
+      session.messages.splice(progressIndex, 1);
+    }
+
     const errorMessage: ChatMessage = {
-      id: `msg-${Date.now()}`,
+      id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       type: "system",
       sender: "SYSTEM",
       content: `Error: ${error.message}`,
@@ -419,7 +463,7 @@ chatRouter.post("/approve", (req: Request, res: Response) => {
 chatRouter.post("/diff", (req: Request, res: Response) => {
   const { sessionId, diffBlocks } = req.body as { sessionId?: string; diffBlocks?: unknown[] };
 
-  const diffId = `diff-${Date.now()}`;
+  const diffId = `diff-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
   broadcast({
     type: "chat:message",

@@ -41,6 +41,7 @@ export interface ChatMessage {
   thinking?: string;
   navigate?: { targetSession: string; label: string };
   navigateTo?: string;
+  images?: string[];
 }
 
 export interface FileOp {
@@ -106,7 +107,7 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, addS
       return next;
     }
     case "agent:completed": {
-      const role = event.agentId;
+      const role = event.sessionId;
       const session = sessions.get(role);
       if (!session) return null;
       const next = new Map(sessions);
@@ -143,7 +144,7 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, addS
       return next;
     }
     case "agent:failed": {
-      const role = event.agentId;
+      const role = event.sessionId;
       const session = sessions.get(role);
       if (!session) return null;
       const next = new Map(sessions);
@@ -171,6 +172,10 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, addS
       if (!message) return null;
       const session = sessions.get(sessionId);
       if (!session) return null;
+      // Deduplicate: skip if message ID already exists
+      if (message.id && session.messages.some((m) => m.id === message.id)) {
+        return null;
+      }
       const next = new Map(sessions);
       next.set(sessionId, {
         ...session,
@@ -238,7 +243,6 @@ export function useCommandRoom() {
               ...m,
               // Normalize progress messages that have progress 100
               type: m.type === "progress" && m.progress === 100 ? "agent" as const : m.type,
-              showActions: m.type === "agent" ? true : m.showActions,
             })),
             status: s.status as "active" | "done",
             progress: s.progress,
@@ -294,13 +298,13 @@ export function useCommandRoom() {
   // Keep ref updated for WebSocket handler
   addSessionMessageRef.current = addSessionMessage;
 
-  // WebSocket integration
+  // WebSocket integration — use functional update to avoid stale closure
   const onWSEvent = useCallback((event: WSEvent) => {
-    const updated = handleWSEvent(event, sessions, addSessionMessageRef.current!);
-    if (updated) {
-      setSessions(updated);
-    }
-  }, [sessions]);
+    setSessions((prevSessions) => {
+      const updated = handleWSEvent(event, prevSessions, addSessionMessageRef.current!);
+      return updated ?? prevSessions;
+    });
+  }, []);
 
   useWebSocket(onWSEvent);
 
@@ -508,9 +512,9 @@ export function useCommandRoom() {
     }
   }, [addSessionMessage]);
 
-  const executeCommand = useCallback((input: string) => {
+  const executeCommand = useCallback((input: string, images?: string[]) => {
     const trimmed = input.trim();
-    if (!trimmed) return;
+    if (!trimmed && (!images || images.length === 0)) return;
 
     const lower = trimmed.toLowerCase();
 
@@ -525,15 +529,22 @@ export function useCommandRoom() {
 
       switch (cmd) {
         case "clear": {
+          const targetSession = currentSession;
+          // Clear backend first
+          apiFetch(`/api/chat/sessions/${targetSession}/clear`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+          }).catch((err) => console.error("Failed to clear session:", err));
+
           setSessions((prev) => {
             const next = new Map(prev);
-            const gd = next.get("game-director");
-            if (gd) {
-              next.set("game-director", { ...gd, messages: [] });
+            const session = next.get(targetSession);
+            if (session) {
+              next.set(targetSession, { ...session, messages: [] });
             }
             return next;
           });
-          addSessionMessage("game-director", { type: "system", sender: "SYSTEM", content: "Chat cleared." });
+          addSessionMessage(targetSession, { type: "system", sender: "SYSTEM", content: "Chat cleared." });
           return;
         }
         case "help": {
@@ -655,7 +666,42 @@ Agents: 3 active`,
     }
 
     // Default: plain message to Game Director via real API
-    addSessionMessage("game-director", { type: "user", sender: "DIRECTOR", content: trimmed });
+    addSessionMessage("game-director", { type: "user", sender: "DIRECTOR", content: trimmed, images });
+
+    // Show immediate local typing indicator
+    const typingId = uid();
+    setSessions((prev) => {
+      const session = prev.get("game-director");
+      if (!session) return prev;
+      const next = new Map(prev);
+      next.set("game-director", {
+        ...session,
+        messages: [...session.messages, {
+          id: typingId,
+          type: "progress" as const,
+          sender: "game-director",
+          content: "Reviewing your request...",
+          timestamp: timestamp(),
+          progress: 10,
+          showActions: false,
+        }],
+      });
+      return next;
+    });
+
+    // Helper to remove typing indicator
+    const removeTyping = () => {
+      setSessions((prev) => {
+        const session = prev.get("game-director");
+        if (!session) return prev;
+        const next = new Map(prev);
+        next.set("game-director", {
+          ...session,
+          messages: session.messages.filter((m) => m.id !== typingId),
+        });
+        return next;
+      });
+    };
 
     // Call real API
     apiFetch<{ userMessage: ChatMessage; assistantMessage?: ChatMessage; errorMessage?: ChatMessage }>(
@@ -667,16 +713,18 @@ Agents: 3 active`,
           type: "user",
           sender: "DIRECTOR",
           content: trimmed,
+          images,
         }),
       }
     )
       .then((result) => {
+        removeTyping();
         if (result.assistantMessage) {
           addSessionMessage("game-director", {
             type: "agent",
             sender: result.assistantMessage.sender,
             content: result.assistantMessage.content,
-            showActions: true,
+            showActions: false,
             toolCalls: normalizeToolCalls(result.assistantMessage.toolCalls),
           });
         } else if (result.errorMessage) {
@@ -688,6 +736,7 @@ Agents: 3 active`,
         }
       })
       .catch((error) => {
+        removeTyping();
         console.error("Failed to send message:", error);
         addSessionMessage("game-director", {
           type: "system",
@@ -695,7 +744,7 @@ Agents: 3 active`,
           content: `Error: ${error instanceof Error ? error.message : "Failed to get response"}`,
         });
       });
-  }, [addSessionMessage, spawnAgent, approveAgent]);
+  }, [addSessionMessage, spawnAgent, approveAgent, currentSession]);
 
   // Derived state
   const currentMessages = sessions.get(currentSession)?.messages ?? [];

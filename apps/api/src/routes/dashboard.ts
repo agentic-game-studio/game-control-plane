@@ -12,12 +12,39 @@ import type { WSEvent } from "@game-studio/types";
 const DEFAULT_DATA: DashboardData = {
   summary: {
     totalProjects: 0,
-    activeAgents: 8,
+    activeDirectories: 0,
     credits: { current: 500, max: 500 },
   },
   projects: [],
   activityLog: [],
 };
+
+function normalizeProject(project: Partial<Project>): Project {
+  return {
+    id: project.id ?? `proj-${Date.now()}`,
+    name: project.name ?? "Untitled Project",
+    description: project.description ?? "",
+    engine: project.engine ?? null,
+    progress: project.progress ?? 0,
+    status: project.status ?? "active",
+    workspacePath: project.workspacePath ?? null,
+    icon: project.icon ?? "folder",
+    createdAt: project.createdAt ?? new Date().toISOString(),
+    updatedAt: project.updatedAt ?? new Date().toISOString(),
+  };
+}
+
+function normalizeDashboardData(data: DashboardData): DashboardData {
+  return {
+    summary: {
+      totalProjects: data.projects.length,
+      activeDirectories: data.projects.filter((p) => p.workspacePath !== null).length,
+      credits: data.summary.credits,
+    },
+    projects: data.projects.map(normalizeProject),
+    activityLog: data.activityLog,
+  };
+}
 
 export const dashboardRouter: Router = Router();
 
@@ -25,7 +52,8 @@ export const dashboardRouter: Router = Router();
 dashboardRouter.get("/", (_req: Request, res: Response) => {
   try {
     const data = readData<DashboardData>("dashboard.json");
-    res.json({ success: true, data });
+    const normalized = normalizeDashboardData(data);
+    res.json({ success: true, data: normalized });
   } catch {
     // Initialize with default data if file doesn't exist
     writeData("dashboard.json", DEFAULT_DATA);
@@ -37,7 +65,8 @@ dashboardRouter.get("/", (_req: Request, res: Response) => {
 dashboardRouter.get("/projects", (_req: Request, res: Response) => {
   try {
     const data = readData<DashboardData>("dashboard.json");
-    res.json({ success: true, data: data.projects });
+    const normalized = normalizeDashboardData(data);
+    res.json({ success: true, data: normalized.projects });
   } catch {
     res.json({ success: true, data: [] });
   }
@@ -48,13 +77,14 @@ dashboardRouter.get("/projects/:id", (req: Request, res: Response) => {
   const { id } = req.params;
   try {
     const data = readData<DashboardData>("dashboard.json");
-    const project = data.projects.find((p) => p.id === id);
+    const normalized = normalizeDashboardData(data);
+    const project = normalized.projects.find((p) => p.id === id);
     if (!project) {
       res.status(404).json({ success: false, error: "Project not found" });
       return;
     }
     res.json({ success: true, data: project });
-  } catch (error) {
+  } catch {
     res.status(500).json({ success: false, error: "Failed to read project" });
   }
 });
@@ -63,27 +93,28 @@ dashboardRouter.get("/projects/:id", (req: Request, res: Response) => {
 dashboardRouter.post("/projects", (req: Request, res: Response) => {
   const body = req.body as CreateProjectRequest;
 
-  if (!body.name || !body.engine) {
-    res.status(400).json({ success: false, error: "name and engine are required" });
+  if (!body.name) {
+    res.status(400).json({ success: false, error: "name is required" });
     return;
   }
 
   try {
     const data = readData<DashboardData>("dashboard.json");
     const now = new Date().toISOString();
-    const newProject: Project = {
+    const newProject = normalizeProject({
       id: `proj-${Date.now()}`,
       name: body.name,
       description: body.description ?? "",
-      engine: body.engine,
+      engine: body.engine ?? null,
       progress: 0,
       status: "active",
+      workspacePath: body.workspacePath ?? null,
+      icon: body.icon ?? "folder",
       createdAt: now,
       updatedAt: now,
-    };
+    });
 
     data.projects.push(newProject);
-    data.summary.totalProjects = data.projects.length;
     writeData("dashboard.json", data);
 
     // Broadcast event
@@ -93,7 +124,7 @@ dashboardRouter.post("/projects", (req: Request, res: Response) => {
     } as WSEvent);
 
     res.status(201).json({ success: true, data: newProject });
-  } catch (error) {
+  } catch {
     res.status(500).json({ success: false, error: "Failed to create project" });
   }
 });
@@ -113,12 +144,12 @@ dashboardRouter.patch("/projects/:id", (req: Request, res: Response) => {
     }
 
     const projectId = String(id);
-    const updatedProject: Project = {
+    const updatedProject = normalizeProject({
       ...data.projects[projectIndex],
       ...updates,
-      id: projectId, // Ensure ID cannot be changed
+      id: projectId,
       updatedAt: new Date().toISOString(),
-    };
+    });
 
     data.projects[projectIndex] = updatedProject;
     writeData("dashboard.json", data);
@@ -130,7 +161,7 @@ dashboardRouter.patch("/projects/:id", (req: Request, res: Response) => {
     } as WSEvent);
 
     res.json({ success: true, data: updatedProject });
-  } catch (error) {
+  } catch {
     res.status(500).json({ success: false, error: "Failed to update project" });
   }
 });
@@ -149,7 +180,6 @@ dashboardRouter.delete("/projects/:id", (req: Request, res: Response) => {
     }
 
     data.projects.splice(projectIndex, 1);
-    data.summary.totalProjects = data.projects.length;
     writeData("dashboard.json", data);
 
     // Broadcast event
@@ -159,7 +189,7 @@ dashboardRouter.delete("/projects/:id", (req: Request, res: Response) => {
     } as WSEvent);
 
     res.json({ success: true });
-  } catch (error) {
+  } catch {
     res.status(500).json({ success: false, error: "Failed to delete project" });
   }
 });

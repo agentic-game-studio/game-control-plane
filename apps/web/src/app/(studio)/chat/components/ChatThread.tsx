@@ -3,6 +3,7 @@
 import { useEffect, useRef } from "react";
 import type { ChatMessage } from "@/hooks/useCommandRoom";
 import { getAgentIcon } from "@/lib/agent-icons";
+import { renderMarkdown } from "@/lib/markdown";
 import DiffView from "./DiffView";
 
 interface ChatThreadProps {
@@ -35,6 +36,19 @@ const TOOL_COLORS: Record<string, string> = {
   Task: "#0055FF",
   AskUserQuestion: "#c13301",
 };
+
+function ImageGallery({ images }: { images?: string[] }) {
+  if (!images || images.length === 0) return null;
+  return (
+    <div className="flex flex-col gap-2 mt-3">
+      {images.map((src, i) => (
+        <div key={i} className="border-2 border-black shadow-[2px_2px_0_0_rgba(0,0,0,1)] overflow-hidden inline-block">
+          <img src={src} alt={`Attachment ${i + 1}`} className="max-w-full max-h-64 object-contain" loading="lazy" />
+        </div>
+      ))}
+    </div>
+  );
+}
 
 function SystemMessage({ msg }: { msg: ChatMessage }) {
   return (
@@ -93,15 +107,7 @@ function AgentMessage({ msg, onDecision }: { msg: ChatMessage; onDecision: (acti
   const label = msg.sender.replace(/-/g, "_").toUpperCase();
   const isProgress = msg.type === "progress";
 
-  // Default tool calls for progress messages
-  const defaultToolCalls = isProgress ? [
-    { name: "Read", args: { path: "src/game.ts" }, status: "success" },
-    { name: "Grep", args: { pattern: "PlayerController" }, status: "success" },
-    { name: "Edit", args: { path: "src/game.ts:42-48" }, status: "pending" },
-    { name: "Write", args: { path: "src/player.ts" }, status: "pending" },
-  ] : [];
-
-  const toolCalls = msg.toolCalls ?? defaultToolCalls;
+  const toolCalls = msg.toolCalls;
 
   return (
     <div className="flex gap-4 w-full max-w-4xl self-start">
@@ -123,7 +129,11 @@ function AgentMessage({ msg, onDecision }: { msg: ChatMessage; onDecision: (acti
                 <code className="whitespace-pre-wrap">{msg.codeBlock}</code>
               </div>
             )}
-            <p className="font-[var(--font-terminal)] text-base whitespace-pre-wrap">{msg.content}</p>
+            <div
+              className="font-[var(--font-terminal)] text-base prose prose-sm max-w-none"
+              dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.content) }}
+            />
+            <ImageGallery images={msg.images} />
 
             {/* Rich progress message */}
             {isProgress && msg.progress !== undefined && (
@@ -226,7 +236,11 @@ function UserMessage({ msg }: { msg: ChatMessage }) {
           <div className="absolute right-[-10px] top-4 w-0 h-0 border-y-[6px] border-y-transparent border-l-[10px] border-l-black z-0" />
           <div className="absolute right-[-6px] top-[18px] w-0 h-0 border-y-[4px] border-y-transparent border-l-[8px] border-l-[#dce1ff] z-10" />
           <div className="border-2 border-black bg-[#dce1ff] p-3 shadow-[-4px_4px_0_0_rgba(0,0,0,1)] relative z-10 text-right">
-            <p className="font-[var(--font-terminal)] text-base whitespace-pre-wrap">{msg.content}</p>
+            <div
+              className="font-[var(--font-terminal)] text-base prose prose-sm max-w-none"
+              dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.content) }}
+            />
+            <ImageGallery images={msg.images} />
           </div>
         </div>
       </div>

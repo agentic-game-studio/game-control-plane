@@ -1,32 +1,59 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
-import { readData, writeData, broadcastEvent } from "../services/data-store.js";
-import type { SettingsConfig, GameEngine } from "@game-studio/types";
+import { readData, writeData, updateData, broadcastEvent } from "../services/data-store.js";
+import type { SettingsConfig, SubscriptionTier } from "@game-studio/types";
+import { DEFAULT_SETTINGS, TIER_DEFINITIONS } from "@game-studio/types";
 import type { WSEvent } from "@game-studio/types";
 
-const DEFAULT_SETTINGS: SettingsConfig = {
-  targetEngine: "Unity",
-  assetModel: "Studio XYZ Optimized (Fast)",
-  externalApiKey: "",
-  webhookUrl: "",
-  creditBalance: {
-    current: 50000,
-    burnRatePerHour: 120,
-    estimatedDepletionDays: 30,
-  },
-};
+const VALID_ENGINES = ["Unity", "Unreal", "Godot"];
+
+function getNextResetDate(): string {
+  const now = new Date();
+  const next = new Date(now);
+  next.setDate(now.getDate() + 7);
+  next.setHours(0, 0, 0, 0);
+  return next.toISOString();
+}
+
+function checkWeeklyReset(data: SettingsConfig): SettingsConfig {
+  const now = new Date();
+  const resetAt = new Date(data.credits.subscription.resetAt);
+  if (now >= resetAt) {
+    const tierDef = TIER_DEFINITIONS.find((t) => t.id === data.tier) ?? TIER_DEFINITIONS[0];
+    return {
+      ...data,
+      credits: {
+        ...data.credits,
+        subscription: {
+          ...data.credits.subscription,
+          current: tierDef.weeklyCredits,
+          weeklyAllowance: tierDef.weeklyCredits,
+          resetAt: getNextResetDate(),
+        },
+      },
+    };
+  }
+  return data;
+}
 
 export const settingsRouter: Router = Router();
 
-// GET /api/settings - Get settings
+// GET /api/settings - Get settings (with auto weekly reset check)
 settingsRouter.get("/", (_req: Request, res: Response) => {
   try {
-    const data = readData<SettingsConfig>("settings.json");
+    let data = readData<SettingsConfig>("settings.json");
+    data = checkWeeklyReset(data);
+    // Only write back if reset actually happened
+    const originalResetAt = readData<SettingsConfig>("settings.json").credits.subscription.resetAt;
+    if (data.credits.subscription.resetAt !== originalResetAt) {
+      writeData("settings.json", data);
+      broadcastEvent({ type: "settings:updated", settings: data } as WSEvent);
+    }
     res.json({ success: true, data });
   } catch {
-    // Initialize with default data if file doesn't exist
-    writeData("settings.json", DEFAULT_SETTINGS);
-    res.json({ success: true, data: DEFAULT_SETTINGS });
+    const fresh = DEFAULT_SETTINGS;
+    writeData("settings.json", fresh);
+    res.json({ success: true, data: fresh });
   }
 });
 
@@ -39,21 +66,23 @@ settingsRouter.patch("/", (req: Request, res: Response) => {
     const updatedSettings: SettingsConfig = {
       ...data,
       ...updates,
+      credits: updates.credits ? { ...data.credits, ...updates.credits } : data.credits,
+      topUpHistory: updates.topUpHistory ?? data.topUpHistory,
+      usageLog: updates.usageLog ?? data.usageLog,
     };
 
-    // Ensure valid engine if provided
-    if (updates.targetEngine && !["Unity", "Unreal", "Godot"].includes(updates.targetEngine)) {
+    if (updates.targetEngine && !VALID_ENGINES.includes(updates.targetEngine)) {
       res.status(400).json({ success: false, error: "Invalid target engine" });
       return;
     }
 
-    writeData("settings.json", updatedSettings);
+    if (updates.tier && !TIER_DEFINITIONS.some((t) => t.id === updates.tier)) {
+      res.status(400).json({ success: false, error: "Invalid subscription tier" });
+      return;
+    }
 
-    // Broadcast event
-    broadcastEvent({
-      type: "settings:updated",
-      settings: updatedSettings,
-    } as WSEvent);
+    writeData("settings.json", updatedSettings);
+    broadcastEvent({ type: "settings:updated", settings: updatedSettings } as WSEvent);
 
     res.json({ success: true, data: updatedSettings });
   } catch (error) {
@@ -64,16 +93,137 @@ settingsRouter.patch("/", (req: Request, res: Response) => {
 // POST /api/settings/reset - Reset settings to defaults
 settingsRouter.post("/reset", (_req: Request, res: Response) => {
   try {
-    writeData("settings.json", DEFAULT_SETTINGS);
-
-    // Broadcast event
-    broadcastEvent({
-      type: "settings:updated",
-      settings: DEFAULT_SETTINGS,
-    } as WSEvent);
-
-    res.json({ success: true, data: DEFAULT_SETTINGS });
+    const fresh = DEFAULT_SETTINGS;
+    writeData("settings.json", fresh);
+    broadcastEvent({ type: "settings:updated", settings: fresh } as WSEvent);
+    res.json({ success: true, data: fresh });
   } catch (error) {
     res.status(500).json({ success: false, error: "Failed to reset settings" });
+  }
+});
+
+// POST /api/settings/topup - Add on-top credits
+settingsRouter.post("/topup", (req: Request, res: Response) => {
+  const { amount } = req.body as { amount?: number };
+
+  if (!amount || amount <= 0 || !Number.isFinite(amount)) {
+    res.status(400).json({ success: false, error: "Invalid amount" });
+    return;
+  }
+
+  try {
+    const updated = updateData<SettingsConfig>("settings.json", (data) => ({
+      ...data,
+      credits: {
+        ...data.credits,
+        onTop: {
+          current: data.credits.onTop.current + amount,
+          totalPurchased: data.credits.onTop.totalPurchased + amount,
+        },
+      },
+      topUpHistory: [
+        ...data.topUpHistory,
+        {
+          id: `top-${Date.now()}`,
+          amount,
+          timestamp: new Date().toISOString(),
+        },
+      ],
+    }));
+
+    broadcastEvent({ type: "settings:updated", settings: updated } as WSEvent);
+    res.json({ success: true, data: updated });
+  } catch (error) {
+    res.status(500).json({ success: false, error: "Failed to top up credits" });
+  }
+});
+
+// POST /api/settings/upgrade - Upgrade subscription tier
+settingsRouter.post("/upgrade", (req: Request, res: Response) => {
+  const { tier } = req.body as { tier?: SubscriptionTier };
+
+  if (!tier || !TIER_DEFINITIONS.some((t) => t.id === tier)) {
+    res.status(400).json({ success: false, error: "Invalid tier" });
+    return;
+  }
+
+  try {
+    const tierDef = TIER_DEFINITIONS.find((t) => t.id === tier)!;
+    const updated = updateData<SettingsConfig>("settings.json", (data) => ({
+      ...data,
+      tier,
+      credits: {
+        ...data.credits,
+        subscription: {
+          current: tierDef.weeklyCredits,
+          weeklyAllowance: tierDef.weeklyCredits,
+          resetAt: getNextResetDate(),
+        },
+      },
+    }));
+
+    broadcastEvent({ type: "settings:updated", settings: updated } as WSEvent);
+    res.json({ success: true, data: updated });
+  } catch (error) {
+    res.status(500).json({ success: false, error: "Failed to upgrade tier" });
+  }
+});
+
+// POST /api/settings/consume - Consume credits for a task
+settingsRouter.post("/consume", (req: Request, res: Response) => {
+  const { taskName, creditsUsed } = req.body as { taskName?: string; creditsUsed?: number };
+
+  if (!taskName || !creditsUsed || creditsUsed <= 0 || !Number.isFinite(creditsUsed)) {
+    res.status(400).json({ success: false, error: "Invalid task name or credit amount" });
+    return;
+  }
+
+  try {
+    const updated = updateData<SettingsConfig>("settings.json", (data) => {
+      let remaining = creditsUsed;
+      let onTopCurrent = data.credits.onTop.current;
+      let subCurrent = data.credits.subscription.current;
+
+      // Deduct from on-top first
+      if (onTopCurrent > 0) {
+        const deduct = Math.min(onTopCurrent, remaining);
+        onTopCurrent -= deduct;
+        remaining -= deduct;
+      }
+
+      // Then from subscription
+      if (remaining > 0) {
+        subCurrent = Math.max(0, subCurrent - remaining);
+      }
+
+      return {
+        ...data,
+        credits: {
+          ...data.credits,
+          subscription: {
+            ...data.credits.subscription,
+            current: subCurrent,
+          },
+          onTop: {
+            ...data.credits.onTop,
+            current: onTopCurrent,
+          },
+        },
+        usageLog: [
+          ...data.usageLog,
+          {
+            id: `use-${Date.now()}`,
+            taskName,
+            creditsUsed,
+            timestamp: new Date().toISOString(),
+          },
+        ],
+      };
+    });
+
+    broadcastEvent({ type: "settings:updated", settings: updated } as WSEvent);
+    res.json({ success: true, data: updated });
+  } catch (error) {
+    res.status(500).json({ success: false, error: "Failed to consume credits" });
   }
 });

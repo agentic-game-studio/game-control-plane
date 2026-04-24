@@ -78,6 +78,7 @@ ticketsRouter.post("/", (req: Request, res: Response) => {
       credits: body.credits ?? 100,
       estimateHours: body.estimateHours,
       status,
+      acknowledged: false,
       createdAt: now,
       updatedAt: now,
     };

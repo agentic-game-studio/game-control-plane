@@ -1,6 +1,19 @@
 "use client";
 
+import { useState } from "react";
+import { useDashboard } from "@/hooks/useDashboard";
+import { useCurrentProject } from "@/hooks/useCurrentProject";
+import { DataLoader } from "@/components/DataLoader";
+import { StatsCards } from "./components/StatsCards";
+import { ProjectGrid } from "./components/ProjectGrid";
+import { ActivityLog } from "./components/ActivityLog";
+import { NewProjectModal } from "./components/NewProjectModal";
+
 export default function DashboardPage() {
+  const { data, loading, error, retry, createProject } = useDashboard();
+  const { currentProject, selectProject } = useCurrentProject(data.projects);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+
   return (
     <div className="flex flex-col h-full p-8 gap-6">
       {/* Header */}
@@ -14,48 +27,45 @@ export default function DashboardPage() {
               Mission Control
             </h1>
             <span className="font-[var(--font-terminal)] text-xs text-[#737688] uppercase">
-              System Overview // Offline
+              {loading
+                ? "System Overview // Initializing..."
+                : error
+                  ? "System Overview // Connection Lost"
+                  : "System Overview // Online"}
             </span>
           </div>
         </div>
       </div>
 
-      {/* Status Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div className="border-2 border-black bg-white p-4 shadow-[4px_4px_0_0_rgba(0,0,0,1)]">
-          <div className="font-[var(--font-terminal)] text-xs uppercase text-[#737688] border-b-2 border-black pb-2 mb-3">
-            Active Projects
-          </div>
-          <div className="font-[var(--font-terminal)] text-4xl font-bold">—</div>
-        </div>
-        <div className="border-2 border-black bg-white p-4 shadow-[4px_4px_0_0_rgba(0,0,0,1)]">
-          <div className="font-[var(--font-terminal)] text-xs uppercase text-[#737688] border-b-2 border-black pb-2 mb-3">
-            Agent Uptime
-          </div>
-          <div className="font-[var(--font-terminal)] text-4xl font-bold">—</div>
-        </div>
-        <div className="border-2 border-black bg-white p-4 shadow-[4px_4px_0_0_rgba(0,0,0,1)]">
-          <div className="font-[var(--font-terminal)] text-xs uppercase text-[#737688] border-b-2 border-black pb-2 mb-3">
-            Credits
-          </div>
-          <div className="font-[var(--font-terminal)] text-4xl font-bold">—</div>
-        </div>
-      </div>
+      <DataLoader loading={loading} error={error} onRetry={retry}>
+        {/* Stats Cards */}
+        <StatsCards data={data} />
 
-      {/* Main Content */}
-      <div className="flex-1 border-2 border-black bg-[#f3f2ff] p-8 flex flex-col items-center justify-center shadow-[4px_4px_0_0_rgba(0,0,0,1)]">
-        <div className="w-16 h-16 border-2 border-black bg-black flex items-center justify-center text-white mb-4">
-          <span className="material-symbols-outlined text-3xl">construction</span>
+        {/* Main Content */}
+        <div className="flex-1 flex flex-col lg:flex-row gap-6 min-h-0">
+          {/* Project Grid */}
+          <div className="flex-[2] min-h-0">
+            <ProjectGrid
+              projects={data.projects}
+              currentProject={currentProject}
+              onSelectProject={(project) => selectProject(project.id)}
+              onNewProject={() => setIsModalOpen(true)}
+            />
+          </div>
+
+          {/* Activity Log */}
+          <div className="flex-1 min-h-0">
+            <ActivityLog entries={data.activityLog} />
+          </div>
         </div>
-        <h2 className="font-[var(--font-terminal)] text-lg font-bold uppercase tracking-wider mb-2">
-          Under Construction
-        </h2>
-        <p className="font-[var(--font-terminal)] text-sm text-[#737688] text-center max-w-md">
-          Mission Control dashboard is being retrofitted with live data feeds.
-          <br />
-          Check back soon, Director.
-        </p>
-      </div>
+      </DataLoader>
+
+      {/* New Project Modal */}
+      <NewProjectModal
+        isOpen={isModalOpen}
+        onClose={() => setIsModalOpen(false)}
+        onSubmit={createProject}
+      />
     </div>
   );
 }

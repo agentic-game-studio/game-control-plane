@@ -55,7 +55,7 @@
           "subarea": "NET_CODE",
           "credits": 500,
           "status": "in_progress",
-          "assignee": "Agent_03",
+          "assignee": "network-programmer",
           "createdAt": "2026-04-18T11:00:00Z",
           "updatedAt": "2026-04-23T08:00:00Z"
         },
@@ -67,7 +67,7 @@
           "subarea": "RIGGING",
           "credits": 350,
           "status": "in_progress",
-          "assignee": "Agent_05",
+          "assignee": "technical-artist",
           "createdAt": "2026-04-17T15:00:00Z",
           "updatedAt": "2026-04-22T16:00:00Z"
         }
@@ -85,7 +85,7 @@
           "subarea": "WEAPONS",
           "credits": 100,
           "status": "qa",
-          "assignee": "Agent_02",
+          "assignee": "qa-tester",
           "createdAt": "2026-04-15T10:00:00Z",
           "updatedAt": "2026-04-21T14:00:00Z"
         }

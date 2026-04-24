@@ -30,7 +30,7 @@ game-control-plane/
 │   └── web/              # Frontend: Next.js 15 (App Router)
 ├── packages/
 │   ├── types/            # Shared TypeScript interfaces (source of truth)
-│   ├── agents/           # 48 agent definitions (3-tier hierarchy)
+│   ├── agents/           # 49 agent definitions (3-tier hierarchy)
 │   ├── skills/           # 67 skill definitions (9 team skills)
 │   ├── config/           # Zod schemas + GDD/ADR templates
 │   └── state/            # File-based session store
@@ -43,9 +43,9 @@ game-control-plane/
 
 ## Architecture
 
-### Agent Hierarchy (48 agents)
+### Agent Hierarchy (49 agents)
 
-- **Tier 1 (Opus → glm-5.1)**: creative-director, technical-director, producer
+- **Tier 1 (Opus → glm-5.1)**: game-director, creative-director, technical-director, producer
 - **Tier 2 (Sonnet → glm-4.7)**: game-designer, lead-programmer, art-director, audio-director, narrative-director, qa-lead, release-manager, localization-lead
 - **Tier 3 (Sonnet/Haiku → glm-4.7/glm-4.7-flash)**: 37 specialists — systems-designer, gameplay-programmer, godot-specialist, unreal-specialist, unity-specialist, etc.
 
@@ -216,7 +216,7 @@ GDD files use 8-section format:
 ```bash
 pnpm typecheck         # TypeScript across all packages
 pnpm build             # Turbo build pipeline
-pnpm generate:agents    # Validate 48 agent definitions
+pnpm generate:agents    # Validate 49 agent definitions
 pnpm generate:skills   # Validate 67 skill definitions
 pnpm generate          # Both validations
 ```

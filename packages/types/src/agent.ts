@@ -11,6 +11,7 @@ export type AgentTier = 1 | 2 | 3;
 /** Agent roles following the 3-tier studio hierarchy */
 export type AgentRole =
   // Tier 1 — Leadership
+  | "game-director"
   | "creative-director"
   | "technical-director"
   | "producer"

@@ -1,0 +1,88 @@
+"use client";
+
+import { useState, useCallback, useEffect } from "react";
+import { apiFetch } from "@/lib/api";
+import { useWebSocket } from "./useWebSocket";
+import type {
+  TicketsBoard,
+  Ticket,
+  UpdateTicketRequest,
+  WSEvent,
+} from "@game-studio/types";
+
+const DEFAULT_BOARD: TicketsBoard = {
+  sprint: "Sprint_01",
+  milestone: "Alpha_Milestone",
+  columns: [
+    { id: "available", label: "Available", tickets: [] },
+    { id: "in_progress", label: "Processing", tickets: [] },
+    { id: "qa", label: "Verify", tickets: [] },
+    { id: "completed", label: "Archived", tickets: [] },
+  ],
+};
+
+export function useTickets() {
+  const [data, setData] = useState<TicketsBoard>(DEFAULT_BOARD);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchTickets = useCallback(async () => {
+    try {
+      const result = await apiFetch<TicketsBoard>("/api/tickets");
+      setData(result);
+      setError(null);
+    } catch (err) {
+      console.error("Failed to fetch tickets:", err);
+      setError(err instanceof Error ? err.message : "Failed to load quest board");
+      setData(DEFAULT_BOARD);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchTickets();
+  }, [fetchTickets]);
+
+  const onWSEvent = useCallback(
+    (event: WSEvent) => {
+      if (
+        event.type === "ticket:created" ||
+        event.type === "ticket:updated" ||
+        event.type === "ticket:moved" ||
+        event.type === "ticket:deleted"
+      ) {
+        fetchTickets();
+      }
+    },
+    [fetchTickets]
+  );
+
+  useWebSocket(onWSEvent);
+
+  const acknowledgeTicket = useCallback(
+    async (id: string) => {
+      const updated = await apiFetch<Ticket>(`/api/tickets/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ acknowledged: true } as UpdateTicketRequest),
+      });
+      await fetchTickets();
+      return updated;
+    },
+    [fetchTickets]
+  );
+
+  const retry = useCallback(() => {
+    setLoading(true);
+    fetchTickets();
+  }, [fetchTickets]);
+
+  return {
+    data,
+    loading,
+    error,
+    retry,
+    acknowledgeTicket,
+  };
+}

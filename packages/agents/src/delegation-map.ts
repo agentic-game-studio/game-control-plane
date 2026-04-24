@@ -5,6 +5,11 @@ import type { AgentRole } from "@game-studio/types";
  * Maps which agents can delegate to which other agents.
  */
 export const delegationMap: Record<AgentRole, AgentRole[]> = {
+  "game-director": [
+    "creative-director",
+    "technical-director",
+    "producer",
+  ],
   "creative-director": [
     "game-designer",
     "art-director",

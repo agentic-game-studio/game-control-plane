@@ -44,6 +44,7 @@ export interface ChatMessage {
   toolCalls?: ToolCall[];
   thinking?: string;
   navigate?: NavigateAction;
+  images?: string[];
 }
 
 export interface CreateMessageRequest {
@@ -53,6 +54,7 @@ export interface CreateMessageRequest {
   showActions?: boolean;
   progress?: number;
   codeBlock?: CodeBlock;
+  images?: string[];
 }
 
 export interface ChatSession {
