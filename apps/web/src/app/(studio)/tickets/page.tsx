@@ -1,6 +1,17 @@
 "use client";
 
+import { useTickets } from "@/hooks/useTickets";
+import { DataLoader } from "@/components/DataLoader";
+import { QuestBoard } from "./components/QuestBoard";
+
 export default function TicketsPage() {
+  const { data, loading, error, retry, acknowledgeTicket } = useTickets();
+
+  const totalQuests = data.columns.reduce(
+    (sum, col) => sum + col.tickets.length,
+    0
+  );
+
   return (
     <div className="flex flex-col h-full p-8 gap-6">
       {/* Header */}
@@ -14,30 +25,19 @@ export default function TicketsPage() {
               Quest Board
             </h1>
             <span className="font-[var(--font-terminal)] text-xs text-[#737688] uppercase">
-              Task Management // Standby
+              {loading
+                ? "Task Management // Loading..."
+                : error
+                  ? "Task Management // Connection Lost"
+                  : `Task Management // ${totalQuests} Active Quests`}
             </span>
           </div>
         </div>
       </div>
 
-      {/* Kanban Columns Placeholder */}
-      <div className="flex-1 grid grid-cols-4 gap-4">
-        {["Available", "In Progress", "QA", "Completed"].map((col) => (
-          <div key={col} className="border-2 border-black bg-white flex flex-col shadow-[4px_4px_0_0_rgba(0,0,0,1)]">
-            <div className="border-b-2 border-black p-3 bg-black text-white">
-              <span className="font-[var(--font-terminal)] text-xs font-bold uppercase tracking-wider">
-                {col}
-              </span>
-            </div>
-            <div className="flex-1 p-3 flex flex-col items-center justify-center gap-2">
-              <span className="material-symbols-outlined text-[#737688]">inbox</span>
-              <span className="font-[var(--font-terminal)] text-xs text-[#737688] uppercase">
-                No Quests
-              </span>
-            </div>
-          </div>
-        ))}
-      </div>
+      <DataLoader loading={loading} error={error} onRetry={retry}>
+        <QuestBoard board={data} onAcknowledge={acknowledgeTicket} />
+      </DataLoader>
     </div>
   );
 }

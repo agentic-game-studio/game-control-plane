@@ -1,6 +1,18 @@
 import type { AgentDefinition, AgentRole } from "@game-studio/types";
 
 export const leadershipAgents: Partial<Record<AgentRole, AgentDefinition>> = {
+  "game-director": {
+    name: "game-director",
+    description: "Orchestrates the multi-agent game development pipeline. Spawns teams, assigns tasks, and coordinates across creative, technical, and production departments.",
+    tier: 1,
+    model: "opus",
+    tools: ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Task", "AskUserQuestion"],
+    maxTurns: 50,
+    skills: ["brainstorm", "design-system", "design-review", "gate-check", "project-stage-detect", "team-combat", "team-narrative", "team-ui", "team-level", "sprint-plan", "create-epics", "create-stories", "milestone-review", "scope-check", "estimate"],
+    memory: "project",
+    reportsTo: [],
+    delegates: ["creative-director", "technical-director", "producer"],
+  },
   "creative-director": {
     name: "creative-director",
     description: "Vision, pillars, player experience, scope arbitration.",

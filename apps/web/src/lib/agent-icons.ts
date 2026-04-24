@@ -81,7 +81,7 @@ export function getAgentIcon(role: string): string {
   return AGENT_ICONS[role] ?? "smart_toy";
 }
 
-/** Agent hierarchy tree — Producer first, all 48 agents */
+/** Agent hierarchy tree — Game Director first, all 49 agents */
 export interface AgentTreeNode {
   role: string;
   tier: number;

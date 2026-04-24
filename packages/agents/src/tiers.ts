@@ -6,6 +6,7 @@ import type { ModelTier, AgentRole } from "@game-studio/types";
  */
 export const agentTiers: Record<AgentRole, { tier: 1 | 2 | 3; model: ModelTier }> = {
   // Tier 1 — Leadership (Opus)
+  "game-director": { tier: 1, model: "opus" },
   "creative-director": { tier: 1, model: "opus" },
   "technical-director": { tier: 1, model: "opus" },
   producer: { tier: 1, model: "opus" },

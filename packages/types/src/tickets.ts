@@ -10,6 +10,7 @@ export interface Ticket {
   estimateHours?: number;
   status: TicketStatus;
   assignee?: string;
+  acknowledged?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -33,6 +34,7 @@ export interface UpdateTicketRequest {
   estimateHours?: number;
   status?: TicketStatus;
   assignee?: string;
+  acknowledged?: boolean;
 }
 
 export interface MoveTicketRequest {

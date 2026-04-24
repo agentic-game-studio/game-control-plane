@@ -2,6 +2,9 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useState, useEffect } from "react";
+import { apiFetch } from "@/lib/api";
+import type { DashboardData } from "@game-studio/types";
 
 const navItems = [
   { href: "/dashboard", icon: "dashboard", label: "Dashboard", fill: false },
@@ -19,6 +22,15 @@ const navItems = [
 
 export default function SideNavBar() {
   const pathname = usePathname();
+  const [credits, setCredits] = useState<{ current: number; max: number }>({ current: 100, max: 100 });
+
+  useEffect(() => {
+    apiFetch<DashboardData>("/api/dashboard")
+      .then((data) => setCredits(data.summary.credits))
+      .catch(() => {
+        // Keep default credits on error
+      });
+  }, []);
 
   return (
     <nav className="hidden md:flex flex-col h-full w-64 border-r-2 border-black bg-white z-40 shrink-0">
@@ -33,7 +45,7 @@ export default function SideNavBar() {
               GAME_STUDIO
             </div>
             <div className="font-[var(--font-terminal)] text-xs text-black mt-1">
-              HP: 100/100 CREDITS
+              HP: {credits.current}/{credits.max} CREDITS
             </div>
           </div>
         </div>

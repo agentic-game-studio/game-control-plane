@@ -90,21 +90,6 @@
       "updatedAt": "2026-04-20T12:00:00Z"
     },
     {
-      "id": "asset-007",
-      "filename": "Stone_Wall_Normal.png",
-      "type": "texture",
-      "category": "tex",
-      "sizeBytes": 1048576,
-      "tags": [
-        "texture",
-        "normal-map",
-        "stone",
-        "wall"
-      ],
-      "createdAt": "2026-04-17T08:00:00Z",
-      "updatedAt": "2026-04-17T08:00:00Z"
-    },
-    {
       "id": "asset-008",
       "filename": "Metal_Door.fbx",
       "type": "3d",
