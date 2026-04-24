@@ -101,9 +101,10 @@ export default function DashboardPage() {
     : 84;
 
   return (
-    <DataLoader loading={loading} error={error} onRetry={handleRetry}>
-      <div className="p-[var(--spacing-gutter)] flex flex-col gap-[var(--spacing-gutter)]">
-        {/* Top Section: Summary Cards */}
+    <>
+      <DataLoader loading={loading} error={error} onRetry={handleRetry}>
+        <div className="p-[var(--spacing-gutter)] flex flex-col gap-[var(--spacing-gutter)]">
+          {/* Top Section: Summary Cards */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-[var(--spacing-gutter)]">
           <div className="border-2 border-black bg-white p-4 relative">
             <div className="font-[var(--font-terminal)] text-sm uppercase border-b-2 border-black pb-2 mb-4">
@@ -238,6 +239,7 @@ export default function DashboardPage() {
           </div>
         </div>
       </div>
+      </DataLoader>
 
       {/* Create Project Modal */}
       <Modal
@@ -293,6 +295,6 @@ export default function DashboardPage() {
           Are you sure you want to delete this project? This action cannot be undone.
         </p>
       </Modal>
-    </DataLoader>
+    </>
   );
 }
