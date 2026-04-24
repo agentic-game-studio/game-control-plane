@@ -5,7 +5,7 @@
 export const MODEL_MAPPING: Record<string, string> = {
   opus: "glm-5.1",
   sonnet: "glm-4.7",
-  haiku: "glm-4",
+  haiku: "glm-4.7-flash",
 };
 
 export const DEFAULT_ZAI_MODEL = "glm-5.1";
