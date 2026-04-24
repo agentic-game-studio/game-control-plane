@@ -10,9 +10,10 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { loadConfig } from "../config.js";
-import { getAgentSystemPrompt } from "../prompts/agent-prompt-loader.js";
+import { getAgentSystemPrompt, loadAgentPrompts } from "../prompts/agent-prompt-loader.js";
 import { callLLMWithTools, GAME_STUDIO_TOOLS, type LLMMessage } from "../llm/zai-client.js";
 import { broadcast } from "./websocket.js";
+import { getZaiModel } from "../config/model-mapping.js";
 import type { WSEvent, AgentRole } from "@game-studio/types";
 
 /** Helper to broadcast log entries with timestamp */
@@ -320,8 +321,16 @@ export async function invokeAgent(
   } as WSEvent);
 
   try {
-    // Load agent's system prompt from MD file
-    const systemPrompt = await getAgentSystemPrompt(agentRole);
+    // Load agent's system prompt and model tier from MD file
+    const [systemPrompt, prompts] = await Promise.all([
+      getAgentSystemPrompt(agentRole),
+      loadAgentPrompts(),
+    ]);
+
+    // Get model tier and map to Z.ai model
+    const agentPrompt = prompts.get(agentRole);
+    const modelTier = agentPrompt?.model ?? "sonnet";
+    const model = getZaiModel(modelTier);
 
     // Build initial messages
     const messages: LLMMessage[] = [];
@@ -346,6 +355,7 @@ export async function invokeAgent(
         messages,
         tools: GAME_STUDIO_TOOLS,
         systemPrompt,
+        model,
       },
       (name, input) => executeTool(name, input, sessionId, agentRole)
     );
@@ -384,10 +394,17 @@ export async function continueConversation(
   messages: LLMMessage[],
   sessionId: string
 ): Promise<InvokeResult> {
-  const invocationId = `invoke-${Date.now()}`;
-
   try {
-    const systemPrompt = await getAgentSystemPrompt(agentRole);
+    // Load agent's system prompt and model tier from MD file
+    const [systemPrompt, prompts] = await Promise.all([
+      getAgentSystemPrompt(agentRole),
+      loadAgentPrompts(),
+    ]);
+
+    // Get model tier and map to Z.ai model
+    const agentPrompt = prompts.get(agentRole);
+    const modelTier = agentPrompt?.model ?? "sonnet";
+    const model = getZaiModel(modelTier);
 
     const response = await callLLMWithTools(
       {
@@ -395,6 +412,7 @@ export async function continueConversation(
         messages,
         tools: GAME_STUDIO_TOOLS,
         systemPrompt,
+        model,
       },
       (name, input) => executeTool(name, input, sessionId, agentRole)
     );
