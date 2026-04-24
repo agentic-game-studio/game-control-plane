@@ -6,6 +6,11 @@ import { usePathname } from "next/navigation";
 const navItems = [
   { href: "/dashboard", icon: "dashboard", label: "Dashboard", fill: false },
   { href: "/chat", icon: "chat", label: "Comms", fill: false },
+  { href: "/agents", icon: "smart_toy", label: "Agents", fill: false },
+  { href: "/skills", icon: "psychology", label: "Skills", fill: false },
+  { href: "/teams", icon: "groups", label: "Teams", fill: false },
+  { href: "/gates", icon: "verified", label: "Gates", fill: false },
+  { href: "/sessions", icon: "history", label: "Sessions", fill: false },
   { href: "/tickets", icon: "checklist", label: "Quests", fill: false },
   { href: "/assets", icon: "grid_on", label: "Assets", fill: false },
   { href: "/wiki", icon: "auto_stories", label: "Wiki", fill: false },
