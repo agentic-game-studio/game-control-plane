@@ -17,6 +17,16 @@ export interface ToolCall {
   result?: string;
 }
 
+// Normalize tool calls from backend format to frontend format
+function normalizeToolCalls(toolCalls?: { tool?: string; name?: string; args?: Record<string, unknown> }[]): ToolCall[] | undefined {
+  if (!toolCalls) return undefined;
+  return toolCalls.map((tc) => ({
+    name: tc.name ?? tc.tool ?? "unknown",
+    args: tc.args ?? {},
+    status: "success",
+  }));
+}
+
 export interface ChatMessage {
   id: string;
   type: "system" | "agent" | "user" | "progress" | "welcome" | "diff" | "navigate";
@@ -632,15 +642,6 @@ Agents: 3 active`,
     // Default: plain message to Game Director via real API
     addSessionMessage("game-director", { type: "user", sender: "DIRECTOR", content: trimmed });
 
-    // Add progress indicator
-    const progressId = uid();
-    addSessionMessage("game-director", {
-      type: "progress",
-      sender: "game-director",
-      content: "Thinking...",
-      progress: 0,
-    });
-
     // Call real API
     apiFetch<{ userMessage: ChatMessage; assistantMessage?: ChatMessage; errorMessage?: ChatMessage }>(
       "/api/chat/sessions/game-director/messages",
@@ -661,7 +662,7 @@ Agents: 3 active`,
             sender: result.assistantMessage.sender,
             content: result.assistantMessage.content,
             showActions: true,
-            toolCalls: result.assistantMessage.toolCalls as ToolCall[] | undefined,
+            toolCalls: normalizeToolCalls(result.assistantMessage.toolCalls),
           });
         } else if (result.errorMessage) {
           addSessionMessage("game-director", {
