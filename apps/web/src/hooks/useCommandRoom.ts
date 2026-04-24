@@ -81,7 +81,7 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, addS
         role,
         messages: [
           { id: uid(), type: "system", sender: "SYSTEM", content: `${role.toUpperCase()} session initialized.`, timestamp: timestamp() },
-          { id: uid(), type: "agent", sender: role, content: GREETINGS[role] ?? DEFAULT_GREETING, timestamp: timestamp(), showActions: true },
+          { id: uid(), type: "progress", sender: role, content: "Initializing...", timestamp: timestamp(), progress: 0 },
         ],
         status: "active",
         progress: 0,
@@ -104,13 +104,25 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, addS
         ...session,
         status: "done",
         progress: 100,
-        messages: [...session.messages, {
-          id: uid(),
-          type: "system" as const,
-          sender: "SYSTEM",
-          content: `Task completed: ${event.output}`,
-          timestamp: timestamp(),
-        }],
+        messages: [
+          ...session.messages,
+          {
+            id: uid(),
+            type: "agent" as const,
+            sender: role,
+            content: event.output || "Task completed.",
+            timestamp: timestamp(),
+            showActions: true,
+          },
+          {
+            id: uid(),
+            type: "navigate" as const,
+            sender: "SYSTEM",
+            content: "Back to Game Director",
+            timestamp: timestamp(),
+            navigate: { targetSession: "game-director", label: "Back to Game Director" },
+          },
+        ],
       });
       addSessionMessage("game-director", {
         type: "agent",
@@ -142,6 +154,38 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, addS
         content: `${role.toUpperCase()} failed: ${event.error}`,
       });
       return next;
+    }
+    case "chat:message": {
+      const sessionId = event.sessionId;
+      const message = event.message;
+      if (!message) return null;
+      const session = sessions.get(sessionId);
+      if (!session) return null;
+      const next = new Map(sessions);
+      next.set(sessionId, {
+        ...session,
+        messages: [...session.messages, {
+          id: message.id || uid(),
+          type: message.type,
+          sender: message.sender,
+          content: message.content,
+          timestamp: message.timestamp || timestamp(),
+          showActions: message.showActions,
+          progress: message.progress,
+          toolCalls: message.toolCalls as ToolCall[] | undefined,
+        }],
+        progress: message.progress ?? session.progress,
+        status: message.type === "agent" ? "done" : session.status,
+      });
+      return next;
+    }
+    case "skill:phase:complete": {
+      addSessionMessage("game-director", {
+        type: "system",
+        sender: "SYSTEM",
+        content: `Skill phase ${event.phase}: ${(event.output as string)?.slice(0, 100) ?? "complete"}...`,
+      });
+      return null;
     }
     case "log:entry": {
       addSessionMessage("game-director", {
@@ -235,7 +279,7 @@ export function useCommandRoom() {
 
   useWebSocket(onWSEvent);
 
-  const spawnAgent = useCallback((role: string) => {
+  const spawnAgent = useCallback(async (role: string, task?: string) => {
     const r = role.toLowerCase().trim();
 
     // Create agent session locally
@@ -246,7 +290,7 @@ export function useCommandRoom() {
         role: r,
         messages: [
           { id: uid(), type: "system", sender: "SYSTEM", content: `${r.toUpperCase()} session initialized.`, timestamp: timestamp() },
-          { id: uid(), type: "agent", sender: r, content: GREETINGS[r] ?? DEFAULT_GREETING, timestamp: timestamp(), showActions: true },
+          { id: uid(), type: "progress", sender: r, content: "Initializing...", timestamp: timestamp(), progress: 0 },
         ],
         status: "active",
         progress: 0,
@@ -263,39 +307,57 @@ export function useCommandRoom() {
       sender: "SYSTEM",
       content: `${r.toUpperCase()} spawned at ${timestamp()} UTC`,
     });
-    addSessionMessage("game-director", {
-      type: "agent",
-      sender: "game-director",
-      content: `I've brought ${r.replace(/-/g, " ")} online. They're ready for tasks. You can view their session in the sidebar.`,
-      showActions: false,
-    });
 
     if (threadTitle === "Board Room") {
       setThreadTitle(`Session: ${r.replace(/-/g, " ")}`);
     }
 
-    // Broadcast to backend via API
-    apiFetch<{ invocationId: string; role: string }>("/api/chat/spawn", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ role: r }),
-    }).catch((error) => {
+    // Call backend API to spawn agent and get response
+    try {
+      const result = await apiFetch<{ invocationId: string; role: string; sessionId: string; status: string }>(
+        "/api/chat/spawn",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ role: r, task: task ?? "What can you help me with?" }),
+        }
+      );
+
+      // Update session with initial greeting
+      setSessions((prev) => {
+        const session = prev.get(r);
+        if (!session) return prev;
+        const next = new Map(prev);
+        next.set(r, {
+          ...session,
+          messages: [
+            { id: uid(), type: "system", sender: "SYSTEM", content: `${r.toUpperCase()} session initialized.`, timestamp: timestamp() },
+            { id: uid(), type: "progress", sender: r, content: "Awaiting response...", timestamp: timestamp(), progress: 50 },
+          ],
+        });
+        return next;
+      });
+
+      // The real response will come via WebSocket or we need to fetch it
+      // For now, add a message that the agent is processing
+      addSessionMessage("game-director", {
+        type: "agent",
+        sender: "game-director",
+        content: `${r.replace(/-/g, " ")} is online and processing your request...`,
+        showActions: false,
+      });
+    } catch (error) {
       console.error("Failed to spawn agent via API:", error);
-    });
+      addSessionMessage("game-director", {
+        type: "system",
+        sender: "SYSTEM",
+        content: `Failed to spawn ${r}: ${error instanceof Error ? error.message : "Unknown error"}`,
+      });
+    }
   }, [addSessionMessage, threadTitle]);
 
-  // Approve agent — step-based workflow with tool calls, thinking, diff
-  const approveAgent = useCallback((role: string) => {
-    const steps = [
-      { progress: 10, label: "Analyzing task requirements...", thinking: "Breaking down the task into actionable steps..." },
-      { progress: 25, label: "Reading project context...", thinking: "Scanning relevant files for context..." },
-      { progress: 40, label: "Planning implementation...", thinking: "Designing the solution approach..." },
-      { progress: 55, label: "Implementing changes...", thinking: "Writing and editing code..." },
-      { progress: 75, label: "Verifying changes...", thinking: "Running checks and validation..." },
-      { progress: 100, label: "Complete", thinking: "Task finished successfully." },
-    ];
-
-    let stepIndex = 0;
+  // Approve agent — send approval via API and wait for response
+  const approveAgent = useCallback(async (role: string) => {
     const progressMsgId = uid();
     activityLogRef.current = [];
 
@@ -310,10 +372,9 @@ export function useCommandRoom() {
           id: progressMsgId,
           type: "progress" as const,
           sender: role,
-          content: steps[0].label,
+          content: "Approving and continuing task...",
           timestamp: timestamp(),
           progress: 10,
-          thinking: steps[0].thinking,
         }],
       });
       return next;
@@ -328,129 +389,98 @@ export function useCommandRoom() {
       console.error("Failed to approve agent via API:", error);
     });
 
-    // Local progress simulation with tool calls
-    const interval = setInterval(() => {
-      stepIndex++;
-      if (stepIndex >= steps.length) {
-        clearInterval(interval);
-        return;
-      }
-
-      const step = steps[stepIndex];
-
-      setSessions((prev) => {
-        const next = new Map(prev);
-        const session = next.get(role);
-        if (!session || session.status !== "active") return prev;
-
-        const newStandaloneMessages: ChatMessage[] = [];
-        const stepToolCalls: ToolCall[] = [];
-
-        if (step.progress === 25) {
-          stepToolCalls.push({
-            name: "Read",
-            args: { file_path: "src/utils.ts" },
-            status: "completed",
-            result: "function oldName() {\n  return 42;\n}",
-          });
-          activityLogRef.current.push("Read src/utils.ts — Retrieved source context");
+    // Now send a message to the agent session to continue
+    try {
+      const result = await apiFetch<{ userMessage: ChatMessage; assistantMessage?: ChatMessage }>(
+        `/api/chat/sessions/${role}/messages`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            type: "user",
+            sender: "DIRECTOR",
+            content: "Approved. Continue with the task.",
+          }),
         }
+      );
 
-        if (step.progress === 40) {
-          stepToolCalls.push({
-            name: "Grep",
-            args: { pattern: "oldName", path: "src" },
-            status: "completed",
-            result: "src/utils.ts:1: function oldName()\nsrc/main.ts:5: oldName()",
-          });
-          activityLogRef.current.push("Grep 'oldName' in src/ — Found 2 references");
-        }
+      if (result.assistantMessage) {
+        // Update session with real response
+        setSessions((prev) => {
+          const session = prev.get(role);
+          if (!session) return prev;
+          const next = new Map(prev);
 
-        if (step.progress === 55) {
-          stepToolCalls.push({
-            name: "Edit",
-            args: { file_path: "src/utils.ts", old_string: "function oldName()", new_string: "function newName()" },
-            status: "completed",
-            result: "Done",
+          const updatedMessages = session.messages.map((m) => {
+            if (m.id === progressMsgId) {
+              return {
+                ...m,
+                progress: 100,
+                content: "Task completed",
+                timestamp: timestamp(),
+              };
+            }
+            return m;
           });
-          activityLogRef.current.push("Edit src/utils.ts — Renamed function oldName → newName");
-          newStandaloneMessages.push({
-            id: uid(),
-            type: "diff" as const,
-            sender: role,
-            content: "Edited src/utils.ts",
-            timestamp: timestamp(),
-            diff: {
-              filePath: "src/utils.ts",
-              oldContent: "function oldName() {\n  return 42;\n}",
-              newContent: "function newName() {\n  return 42;\n}",
-            },
-          });
-        }
 
-        if (step.progress === 75) {
-          stepToolCalls.push({
-            name: "Write",
-            args: { file_path: "src/utils.test.ts", content: "import { newName } from './utils';\n\ntest('newName', () => {\n  expect(newName()).toBe(42);\n});" },
-            status: "completed",
-            result: "Done",
+          next.set(role, {
+            ...session,
+            progress: 100,
+            status: "done",
+            messages: [
+              ...updatedMessages,
+              {
+                id: uid(),
+                type: "agent" as const,
+                sender: role,
+                content: result.assistantMessage!.content,
+                timestamp: timestamp(),
+                showActions: true,
+                toolCalls: result.assistantMessage!.toolCalls as ToolCall[] | undefined,
+              },
+              {
+                id: uid(),
+                type: "navigate" as const,
+                sender: "SYSTEM",
+                content: "Back to Game Director",
+                timestamp: timestamp(),
+                navigate: { targetSession: "game-director", label: "Back to Game Director" },
+              },
+            ],
           });
-          activityLogRef.current.push("Write src/utils.test.ts — Added unit test coverage");
-        }
-
-        const updatedMessages = session.messages.map((m) => {
-          if (m.id !== progressMsgId) return m;
-          return {
-            ...m,
-            progress: step.progress,
-            content: step.label,
-            thinking: step.thinking,
-            timestamp: timestamp(),
-            toolCalls: [...(m.toolCalls ?? []), ...stepToolCalls],
-          };
+          return next;
         });
 
-        if (step.progress === 100) {
-          newStandaloneMessages.push({
-            id: uid(),
-            type: "system" as const,
-            sender: "SYSTEM",
-            content: "Task completed successfully.",
-            timestamp: timestamp(),
-          });
-          newStandaloneMessages.push({
-            id: uid(),
-            type: "navigate" as const,
-            sender: "SYSTEM",
-            content: "Back to Game Director",
-            timestamp: timestamp(),
-            navigate: { targetSession: "game-director", label: "Back to Game Director" },
-          });
-        }
-
-        next.set(role, {
-          ...session,
-          progress: step.progress,
-          status: step.progress === 100 ? "done" : "active",
-          messages: [...updatedMessages, ...newStandaloneMessages],
-        });
-
-        return next;
-      });
-
-      if (step.progress === 100) {
-        clearInterval(interval);
-        const bullets = activityLogRef.current.length > 0
-          ? "\n\n" + activityLogRef.current.map((s) => `• ${s}`).join("\n")
-          : "";
         addSessionMessage("game-director", {
           type: "agent",
           sender: "game-director",
-          content: `${role.replace(/-/g, " ")} reports task complete.${bullets}`,
+          content: `${role.replace(/-/g, " ")} completed the task.`,
           showActions: false,
         });
       }
-    }, 1500);
+    } catch (error) {
+      console.error("Failed to continue agent task:", error);
+      setSessions((prev) => {
+        const session = prev.get(role);
+        if (!session) return prev;
+        const next = new Map(prev);
+        next.set(role, {
+          ...session,
+          status: "done",
+          messages: [
+            ...session.messages,
+            {
+              id: uid(),
+              type: "system" as const,
+              sender: "SYSTEM",
+              content: `Error: ${error instanceof Error ? error.message : "Failed to continue task"}`,
+              timestamp: timestamp(),
+            },
+          ],
+        });
+        return next;
+      });
+    }
   }, [addSessionMessage]);
 
   const executeCommand = useCallback((input: string) => {
@@ -599,17 +629,56 @@ Agents: 3 active`,
       return;
     }
 
-    // Default: plain message to Game Director
+    // Default: plain message to Game Director via real API
     addSessionMessage("game-director", { type: "user", sender: "DIRECTOR", content: trimmed });
 
-    setTimeout(() => {
-      addSessionMessage("game-director", {
-        type: "agent",
-        sender: "game-director",
-        content: `Acknowledged. I'll coordinate the appropriate team members. Use \`spawn <agent-role>\` to bring a specialist online if needed.`,
-        showActions: false,
+    // Add progress indicator
+    const progressId = uid();
+    addSessionMessage("game-director", {
+      type: "progress",
+      sender: "game-director",
+      content: "Thinking...",
+      progress: 0,
+    });
+
+    // Call real API
+    apiFetch<{ userMessage: ChatMessage; assistantMessage?: ChatMessage; errorMessage?: ChatMessage }>(
+      "/api/chat/sessions/game-director/messages",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: "user",
+          sender: "DIRECTOR",
+          content: trimmed,
+        }),
+      }
+    )
+      .then((result) => {
+        if (result.assistantMessage) {
+          addSessionMessage("game-director", {
+            type: "agent",
+            sender: result.assistantMessage.sender,
+            content: result.assistantMessage.content,
+            showActions: true,
+            toolCalls: result.assistantMessage.toolCalls as ToolCall[] | undefined,
+          });
+        } else if (result.errorMessage) {
+          addSessionMessage("game-director", {
+            type: "system",
+            sender: "SYSTEM",
+            content: result.errorMessage.content,
+          });
+        }
+      })
+      .catch((error) => {
+        console.error("Failed to send message:", error);
+        addSessionMessage("game-director", {
+          type: "system",
+          sender: "SYSTEM",
+          content: `Error: ${error instanceof Error ? error.message : "Failed to get response"}`,
+        });
       });
-    }, 500);
   }, [addSessionMessage, spawnAgent, approveAgent]);
 
   // Derived state
