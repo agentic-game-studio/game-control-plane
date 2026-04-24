@@ -23,6 +23,7 @@ export interface ToolCall {
   input?: string;
   output?: string;
   duration?: number;
+  args?: Record<string, unknown>;
 }
 
 export interface NavigateAction {

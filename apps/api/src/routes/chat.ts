@@ -251,8 +251,8 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
       progress: 100,
       toolCalls: result.toolCalls?.map((tc) => ({
         tool: tc.name,
-        status: "success" as const,
-        input: JSON.stringify(tc.input),
+        args: tc.input,
+        status: "success",
       })),
     };
 
@@ -365,8 +365,8 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
         progress: 100,
         toolCalls: result.toolCalls?.map((tc) => ({
           tool: tc.name,
-          status: "success" as const,
-          input: JSON.stringify(tc.input),
+          args: tc.input,
+          status: "success",
         })),
       };
 
