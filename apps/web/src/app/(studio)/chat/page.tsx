@@ -23,7 +23,6 @@ export default function ChatPage() {
     if (action === "approve") {
       approveAgent(sender);
     } else if (action === "navigate") {
-      // Navigate back to game-director or specified session
       selectSession(sender === "game-director" ? "game-director" : sender);
     }
   };

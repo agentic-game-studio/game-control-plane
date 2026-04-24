@@ -3,6 +3,7 @@
 import { useEffect, useRef } from "react";
 import type { ChatMessage } from "@/hooks/useCommandRoom";
 import { getAgentIcon } from "@/lib/agent-icons";
+import DiffView from "./DiffView";
 
 interface ChatThreadProps {
   messages: ChatMessage[];
@@ -12,6 +13,28 @@ interface ChatThreadProps {
   onDecision: (action: string, sender: string) => void;
   onNavigate?: (targetSession: string) => void;
 }
+
+const TOOL_ICONS: Record<string, string> = {
+  Read: "description",
+  Write: "edit_note",
+  Edit: "edit",
+  Glob: "folder_open",
+  Grep: "search",
+  Bash: "terminal",
+  Task: "group",
+  AskUserQuestion: "help",
+};
+
+const TOOL_COLORS: Record<string, string> = {
+  Read: "#0055FF",
+  Write: "#df2b31",
+  Edit: "#c13301",
+  Glob: "#737688",
+  Grep: "#737688",
+  Bash: "#191b25",
+  Task: "#0055FF",
+  AskUserQuestion: "#c13301",
+};
 
 function SystemMessage({ msg }: { msg: ChatMessage }) {
   return (
@@ -70,16 +93,15 @@ function AgentMessage({ msg, onDecision }: { msg: ChatMessage; onDecision: (acti
   const label = msg.sender.replace(/-/g, "_").toUpperCase();
   const isProgress = msg.type === "progress";
 
-  // Simulated tool calls for progress messages
-  const defaultToolCalls = msg.toolCalls ?? (isProgress ? [
-    { tool: "Read", status: "success", input: "src/game.ts", output: "1,247 bytes", duration: 120 },
-    { tool: "Grep", status: "success", input: "PlayerController", output: "4 matches", duration: 45 },
-    { tool: "Edit", status: "pending", input: "src/game.ts:42-48", duration: 0 },
-    { tool: "Write", status: "pending", input: "src/player.ts", duration: 0 },
-  ] : []);
+  // Default tool calls for progress messages
+  const defaultToolCalls = isProgress ? [
+    { name: "Read", args: { path: "src/game.ts" }, status: "success" },
+    { name: "Grep", args: { pattern: "PlayerController" }, status: "success" },
+    { name: "Edit", args: { path: "src/game.ts:42-48" }, status: "pending" },
+    { name: "Write", args: { path: "src/player.ts" }, status: "pending" },
+  ] : [];
 
-  // Simulated thinking text
-  const thinkingText = msg.thinking ?? (isProgress ? "Analyzing codebase structure and planning implementation approach..." : "");
+  const toolCalls = msg.toolCalls ?? defaultToolCalls;
 
   return (
     <div className="flex gap-4 w-full max-w-4xl self-start">
@@ -101,55 +123,56 @@ function AgentMessage({ msg, onDecision }: { msg: ChatMessage; onDecision: (acti
                 <code className="whitespace-pre-wrap">{msg.codeBlock}</code>
               </div>
             )}
-            <p className="font-[var(--font-terminal)] text-base">{msg.content}</p>
+            <p className="font-[var(--font-terminal)] text-base whitespace-pre-wrap">{msg.content}</p>
 
-            {isProgress && (
-              <>
-                {/* Thinking panel */}
-                <div className="mt-4 border-2 border-[#0055FF] bg-[#f0f4ff] p-3">
-                  <div className="flex items-center gap-2 mb-2">
-                    <span className="material-symbols-outlined text-sm text-[#0055FF] animate-pulse">psychology</span>
-                    <span className="font-[var(--font-label)] text-xs font-bold uppercase text-[#0055FF]">Thinking</span>
-                  </div>
-                  <p className="font-[var(--font-terminal)] text-sm text-[#434656]">
-                    {thinkingText}
-                  </p>
-                </div>
-
-                {/* Tool calls activity log */}
-                <div className="mt-4 border-2 border-black bg-[#1e1e1e] p-3">
-                  <div className="flex items-center gap-2 mb-3 border-b border-[#404040] pb-2">
-                    <span className="material-symbols-outlined text-sm text-[#a0a0a0]">terminal</span>
-                    <span className="font-[var(--font-terminal)] text-xs text-[#a0a0a0] uppercase">Tool Calls</span>
-                  </div>
-                  <div className="space-y-2">
-                    {defaultToolCalls.map((tc, i) => (
-                      <div key={i} className="flex items-center gap-3 font-[var(--font-terminal)] text-xs">
-                        <span className={`material-symbols-outlined text-sm ${
-                          tc.status === "success" ? "text-[#7ec67e]" : tc.status === "error" ? "text-[#e06c75]" : "text-[#e5c07b]"
-                        }`}>
-                          {tc.status === "success" ? "check_circle" : tc.status === "error" ? "error" : "schedule"}
-                        </span>
-                        <span className="text-[#c678dd] font-bold">{tc.tool}</span>
-                        <span className="text-[#e5c07b]">({tc.input})</span>
-                        {tc.output && <span className="text-[#7ec67e]">→ {tc.output}</span>}
-                        {tc.duration !== undefined && tc.duration > 0 && (
-                          <span className="text-[#606060] ml-auto">{tc.duration}ms</span>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Progress bar */}
-                <div className="mt-4 border-2 border-black p-1 bg-[#f3f2ff] flex items-center gap-2">
+            {/* Rich progress message */}
+            {isProgress && msg.progress !== undefined && (
+              <div className="mt-4 border-2 border-black bg-[#f3f2ff]">
+                <div className="p-1 flex items-center gap-2">
                   <span className="material-symbols-outlined animate-spin text-sm">sync</span>
                   <div className="flex-1 h-3 border border-black bg-white">
-                    <div className="h-full bg-[#0055FF] transition-all duration-500" style={{ width: `${msg.progress ?? 0}%` }} />
+                    <div className="h-full bg-[#0055FF] transition-all duration-500" style={{ width: `${msg.progress}%` }} />
                   </div>
-                  <span className="font-[var(--font-terminal)] text-xs">{msg.progress ?? 0}%</span>
+                  <span className="font-[var(--font-terminal)] text-xs">{msg.progress}%</span>
                 </div>
-              </>
+
+                {msg.thinking && (
+                  <div className="border-t border-black px-3 py-2 bg-[#faf8ff]">
+                    <span className="font-[var(--font-label)] text-[10px] uppercase text-[#737688] tracking-widest block mb-1">Thinking</span>
+                    <span className="font-[var(--font-terminal)] text-xs text-[#737688]">{msg.thinking}</span>
+                  </div>
+                )}
+
+                {toolCalls && toolCalls.length > 0 && (
+                  <div className="border-t-2 border-black bg-white">
+                    <div className="px-3 py-1 bg-black">
+                      <span className="font-[var(--font-label)] text-[10px] uppercase text-white tracking-widest">Activity</span>
+                    </div>
+                    <div className="divide-y divide-[#e1e1ef]">
+                      {toolCalls.map((tc, i) => (
+                        <div key={i} className="flex items-center gap-2 px-3 py-1.5">
+                          <span className="material-symbols-outlined text-sm" style={{ color: TOOL_COLORS[tc.name] ?? '#737688' }}>
+                            {TOOL_ICONS[tc.name] ?? 'build'}
+                          </span>
+                          <span className="font-[var(--font-terminal)] text-xs flex-1 truncate">
+                            {tc.name} {Object.values(tc.args)[0] ? `· ${String(Object.values(tc.args)[0]).slice(0, 40)}` : ''}
+                          </span>
+                          <span className="font-[var(--font-terminal)] text-[10px] uppercase px-1.5 py-0.5 border border-black bg-[#e7e7f5] text-[#191b25]">
+                            {tc.status}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {!isProgress && msg.thinking && (
+              <div className="mt-3 border border-[#e1e1ef] bg-[#faf8ff] p-2">
+                <span className="font-[var(--font-label)] text-[10px] uppercase text-[#737688] tracking-widest block mb-1">Thinking</span>
+                <span className="font-[var(--font-terminal)] text-xs text-[#737688]">{msg.thinking}</span>
+              </div>
             )}
 
             <div className="absolute -right-3 -top-3 opacity-0 group-hover:opacity-100 transition-opacity">
@@ -203,7 +226,7 @@ function UserMessage({ msg }: { msg: ChatMessage }) {
           <div className="absolute right-[-10px] top-4 w-0 h-0 border-y-[6px] border-y-transparent border-l-[10px] border-l-black z-0" />
           <div className="absolute right-[-6px] top-[18px] w-0 h-0 border-y-[4px] border-y-transparent border-l-[8px] border-l-[#dce1ff] z-10" />
           <div className="border-2 border-black bg-[#dce1ff] p-3 shadow-[-4px_4px_0_0_rgba(0,0,0,1)] relative z-10 text-right">
-            <p className="font-[var(--font-terminal)] text-base">{msg.content}</p>
+            <p className="font-[var(--font-terminal)] text-base whitespace-pre-wrap">{msg.content}</p>
           </div>
         </div>
       </div>
@@ -211,60 +234,40 @@ function UserMessage({ msg }: { msg: ChatMessage }) {
   );
 }
 
-function DiffMessage({ msg }: { msg: ChatMessage }) {
-  if (!msg.diffBlocks?.length) return null;
+function DiffMessage({ msg, onNavigate }: { msg: ChatMessage; onNavigate?: (target: string) => void }) {
+  const icon = getAgentIcon(msg.sender);
+  const label = msg.sender.replace(/-/g, "_").toUpperCase();
+
+  // Handle both old format (msg.diff) and new format (msg.diffBlocks)
+  if (!msg.diff) return null;
 
   return (
-    <div className="my-4 px-8">
-      <div className="border-2 border-black bg-[#1e1e1e] shadow-[4px_4px_0_0_rgba(0,0,0,1)]">
-        <div className="bg-[#2d2d2d] border-b border-[#404040] px-4 py-2 flex items-center gap-2">
-          <span className="material-symbols-outlined text-sm text-[#a0a0a0]">description</span>
-          <span className="font-[var(--font-terminal)] text-xs text-[#a0a0a0] uppercase">
-            {msg.diffBlocks.length} file(s) changed
-          </span>
+    <div className="flex gap-4 w-full max-w-4xl self-start">
+      <div className="w-12 h-12 shrink-0 border-2 border-black bg-[#0055FF] flex justify-center items-center text-white shadow-[2px_2px_0_0_rgba(0,0,0,1)] relative z-10">
+        <span className="material-symbols-outlined">{icon}</span>
+      </div>
+      <div className="flex-1">
+        <div className="flex items-baseline gap-3 mb-1 ml-2">
+          <span className="font-[var(--font-label)] text-xs font-bold uppercase">{label}</span>
+          <span className="font-[var(--font-terminal)] text-[10px] text-[#737688]">{msg.timestamp}</span>
         </div>
-        {msg.diffBlocks.map((block, bi) => (
-          <div key={bi} className="border-b border-[#404040] last:border-b-0">
-            <div className="bg-[#2d2d2d] px-4 py-1 text-[#e0e0e0] font-[var(--font-terminal)] text-xs border-b border-[#404040]">
-              {block.filePath}
-            </div>
-            {block.hunks.map((hunk, hi) => (
-              <div key={hi} className="font-mono text-xs">
-                {hunk.lines.map((line, li) => (
-                  <div
-                    key={li}
-                    className={`px-4 py-0.5 flex ${
-                      hunk.type === "add"
-                        ? "bg-[#1c3a1c] text-[#7ec67e]"
-                        : hunk.type === "remove"
-                          ? "bg-[#3a1c1c] text-[#e06c75]"
-                          : "bg-transparent text-[#a0a0a0]"
-                    }`}
-                  >
-                    <span className="w-12 text-right pr-4 text-[#606060] select-none">
-                      {hunk.lineNum ? hunk.lineNum + li : ""}
-                    </span>
-                    <span className="w-6 text-right pr-2 select-none">
-                      {hunk.type === "add" ? "+" : hunk.type === "remove" ? "-" : " "}
-                    </span>
-                    <span>{line}</span>
-                  </div>
-                ))}
-              </div>
-            ))}
-          </div>
-        ))}
+        <DiffView
+          oldContent={msg.diff.oldContent}
+          newContent={msg.diff.newContent}
+          filePath={msg.diff.filePath}
+        />
       </div>
     </div>
   );
 }
 
 function NavigateMessage({ msg, onNavigate }: { msg: ChatMessage; onNavigate?: (targetSession: string) => void }) {
-  if (!msg.navigate) return null;
+  const target = msg.navigate?.targetSession ?? msg.navigateTo;
+  if (!target) return null;
 
   const handleClick = () => {
-    if (onNavigate && msg.navigate) {
-      onNavigate(msg.navigate.targetSession);
+    if (onNavigate) {
+      onNavigate(target);
     }
   };
 
@@ -275,7 +278,7 @@ function NavigateMessage({ msg, onNavigate }: { msg: ChatMessage; onNavigate?: (
         className="border-2 border-[#0055FF] bg-white px-6 py-3 font-[var(--font-label)] text-xs font-bold uppercase text-[#0055FF] hover:bg-[#0055FF] hover:text-white retro-press flex items-center gap-3 shadow-[2px_2px_0_0_rgba(0,85,255,1)] transition-colors"
       >
         <span className="material-symbols-outlined text-sm">arrow_forward</span>
-        {msg.navigate.label}
+        {msg.navigate?.label ?? msg.content ?? "Navigate"}
       </button>
     </div>
   );
@@ -329,7 +332,7 @@ export default function ChatThread({ messages, threadId, threadTitle, currentSes
             case "progress":
               return <AgentMessage key={msg.id} msg={msg} onDecision={onDecision} />;
             case "diff":
-              return <DiffMessage key={msg.id} msg={msg} />;
+              return <DiffMessage key={msg.id} msg={msg} onNavigate={onNavigate} />;
             case "navigate":
               return <NavigateMessage key={msg.id} msg={msg} onNavigate={onNavigate} />;
             default:

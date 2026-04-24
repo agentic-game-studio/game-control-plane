@@ -6,14 +6,14 @@ interface CommandInputProps {
   onSend: (input: string) => void;
 }
 
-const SLASH_COMMANDS = [
-  { cmd: "/spawn", hint: "Bring an agent online", icon: "smart_toy" },
-  { cmd: "/approve", hint: "Approve last agent request", icon: "check_circle" },
-  { cmd: "/done", hint: "Complete agent task", icon: "task_alt" },
-  { cmd: "/clear", hint: "Clear chat history", icon: "delete" },
-  { cmd: "/help", hint: "Show available commands", icon: "help" },
-  { cmd: "/cost", hint: "Show estimated costs", icon: "attach_money" },
-  { cmd: "/diff", hint: "View recent changes", icon: "compare" },
+const COMMANDS = [
+  { cmd: "/spawn", desc: "Bring an agent online" },
+  { cmd: "/approve", desc: "Approve last agent request" },
+  { cmd: "/done", desc: "Complete agent task" },
+  { cmd: "/clear", desc: "Clear the chat" },
+  { cmd: "/help", desc: "Show available commands" },
+  { cmd: "/cost", desc: "Show mock token usage" },
+  { cmd: "/diff", desc: "Show recent changes" },
 ];
 
 export default function CommandInput({ onSend }: CommandInputProps) {
@@ -28,7 +28,7 @@ export default function CommandInput({ onSend }: CommandInputProps) {
   }, []);
 
   // Filter commands based on input
-  const filteredCommands = SLASH_COMMANDS.filter((cmd) =>
+  const filteredCommands = COMMANDS.filter((cmd) =>
     cmd.cmd.toLowerCase().startsWith(value.toLowerCase())
   );
 
@@ -38,6 +38,19 @@ export default function CommandInput({ onSend }: CommandInputProps) {
     onSend(input);
     setValue("");
     setShowHints(false);
+  };
+
+  const handleSelectCommand = (cmd: string) => {
+    setValue(cmd + " ");
+    setShowHints(false);
+    textareaRef.current?.focus();
+  };
+
+  const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const v = e.target.value;
+    setValue(v);
+    setShowHints(v.startsWith("/") && !v.includes(" "));
+    setSelectedIndex(0);
   };
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -56,8 +69,7 @@ export default function CommandInput({ onSend }: CommandInputProps) {
         e.preventDefault();
         const cmd = filteredCommands[selectedIndex];
         if (cmd) {
-          setValue(cmd.cmd + " ");
-          setShowHints(false);
+          handleSelectCommand(cmd.cmd);
         }
         return;
       }
@@ -73,22 +85,9 @@ export default function CommandInput({ onSend }: CommandInputProps) {
     }
   };
 
-  const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    const newValue = e.target.value;
-    setValue(newValue);
-
-    // Show hints when user types /
-    if (newValue.startsWith("/")) {
-      setShowHints(true);
-      setSelectedIndex(0);
-    } else {
-      setShowHints(false);
-    }
-  };
-
   return (
     <div className="absolute bottom-0 left-0 w-full bg-white border-t-2 border-black p-4 z-30 shadow-[0_-4px_0_0_rgba(0,0,0,0.05)]">
-      <div className="max-w-4xl mx-auto flex gap-4">
+      <div className="max-w-4xl mx-auto flex gap-4 relative">
         <div className="flex-1 relative">
           <textarea
             ref={textareaRef}
@@ -108,23 +107,21 @@ export default function CommandInput({ onSend }: CommandInputProps) {
               ref={hintsRef}
               className="absolute bottom-full left-0 right-0 mb-1 border-2 border-black bg-white shadow-[4px_4px_0_0_rgba(0,0,0,1)] max-h-48 overflow-y-auto"
             >
+              <div className="p-2 border-b border-[#e1e1ef]">
+                <span className="font-[var(--font-label)] text-[10px] uppercase text-[#737688] tracking-widest">Commands</span>
+              </div>
               {filteredCommands.map((cmd, index) => (
                 <button
                   key={cmd.cmd}
-                  onClick={() => {
-                    setValue(cmd.cmd + " ");
-                    setShowHints(false);
-                    textareaRef.current?.focus();
-                  }}
+                  onClick={() => handleSelectCommand(cmd.cmd)}
                   className={`w-full px-3 py-2 flex items-center gap-3 text-left font-[var(--font-terminal)] text-sm hover:bg-[#f0f0ff] ${
                     index === selectedIndex ? "bg-[#e7e7f5]" : ""
                   }`}
                 >
-                  <span className="material-symbols-outlined text-base text-[#0055FF]">
-                    {cmd.icon}
-                  </span>
-                  <span className="font-bold text-[#0055FF]">{cmd.cmd}</span>
-                  <span className="text-[#737688]">{cmd.hint}</span>
+                  <code className="font-[var(--font-terminal)] text-sm text-[#0055FF] font-bold bg-white border border-black px-2 py-0.5 text-xs">
+                    {cmd.cmd}
+                  </code>
+                  <span className="text-[#434656]">{cmd.desc}</span>
                 </button>
               ))}
             </div>
