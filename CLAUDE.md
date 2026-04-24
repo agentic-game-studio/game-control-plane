@@ -45,11 +45,21 @@ game-control-plane/
 
 ### Agent Hierarchy (48 agents)
 
-- **Tier 1 (Opus)**: creative-director, technical-director, producer
-- **Tier 2 (Sonnet)**: game-designer, lead-programmer, art-director, audio-director, narrative-director, qa-lead, release-manager, localization-lead
-- **Tier 3 (Sonnet/Haiku)**: 37 specialists — systems-designer, gameplay-programmer, godot-specialist, unreal-specialist, unity-specialist, etc.
+- **Tier 1 (Opus → glm-5.1)**: creative-director, technical-director, producer
+- **Tier 2 (Sonnet → glm-4.7)**: game-designer, lead-programmer, art-director, audio-director, narrative-director, qa-lead, release-manager, localization-lead
+- **Tier 3 (Sonnet/Haiku → glm-4.7/glm-4.7-flash)**: 37 specialists — systems-designer, gameplay-programmer, godot-specialist, unreal-specialist, unity-specialist, etc.
 
-### Team Skills (9 multi-agent workflows)
+### Model Tier Mapping
+
+| Tier | Z.ai Model | Use Case |
+|------|------------|----------|
+| opus | glm-5.1 | Tier 1 directors (creative, technical, producer) |
+| sonnet | glm-4.7 | Tier 2 leads, Tier 3 specialists |
+| haiku | glm-4.7-flash | Fast responses, Tier 3 basic tasks |
+
+System prompts loaded from `workspace/.claude/agents/*.md` files dynamically.
+
+### Team Skills (9 LLM-powered multi-agent workflows)
 
 | Skill | Purpose | Agents |
 |-------|---------|--------|
@@ -63,13 +73,17 @@ game-control-plane/
 | team-release | Release pipeline, certification | technical-director, release-manager, devops-engineer, qa-lead |
 | team-multiplayer | Networking, sync | technical-director, lead-programmer, network-programmer, qa-tester |
 
-### Director Gates (18 gates across 5 review layers)
+Workflows are orchestrated by the creative-director agent using real LLM calls to coordinate team members.
+
+### Director Gates (18 LLM-powered gates across 5 review layers)
 
 - **Creative Director** (4): CD-PILLARS, CD-GDD-ALIGN, CD-SYSTEMS, CD-PHASE-GATE
 - **Technical Director** (4): TD-FEASIBILITY, TD-ARCHITECTURE, TD-SYSTEM-BOUNDARY, TD-PHASE-GATE
 - **Producer** (4): PR-SCOPE, PR-SPRINT, PR-MILESTONE, PR-PHASE-GATE
 - **QA Lead** (2): QL-STORY-READY, QL-TEST-COVERAGE
 - **Art Director** (2): AD-PHASE-GATE, AD-ART-BIBLE
+
+Each gate invokes the appropriate director agent with a specific review prompt. Verdict is parsed from the first line of LLM response.
 
 Review modes: `solo` (AI-only), `lean` (key checkpoints, default), `full` (all gates enforced)
 
@@ -101,11 +115,11 @@ ZAI_API_KEY=...            # Required — ZAI API key
 ZAI_BASE_URL=https://api.z.ai/api/anthropic
 API_PORT=3001
 API_SECRET=...            # For auth header
-WORKSPACE_DIR=./workspace  # Game development directory
+WORKSPACE_DIR=./workspace  # Game development directory (system prompts loaded from .claude/agents/*.md)
 REVIEW_MODE=lean          # solo | lean | full
-DEFAULT_MODEL=glm-5.1
-MAX_TOOL_CALLS=100
-TOOL_CHECKPOINT_INTERVAL=30
+DEFAULT_MODEL=glm-5.1      # Default fallback model
+MAX_TOOL_CALLS=100         # Tool execution loop limit
+TOOL_CHECKPOINT_INTERVAL=30 # Checkpoint frequency for long tasks
 ```
 
 ## Frontend (apps/web)
@@ -133,6 +147,10 @@ Next.js 15 App Router, Tailwind CSS v4, no UI framework. All pages are client co
 | `/tickets` | Kanban board with 4 columns (Available, Processing, Verify, Archived), create/delete quests |
 | `/assets` | Asset inventory grid with create/delete, Art Bible sidebar with constraints |
 | `/settings` | Ledger & config — engine selection, model dropdown, API key, webhook, reset functionality |
+| `/agents` | Agent registry page with searchable list + tier filter |
+| `/skills` | Skills library with filterable categories |
+| `/teams` | Team workflows with workflow timeline + run dialog |
+| `/gates` | Director gates matrix with category filter + run functionality |
 
 **Shared Components**: `components/Modal.tsx` (reusable modal), `components/DataLoader.tsx` (loading/error states)
 
@@ -206,9 +224,14 @@ pnpm generate          # Both validations
 ## Key Files
 
 - `apps/api/src/llm/zai-client.ts` — LLM client with tool loop, retry, pruning
+- `apps/api/src/services/llm-service.ts` — Agent orchestration, loads system prompts from MD files, maps tiers to Z.ai models
+- `apps/api/src/services/gate-service.ts` — LLM-powered gate execution with 18 gates across 5 review layers
+- `apps/api/src/config/model-mapping.ts` — Model tier → Z.ai model mapping (opus→glm-5.1, sonnet→glm-4.7, haiku→glm-4.7-flash)
 - `apps/api/src/config.ts` — Environment validation
 - `apps/api/src/routes/sessions.ts` — Session CRUD + checkpointing
 - `apps/api/src/routes/skills.ts` — Skill invocation
+- `apps/api/src/routes/gates.ts` — Real LLM-powered gate execution via executeGate()
+- `apps/api/src/routes/teams.ts` — Real team workflows orchestrated by creative-director
 - `apps/api/src/routes/documents.ts` — Document store routes
 - `apps/api/src/routes/dashboard.ts` — Projects CRUD with WebSocket events
 - `apps/api/src/routes/tickets.ts` — Kanban board CRUD
