@@ -1,6 +1,6 @@
 {
   "summary": {
-    "totalProjects": 12,
+    "totalProjects": 13,
     "activeAgents": 8,
     "credits": {
       "current": 420,
@@ -127,6 +127,16 @@
       "status": "active",
       "createdAt": "2026-04-24T05:47:00.193Z",
       "updatedAt": "2026-04-24T05:47:00.193Z"
+    },
+    {
+      "id": "proj-1777019515307",
+      "name": "test",
+      "description": "hhhh",
+      "engine": "godot",
+      "progress": 0,
+      "status": "active",
+      "createdAt": "2026-04-24T08:31:55.307Z",
+      "updatedAt": "2026-04-24T08:31:55.307Z"
     }
   ],
   "activityLog": [

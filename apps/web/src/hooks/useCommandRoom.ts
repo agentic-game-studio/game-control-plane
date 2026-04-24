@@ -5,6 +5,18 @@ import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "./useWebSocket";
 import type { WSEvent } from "@game-studio/types";
 
+export interface DiffBlock {
+  filePath: string;
+  hunks: { lines: string[]; type: "add" | "remove" | "context"; lineNum?: number }[];
+}
+
+export interface ToolCall {
+  name: string;
+  args: Record<string, unknown>;
+  status: string;
+  result?: string;
+}
+
 export interface ChatMessage {
   id: string;
   type: "system" | "agent" | "user" | "progress" | "welcome" | "diff" | "navigate";
@@ -14,9 +26,10 @@ export interface ChatMessage {
   showActions?: boolean;
   progress?: number;
   codeBlock?: string;
-  toolCalls?: { name: string; args: Record<string, unknown>; status: string; result?: string }[];
+  toolCalls?: ToolCall[];
   diff?: { oldContent: string; newContent: string; filePath: string };
   thinking?: string;
+  navigate?: { targetSession: string; label: string };
   navigateTo?: string;
 }
 
@@ -32,7 +45,7 @@ export interface AgentSession {
   status: "active" | "done";
   progress: number;
   spawnedAt: string;
-  fileOps: FileOp[];
+  fileOps?: FileOp[];
 }
 
 const GREETINGS: Record<string, string> = {
@@ -271,7 +284,7 @@ export function useCommandRoom() {
     });
   }, [addSessionMessage, threadTitle]);
 
-  // Approve agent — step-based workflow with mock tool calls, thinking, diff
+  // Approve agent — step-based workflow with tool calls, thinking, diff
   const approveAgent = useCallback((role: string) => {
     const steps = [
       { progress: 10, label: "Analyzing task requirements...", thinking: "Breaking down the task into actionable steps..." },
@@ -315,7 +328,7 @@ export function useCommandRoom() {
       console.error("Failed to approve agent via API:", error);
     });
 
-    // Local progress simulation
+    // Local progress simulation with tool calls
     const interval = setInterval(() => {
       stepIndex++;
       if (stepIndex >= steps.length) {
@@ -331,7 +344,7 @@ export function useCommandRoom() {
         if (!session || session.status !== "active") return prev;
 
         const newStandaloneMessages: ChatMessage[] = [];
-        const stepToolCalls: NonNullable<ChatMessage["toolCalls"]> = [];
+        const stepToolCalls: ToolCall[] = [];
 
         if (step.progress === 25) {
           stepToolCalls.push({
@@ -350,7 +363,7 @@ export function useCommandRoom() {
             status: "completed",
             result: "src/utils.ts:1: function oldName()\nsrc/main.ts:5: oldName()",
           });
-          activityLogRef.current.push("Grep 'oldName' in src/ — Found 2 references across codebase");
+          activityLogRef.current.push("Grep 'oldName' in src/ — Found 2 references");
         }
 
         if (step.progress === 55) {
@@ -411,7 +424,7 @@ export function useCommandRoom() {
             sender: "SYSTEM",
             content: "Back to Game Director",
             timestamp: timestamp(),
-            navigateTo: "game-director",
+            navigate: { targetSession: "game-director", label: "Back to Game Director" },
           });
         }
 
@@ -473,7 +486,13 @@ export function useCommandRoom() {
           addSessionMessage("game-director", {
             type: "agent",
             sender: "game-director",
-            content: `Available commands:\n- /clear — Clear the chat\n- /help — Show this message\n- /spawn <agent> — Bring an agent online\n- /cost — Show mock token usage\n- /diff — Show recent changes\nYou can also use: spawn <agent>, approve, done <agent>`,
+            content: `Available commands:
+- /clear — Clear the chat
+- /help — Show this message
+- /spawn <agent> — Bring an agent online
+- /cost — Show mock token usage
+- /diff — Show recent changes
+You can also use: spawn <agent>, approve, done <agent>`,
             showActions: false,
           });
           return;
@@ -492,7 +511,14 @@ export function useCommandRoom() {
           addSessionMessage("game-director", {
             type: "agent",
             sender: "game-director",
-            content: `Token usage (mock):\n- Input: 1,247 tokens\n- Output: 892 tokens\n- Total: 2,139 tokens\n- Estimated cost: $0.0042`,
+            content: `Token Usage Estimates:
+━━━━━━━━━━━━━━━━━━━━━━━
+Input:  ~12,500 tokens ($0.09)
+Output: ~8,200 tokens ($0.24)
+Tools:  ~45 calls ($0.18)
+━━━━━━━━━━━━━━━━━━━━━━━
+Total:  ~$0.51 USD
+Agents: 3 active`,
             showActions: false,
           });
           return;

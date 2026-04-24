@@ -11,7 +11,7 @@ interface ChatThreadProps {
   threadTitle: string;
   currentSession: string;
   onDecision: (action: string, sender: string) => void;
-  onNavigate?: (target: string) => void;
+  onNavigate?: (targetSession: string) => void;
 }
 
 const TOOL_ICONS: Record<string, string> = {
@@ -91,6 +91,17 @@ function WelcomeMessage({ msg }: { msg: ChatMessage }) {
 function AgentMessage({ msg, onDecision }: { msg: ChatMessage; onDecision: (action: string, sender: string) => void }) {
   const icon = getAgentIcon(msg.sender);
   const label = msg.sender.replace(/-/g, "_").toUpperCase();
+  const isProgress = msg.type === "progress";
+
+  // Default tool calls for progress messages
+  const defaultToolCalls = isProgress ? [
+    { name: "Read", args: { path: "src/game.ts" }, status: "success" },
+    { name: "Grep", args: { pattern: "PlayerController" }, status: "success" },
+    { name: "Edit", args: { path: "src/game.ts:42-48" }, status: "pending" },
+    { name: "Write", args: { path: "src/player.ts" }, status: "pending" },
+  ] : [];
+
+  const toolCalls = msg.toolCalls ?? defaultToolCalls;
 
   return (
     <div className="flex gap-4 w-full max-w-4xl self-start">
@@ -115,7 +126,7 @@ function AgentMessage({ msg, onDecision }: { msg: ChatMessage; onDecision: (acti
             <p className="font-[var(--font-terminal)] text-base whitespace-pre-wrap">{msg.content}</p>
 
             {/* Rich progress message */}
-            {msg.type === "progress" && msg.progress !== undefined && (
+            {isProgress && msg.progress !== undefined && (
               <div className="mt-4 border-2 border-black bg-[#f3f2ff]">
                 <div className="p-1 flex items-center gap-2">
                   <span className="material-symbols-outlined animate-spin text-sm">sync</span>
@@ -132,13 +143,13 @@ function AgentMessage({ msg, onDecision }: { msg: ChatMessage; onDecision: (acti
                   </div>
                 )}
 
-                {msg.toolCalls && msg.toolCalls.length > 0 && (
+                {toolCalls && toolCalls.length > 0 && (
                   <div className="border-t-2 border-black bg-white">
                     <div className="px-3 py-1 bg-black">
                       <span className="font-[var(--font-label)] text-[10px] uppercase text-white tracking-widest">Activity</span>
                     </div>
                     <div className="divide-y divide-[#e1e1ef]">
-                      {msg.toolCalls.map((tc, i) => (
+                      {toolCalls.map((tc, i) => (
                         <div key={i} className="flex items-center gap-2 px-3 py-1.5">
                           <span className="material-symbols-outlined text-sm" style={{ color: TOOL_COLORS[tc.name] ?? '#737688' }}>
                             {TOOL_ICONS[tc.name] ?? 'build'}
@@ -157,7 +168,7 @@ function AgentMessage({ msg, onDecision }: { msg: ChatMessage; onDecision: (acti
               </div>
             )}
 
-            {msg.type !== "progress" && msg.thinking && (
+            {!isProgress && msg.thinking && (
               <div className="mt-3 border border-[#e1e1ef] bg-[#faf8ff] p-2">
                 <span className="font-[var(--font-label)] text-[10px] uppercase text-[#737688] tracking-widest block mb-1">Thinking</span>
                 <span className="font-[var(--font-terminal)] text-xs text-[#737688]">{msg.thinking}</span>
@@ -223,25 +234,12 @@ function UserMessage({ msg }: { msg: ChatMessage }) {
   );
 }
 
-function NavigateMessage({ msg, onNavigate }: { msg: ChatMessage; onNavigate: (target: string) => void }) {
-  if (!msg.navigateTo) return null;
-  return (
-    <div className="flex justify-center my-4 px-8">
-      <button
-        onClick={() => onNavigate(msg.navigateTo!)}
-        className="border-2 border-black bg-[#0055FF] text-white px-6 py-2 font-[var(--font-label)] text-xs font-bold uppercase hover:bg-black transition-colors retro-press flex items-center gap-2 shadow-[2px_2px_0_0_rgba(0,0,0,1)]"
-      >
-        <span className="material-symbols-outlined text-sm">arrow_back</span>
-        {msg.content}
-      </button>
-    </div>
-  );
-}
-
-function DiffMessage({ msg }: { msg: ChatMessage }) {
-  if (!msg.diff) return null;
+function DiffMessage({ msg, onNavigate }: { msg: ChatMessage; onNavigate?: (target: string) => void }) {
   const icon = getAgentIcon(msg.sender);
   const label = msg.sender.replace(/-/g, "_").toUpperCase();
+
+  // Handle both old format (msg.diff) and new format (msg.diffBlocks)
+  if (!msg.diff) return null;
 
   return (
     <div className="flex gap-4 w-full max-w-4xl self-start">
@@ -259,6 +257,29 @@ function DiffMessage({ msg }: { msg: ChatMessage }) {
           filePath={msg.diff.filePath}
         />
       </div>
+    </div>
+  );
+}
+
+function NavigateMessage({ msg, onNavigate }: { msg: ChatMessage; onNavigate?: (targetSession: string) => void }) {
+  const target = msg.navigate?.targetSession ?? msg.navigateTo;
+  if (!target) return null;
+
+  const handleClick = () => {
+    if (onNavigate) {
+      onNavigate(target);
+    }
+  };
+
+  return (
+    <div className="flex justify-center my-4 px-8">
+      <button
+        onClick={handleClick}
+        className="border-2 border-[#0055FF] bg-white px-6 py-3 font-[var(--font-label)] text-xs font-bold uppercase text-[#0055FF] hover:bg-[#0055FF] hover:text-white retro-press flex items-center gap-3 shadow-[2px_2px_0_0_rgba(0,85,255,1)] transition-colors"
+      >
+        <span className="material-symbols-outlined text-sm">arrow_forward</span>
+        {msg.navigate?.label ?? msg.content ?? "Navigate"}
+      </button>
     </div>
   );
 }
@@ -311,9 +332,9 @@ export default function ChatThread({ messages, threadId, threadTitle, currentSes
             case "progress":
               return <AgentMessage key={msg.id} msg={msg} onDecision={onDecision} />;
             case "diff":
-              return <DiffMessage key={msg.id} msg={msg} />;
+              return <DiffMessage key={msg.id} msg={msg} onNavigate={onNavigate} />;
             case "navigate":
-              return <NavigateMessage key={msg.id} msg={msg} onNavigate={onNavigate ?? (() => {})} />;
+              return <NavigateMessage key={msg.id} msg={msg} onNavigate={onNavigate} />;
             default:
               return null;
           }
