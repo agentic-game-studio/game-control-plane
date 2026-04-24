@@ -2,8 +2,9 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { apiFetch } from "@/lib/api";
-import type { AssetsData, GameAsset, ArtBibleConfig } from "@game-studio/types";
+import type { AssetsData, GameAsset, ArtBibleConfig, CreateAssetRequest } from "@game-studio/types";
 import { DataLoader } from "@/components/DataLoader";
+import { Modal, FormField } from "@/components/Modal";
 
 const typeColors: Record<string, string> = {
   "3d": "bg-white",
@@ -44,6 +45,15 @@ export default function AssetsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [retryCount, setRetryCount] = useState(0);
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [deleteId, setDeleteId] = useState<string | null>(null);
+  const [formData, setFormData] = useState({
+    filename: "",
+    type: "3d" as "3d" | "2d" | "vfx" | "audio" | "texture",
+    category: "prop" as "prop" | "character" | "env" | "weapon" | "ui" | "tex" | "sfx" | "music",
+    sizeBytes: 100000,
+  });
 
   const fetchData = useCallback(async (isInitial = false) => {
     if (isInitial) setLoading(true);
@@ -90,7 +100,43 @@ export default function AssetsPage() {
     }
   };
 
+  const handleCreateAsset = async () => {
+    if (!formData.filename) return;
+    setCreating(true);
+    try {
+      const newAsset = await apiFetch<GameAsset>("/api/assets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(formData),
+      });
+      setData((prev) =>
+        prev ? { ...prev, assets: [...prev.assets, newAsset] } : prev
+      );
+      setShowCreateModal(false);
+      setFormData({ filename: "", type: "3d", category: "prop", sizeBytes: 100000 });
+    } catch (err) {
+      console.error("Failed to create asset:", err);
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const handleDeleteAsset = async (id: string) => {
+    try {
+      await apiFetch(`/api/assets/${id}`, { method: "DELETE" });
+      setData((prev) =>
+        prev
+          ? { ...prev, assets: prev.assets.filter((a) => a.id !== id) }
+          : prev
+      );
+      setDeleteId(null);
+    } catch (err) {
+      console.error("Failed to delete asset:", err);
+    }
+  };
+
   return (
+    <>
     <DataLoader loading={loading} error={error} onRetry={handleRetry}>
     <div className="flex flex-col h-full">
       {/* Crafting Input Bar */}
@@ -114,9 +160,12 @@ export default function AssetsPage() {
             arrow_drop_down
           </span>
         </div>
-        <button className="bg-primary-container text-on-primary border-2 border-on-surface font-[var(--font-label)] text-xs font-bold uppercase px-6 py-3 hover:bg-on-surface hover:text-on-primary retro-press transition-all flex items-center gap-2 shrink-0">
-          <span className="material-symbols-outlined text-sm">bolt</span>
-          Craft
+        <button
+          onClick={() => setShowCreateModal(true)}
+          className="bg-primary-container text-on-primary border-2 border-on-surface font-[var(--font-label)] text-xs font-bold uppercase px-6 py-3 hover:bg-on-surface hover:text-on-primary retro-press transition-all flex items-center gap-2 shrink-0"
+        >
+          <span className="material-symbols-outlined text-sm">add</span>
+          ADD_ASSET
         </button>
       </header>
 
@@ -126,7 +175,7 @@ export default function AssetsPage() {
         <section className="flex-1 p-[var(--spacing-gutter)] overflow-y-auto bg-surface relative">
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-[var(--spacing-md)]">
             {data?.assets.map((asset) => (
-              <AssetCard key={asset.id} asset={asset} />
+              <AssetCard key={asset.id} asset={asset} onDelete={() => setDeleteId(asset.id)} />
             ))}
             {[...Array(5)].map((_, i) => (
               <div
@@ -301,15 +350,99 @@ export default function AssetsPage() {
       </div>
       </div>
     </DataLoader>
+
+    {/* Create Asset Modal */}
+    <Modal
+      isOpen={showCreateModal}
+      onClose={() => setShowCreateModal(false)}
+      title="New Asset"
+      onSubmit={handleCreateAsset}
+      submitLabel="Create"
+      submitDisabled={!formData.filename || creating}
+    >
+      <div className="flex flex-col gap-4">
+        <FormField label="Filename *">
+          <input
+            type="text"
+            value={formData.filename}
+            onChange={(e) => setFormData((f) => ({ ...f, filename: e.target.value }))}
+            className="border-2 border-black p-2 font-[var(--font-terminal)] text-sm w-full"
+            placeholder="New_Asset.fbx"
+          />
+        </FormField>
+        <div className="grid grid-cols-2 gap-4">
+          <FormField label="Type">
+            <select
+              value={formData.type}
+              onChange={(e) => setFormData((f) => ({ ...f, type: e.target.value as typeof formData.type }))}
+              className="border-2 border-black p-2 font-[var(--font-terminal)] text-sm w-full"
+            >
+              <option value="3d">3D</option>
+              <option value="2d">2D</option>
+              <option value="vfx">VFX</option>
+              <option value="audio">Audio</option>
+              <option value="texture">Texture</option>
+            </select>
+          </FormField>
+          <FormField label="Category">
+            <select
+              value={formData.category}
+              onChange={(e) => setFormData((f) => ({ ...f, category: e.target.value as typeof formData.category }))}
+              className="border-2 border-black p-2 font-[var(--font-terminal)] text-sm w-full"
+            >
+              <option value="prop">Prop</option>
+              <option value="character">Character</option>
+              <option value="env">Environment</option>
+              <option value="weapon">Weapon</option>
+              <option value="ui">UI</option>
+              <option value="tex">Texture</option>
+              <option value="sfx">SFX</option>
+              <option value="music">Music</option>
+            </select>
+          </FormField>
+        </div>
+        <FormField label="Size (bytes)">
+          <input
+            type="number"
+            value={formData.sizeBytes}
+            onChange={(e) => setFormData((f) => ({ ...f, sizeBytes: parseInt(e.target.value) || 0 }))}
+            className="border-2 border-black p-2 font-[var(--font-terminal)] text-sm w-full"
+          />
+        </FormField>
+      </div>
+    </Modal>
+
+    {/* Delete Confirmation Modal */}
+    <Modal
+      isOpen={!!deleteId}
+      onClose={() => setDeleteId(null)}
+      title="Delete Asset"
+      onSubmit={() => deleteId && handleDeleteAsset(deleteId)}
+      submitLabel="Delete"
+    >
+      <p className="font-[var(--font-terminal)] text-sm">
+        Are you sure you want to delete this asset? This action cannot be undone.
+      </p>
+    </Modal>
+    </>
   );
 }
 
-function AssetCard({ asset }: { asset: GameAsset }) {
+function AssetCard({ asset, onDelete }: { asset: GameAsset; onDelete: () => void }) {
   const icon = typeIcons[asset.type] ?? "view_in_ar";
   const categoryColor = categoryColors[asset.category] ?? "bg-surface-variant";
 
   return (
-    <div className="border-2 border-on-surface bg-surface-container-lowest flex flex-col group cursor-pointer hover:-translate-y-1 hover:shadow-[4px_4px_0px_0px_rgba(25,27,37,1)] transition-all">
+    <div className="border-2 border-on-surface bg-surface-container-lowest flex flex-col group cursor-pointer hover:-translate-y-1 hover:shadow-[4px_4px_0px_0px_rgba(25,27,37,1)] transition-all relative">
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          onDelete();
+        }}
+        className="absolute top-2 left-2 w-6 h-6 border-2 border-black bg-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-500 hover:text-white hover:border-red-500 z-10"
+      >
+        <span className="material-symbols-outlined text-xs">delete</span>
+      </button>
       <div className="aspect-square border-b-2 border-on-surface relative overflow-hidden flex items-center justify-center p-4">
         <div
           className={`w-full h-full opacity-60 flex items-center justify-center ${typeColors[asset.type] ?? "bg-surface-variant"}`}

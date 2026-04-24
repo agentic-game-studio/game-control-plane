@@ -2,8 +2,9 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { apiFetch } from "@/lib/api";
-import type { TicketsBoard, Ticket } from "@game-studio/types";
+import type { TicketsBoard, Ticket, CreateTicketRequest } from "@game-studio/types";
 import { DataLoader } from "@/components/DataLoader";
+import { Modal, FormField } from "@/components/Modal";
 
 const statusColors: Record<string, { border: string; bg: string; text: string; label?: string }> = {
   available: {
@@ -43,6 +44,16 @@ export default function TicketsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [retryCount, setRetryCount] = useState(0);
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [deleteId, setDeleteId] = useState<string | null>(null);
+  const [formData, setFormData] = useState({
+    title: "",
+    description: "",
+    area: "UI_CORE",
+    subarea: "FEATURES",
+    credits: 100,
+  });
 
   const fetchData = useCallback(async (isInitial = false) => {
     if (isInitial) setLoading(true);
@@ -75,7 +86,58 @@ export default function TicketsPage() {
     setRetryCount((c) => c + 1);
   };
 
+  const handleCreateTicket = async () => {
+    if (!formData.title) return;
+    setCreating(true);
+    try {
+      const newTicket = await apiFetch<Ticket>("/api/tickets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(formData),
+      });
+      setBoard((prev) =>
+        prev
+          ? {
+              ...prev,
+              columns: prev.columns.map((col) =>
+                col.id === "available"
+                  ? { ...col, tickets: [...col.tickets, newTicket] }
+                  : col
+              ),
+            }
+          : prev
+      );
+      setShowCreateModal(false);
+      setFormData({ title: "", description: "", area: "UI_CORE", subarea: "FEATURES", credits: 100 });
+    } catch (err) {
+      console.error("Failed to create ticket:", err);
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const handleDeleteTicket = async (id: string) => {
+    try {
+      await apiFetch(`/api/tickets/${id}`, { method: "DELETE" });
+      setBoard((prev) =>
+        prev
+          ? {
+              ...prev,
+              columns: prev.columns.map((col) => ({
+                ...col,
+                tickets: col.tickets.filter((t) => t.id !== id),
+              })),
+            }
+          : prev
+      );
+      setDeleteId(null);
+    } catch (err) {
+      console.error("Failed to delete ticket:", err);
+    }
+  };
+
   return (
+    <>
     <DataLoader loading={loading} error={error} onRetry={handleRetry}>
       <div className="p-[var(--spacing-margin)] h-full flex flex-col gap-[var(--spacing-margin)] overflow-hidden bg-background">
         {/* Board Header */}
@@ -92,7 +154,10 @@ export default function TicketsPage() {
             <button className="bg-surface-container-lowest text-on-background border-2 border-on-background font-[var(--font-label)] text-xs font-bold uppercase px-[var(--spacing-md)] py-[var(--spacing-sm)] hover:bg-on-background hover:text-on-primary retro-press transition-all">
               FILTER_LOG
             </button>
-            <button className="bg-primary-container text-on-primary border-2 border-on-background font-[var(--font-label)] text-xs font-bold uppercase px-[var(--spacing-md)] py-[var(--spacing-sm)] hover:bg-on-background hover:text-on-primary retro-press transition-all flex items-center gap-[var(--spacing-xs)]">
+            <button
+              onClick={() => setShowCreateModal(true)}
+              className="bg-primary-container text-on-primary border-2 border-on-background font-[var(--font-label)] text-xs font-bold uppercase px-[var(--spacing-md)] py-[var(--spacing-sm)] hover:bg-on-background hover:text-on-primary retro-press transition-all flex items-center gap-[var(--spacing-xs)]"
+            >
               <span className="material-symbols-outlined text-base">add</span>
               INIT_QUEST
             </button>
@@ -130,7 +195,12 @@ export default function TicketsPage() {
                 </div>
 
                 {column.tickets.map((ticket) => (
-                  <TicketCard key={ticket.id} ticket={ticket} colors={colors} />
+                  <TicketCard
+                    key={ticket.id}
+                    ticket={ticket}
+                    colors={colors}
+                    onDelete={() => setDeleteId(ticket.id)}
+                  />
                 ))}
               </div>
             );
@@ -138,15 +208,95 @@ export default function TicketsPage() {
         </div>
       </div>
     </DataLoader>
+
+    {/* Create Ticket Modal */}
+    <Modal
+      isOpen={showCreateModal}
+      onClose={() => setShowCreateModal(false)}
+      title="New Quest"
+      onSubmit={handleCreateTicket}
+      submitLabel="Create"
+      submitDisabled={!formData.title || creating}
+    >
+      <div className="flex flex-col gap-4">
+        <FormField label="Title *">
+          <input
+            type="text"
+            value={formData.title}
+            onChange={(e) => setFormData((f) => ({ ...f, title: e.target.value }))}
+            className="border-2 border-black p-2 font-[var(--font-terminal)] text-sm w-full"
+            placeholder="Implement Feature X"
+          />
+        </FormField>
+        <FormField label="Description">
+          <textarea
+            value={formData.description}
+            onChange={(e) => setFormData((f) => ({ ...f, description: e.target.value }))}
+            className="border-2 border-black p-2 font-[var(--font-terminal)] text-sm w-full h-20 resize-none"
+            placeholder="Detailed task description..."
+          />
+        </FormField>
+        <div className="grid grid-cols-2 gap-4">
+          <FormField label="Area">
+            <select
+              value={formData.area}
+              onChange={(e) => setFormData((f) => ({ ...f, area: e.target.value }))}
+              className="border-2 border-black p-2 font-[var(--font-terminal)] text-sm w-full"
+            >
+              <option value="UI_CORE">UI_CORE</option>
+              <option value="GAMEPLAY">GAMEPLAY</option>
+              <option value="SYS_ENG">SYS_ENG</option>
+              <option value="ENV_ART">ENV_ART</option>
+              <option value="CHAR_ART">CHAR_ART</option>
+              <option value="VFX">VFX</option>
+              <option value="AUDIO">AUDIO</option>
+            </select>
+          </FormField>
+          <FormField label="Subarea">
+            <input
+              type="text"
+              value={formData.subarea}
+              onChange={(e) => setFormData((f) => ({ ...f, subarea: e.target.value }))}
+              className="border-2 border-black p-2 font-[var(--font-terminal)] text-sm w-full"
+              placeholder="FEATURES"
+            />
+          </FormField>
+        </div>
+        <FormField label="Credits">
+          <input
+            type="number"
+            value={formData.credits}
+            onChange={(e) => setFormData((f) => ({ ...f, credits: parseInt(e.target.value) || 0 }))}
+            className="border-2 border-black p-2 font-[var(--font-terminal)] text-sm w-full"
+          />
+        </FormField>
+      </div>
+    </Modal>
+
+    {/* Delete Confirmation Modal */}
+    <Modal
+      isOpen={!!deleteId}
+      onClose={() => setDeleteId(null)}
+      title="Delete Quest"
+      onSubmit={() => deleteId && handleDeleteTicket(deleteId)}
+      submitLabel="Delete"
+    >
+      <p className="font-[var(--font-terminal)] text-sm">
+        Are you sure you want to delete this quest? This action cannot be undone.
+      </p>
+    </Modal>
+    </>
   );
 }
 
 function TicketCard({
   ticket,
   colors,
+  onDelete,
 }: {
   ticket: Ticket;
   colors: { border: string; bg: string; text: string; label?: string };
+  onDelete: () => void;
 }) {
   const icon = statusIcons[ticket.status] ?? "person_add";
   const label = colors.label;
@@ -159,6 +309,15 @@ function TicketCard({
           : ""
       }`}
     >
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          onDelete();
+        }}
+        className="absolute top-2 right-2 w-6 h-6 border-2 border-black bg-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-500 hover:text-white hover:border-red-500"
+      >
+        <span className="material-symbols-outlined text-xs">delete</span>
+      </button>
       <div className="flex justify-between items-start">
         <div className="font-[var(--font-label)] text-xs font-bold uppercase text-outline flex flex-col">
           <span>

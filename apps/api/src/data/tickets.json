@@ -7,18 +7,6 @@
       "label": "Available",
       "tickets": [
         {
-          "id": "ticket-001",
-          "title": "Design Minimap Shell",
-          "description": "Draft high-contrast border styles for the new minimap component matching the brutalist OS aesthetic.",
-          "area": "UI_CORE",
-          "subarea": "HUD_REWORK",
-          "credits": 150,
-          "estimateHours": 4,
-          "status": "available",
-          "createdAt": "2026-04-20T10:00:00Z",
-          "updatedAt": "2026-04-20T10:00:00Z"
-        },
-        {
           "id": "ticket-002",
           "title": "Model Terminal Props",
           "description": "Create low-poly computer terminal assets with sharp edges and emission maps for screens.",
@@ -41,6 +29,17 @@
           "status": "available",
           "createdAt": "2026-04-21T09:00:00Z",
           "updatedAt": "2026-04-21T09:00:00Z"
+        },
+        {
+          "id": "ticket-1777009745224",
+          "title": "New Feature",
+          "description": "",
+          "area": "UI_CORE",
+          "subarea": "FEATURES",
+          "credits": 200,
+          "status": "available",
+          "createdAt": "2026-04-24T05:49:05.224Z",
+          "updatedAt": "2026-04-24T05:49:05.224Z"
         }
       ]
     },

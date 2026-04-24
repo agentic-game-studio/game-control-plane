@@ -9,16 +9,6 @@
   },
   "projects": [
     {
-      "id": "proj-001",
-      "name": "Neon_Drifter",
-      "description": "3D Racing Simulator",
-      "engine": "unity",
-      "progress": 60,
-      "status": "active",
-      "createdAt": "2026-01-15T10:00:00Z",
-      "updatedAt": "2026-04-20T14:30:00Z"
-    },
-    {
       "id": "proj-002",
       "name": "Pixel_Farm",
       "description": "2D Cozy Strategy",
@@ -127,6 +117,16 @@
       "status": "archived",
       "createdAt": "2025-11-15T12:00:00Z",
       "updatedAt": "2026-02-28T16:00:00Z"
+    },
+    {
+      "id": "proj-1777009620193",
+      "name": "TestGame",
+      "description": "Test Project",
+      "engine": "unity",
+      "progress": 0,
+      "status": "active",
+      "createdAt": "2026-04-24T05:47:00.193Z",
+      "updatedAt": "2026-04-24T05:47:00.193Z"
     }
   ],
   "activityLog": [

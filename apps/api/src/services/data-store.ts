@@ -1,8 +1,11 @@
 import fs from "fs";
 import path from "path";
+import { fileURLToPath } from "url";
 import { broadcast } from "./websocket.js";
 import type { WSEvent } from "@game-studio/types";
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 const DATA_DIR = path.join(__dirname, "../data");
 
 function ensureDataDir() {

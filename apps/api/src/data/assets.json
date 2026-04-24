@@ -6,7 +6,12 @@
       "type": "3d",
       "category": "weapon",
       "sizeBytes": 1258291,
-      "tags": ["weapon", "melee", "sword", "low-poly"],
+      "tags": [
+        "weapon",
+        "melee",
+        "sword",
+        "low-poly"
+      ],
       "createdAt": "2026-04-10T10:00:00Z",
       "updatedAt": "2026-04-10T10:00:00Z"
     },
@@ -16,7 +21,12 @@
       "type": "2d",
       "category": "env",
       "sizeBytes": 262144,
-      "tags": ["sprite", "environment", "computer", "retro"],
+      "tags": [
+        "sprite",
+        "environment",
+        "computer",
+        "retro"
+      ],
       "createdAt": "2026-04-12T14:00:00Z",
       "updatedAt": "2026-04-12T14:00:00Z"
     },
@@ -26,7 +36,12 @@
       "type": "vfx",
       "category": "tex",
       "sizeBytes": 524288,
-      "tags": ["vfx", "fire", "impact", "texture"],
+      "tags": [
+        "vfx",
+        "fire",
+        "impact",
+        "texture"
+      ],
       "createdAt": "2026-04-14T09:00:00Z",
       "updatedAt": "2026-04-14T09:00:00Z"
     },
@@ -36,7 +51,11 @@
       "type": "3d",
       "category": "character",
       "sizeBytes": 2097152,
-      "tags": ["character", "player", "rigged"],
+      "tags": [
+        "character",
+        "player",
+        "rigged"
+      ],
       "createdAt": "2026-04-08T11:00:00Z",
       "updatedAt": "2026-04-18T15:00:00Z"
     },
@@ -46,7 +65,12 @@
       "type": "3d",
       "category": "prop",
       "sizeBytes": 512000,
-      "tags": ["prop", "item", "consumable", "low-poly"],
+      "tags": [
+        "prop",
+        "item",
+        "consumable",
+        "low-poly"
+      ],
       "createdAt": "2026-04-15T16:00:00Z",
       "updatedAt": "2026-04-15T16:00:00Z"
     },
@@ -56,7 +80,12 @@
       "type": "2d",
       "category": "ui",
       "sizeBytes": 786432,
-      "tags": ["ui", "buttons", "interface", "brutalist"],
+      "tags": [
+        "ui",
+        "buttons",
+        "interface",
+        "brutalist"
+      ],
       "createdAt": "2026-04-16T10:00:00Z",
       "updatedAt": "2026-04-20T12:00:00Z"
     },
@@ -66,7 +95,12 @@
       "type": "texture",
       "category": "tex",
       "sizeBytes": 1048576,
-      "tags": ["texture", "normal-map", "stone", "wall"],
+      "tags": [
+        "texture",
+        "normal-map",
+        "stone",
+        "wall"
+      ],
       "createdAt": "2026-04-17T08:00:00Z",
       "updatedAt": "2026-04-17T08:00:00Z"
     },
@@ -76,7 +110,12 @@
       "type": "3d",
       "category": "prop",
       "sizeBytes": 768000,
-      "tags": ["prop", "door", "metal", "environment"],
+      "tags": [
+        "prop",
+        "door",
+        "metal",
+        "environment"
+      ],
       "createdAt": "2026-04-18T13:00:00Z",
       "updatedAt": "2026-04-18T13:00:00Z"
     },
@@ -86,7 +125,12 @@
       "type": "audio",
       "category": "sfx",
       "sizeBytes": 102400,
-      "tags": ["audio", "sfx", "explosion", "impact"],
+      "tags": [
+        "audio",
+        "sfx",
+        "explosion",
+        "impact"
+      ],
       "createdAt": "2026-04-19T11:00:00Z",
       "updatedAt": "2026-04-19T11:00:00Z"
     },
@@ -96,9 +140,24 @@
       "type": "audio",
       "category": "music",
       "sizeBytes": 5242880,
-      "tags": ["audio", "music", "ambient", "dungeon"],
+      "tags": [
+        "audio",
+        "music",
+        "ambient",
+        "dungeon"
+      ],
       "createdAt": "2026-04-20T15:00:00Z",
       "updatedAt": "2026-04-20T15:00:00Z"
+    },
+    {
+      "id": "asset-1777009878898",
+      "filename": "New_Model.obj",
+      "type": "3d",
+      "category": "prop",
+      "sizeBytes": 500000,
+      "tags": [],
+      "createdAt": "2026-04-24T05:51:18.898Z",
+      "updatedAt": "2026-04-24T05:51:18.898Z"
     }
   ],
   "artBible": {

@@ -59,6 +59,19 @@ export default function SettingsPage() {
     }
   };
 
+  const handleReset = async () => {
+    if (!confirm("Reset all settings to default? This cannot be undone.")) return;
+    setSaving(true);
+    try {
+      const data = await apiFetch<SettingsConfig>("/api/settings/reset", { method: "POST" });
+      setSettings(data);
+    } catch (error) {
+      console.error("Failed to reset settings:", error);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <DataLoader loading={loading} error={error} onRetry={handleRetry}>
       <div className="p-[var(--spacing-margin)] min-h-full bg-background">
@@ -206,13 +219,22 @@ export default function SettingsPage() {
                     onChange={(e) => setSettings((prev) => prev ? { ...prev, webhookUrl: e.target.value } : null)}
                   />
                 </div>
-                <button
-                  onClick={handleSave}
-                  disabled={saving}
-                  className="border-2 border-black bg-white text-black font-[var(--font-label)] text-xs font-bold uppercase px-[var(--spacing-md)] py-[var(--spacing-sm)] hover:bg-black hover:text-white retro-press transition-all self-end mt-[var(--spacing-sm)] disabled:opacity-50"
-                >
-                  {saving ? "Saving..." : "Save Config"}
-                </button>
+                <div className="flex gap-2 self-end mt-[var(--spacing-sm)]">
+                  <button
+                    onClick={handleReset}
+                    disabled={saving}
+                    className="border-2 border-black bg-surface text-black font-[var(--font-label)] text-xs font-bold uppercase px-[var(--spacing-md)] py-[var(--spacing-sm)] hover:bg-black hover:text-white retro-press transition-all disabled:opacity-50"
+                  >
+                    Reset
+                  </button>
+                  <button
+                    onClick={handleSave}
+                    disabled={saving}
+                    className="border-2 border-black bg-white text-black font-[var(--font-label)] text-xs font-bold uppercase px-[var(--spacing-md)] py-[var(--spacing-sm)] hover:bg-black hover:text-white retro-press transition-all disabled:opacity-50"
+                  >
+                    {saving ? "Saving..." : "Save Config"}
+                  </button>
+                </div>
               </div>
             </div>
           </div>
