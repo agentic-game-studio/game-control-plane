@@ -224,18 +224,33 @@ export function useCommandRoom() {
   useEffect(() => {
     const init = async () => {
       try {
-        const data = await apiFetch<{
-          sessions: Record<string, AgentSession>;
+        const response = await apiFetch<{
+          sessions: Array<{ id: string; role: string; messages: ChatMessage[]; status: string; progress: number; spawnedAt: string }>;
           currentSessionId: string;
-          threadId: string;
-          threadTitle: string;
         }>("/api/chat/sessions");
 
-        const sessionsMap = new Map(Object.entries(data.sessions));
+        // Convert backend sessions array to frontend Map format
+        const sessionsMap = new Map<string, AgentSession>();
+        response.sessions.forEach((s) => {
+          sessionsMap.set(s.id, {
+            role: s.role,
+            messages: s.messages.map((m) => ({
+              ...m,
+              // Normalize progress messages that have progress 100
+              type: m.type === "progress" && m.progress === 100 ? "agent" as const : m.type,
+              showActions: m.type === "agent" ? true : m.showActions,
+            })),
+            status: s.status as "active" | "done",
+            progress: s.progress,
+            spawnedAt: s.spawnedAt,
+            fileOps: [],
+          });
+        });
+
         setSessions(sessionsMap);
-        setCurrentSession(data.currentSessionId);
-        setThreadId(data.threadId);
-        setThreadTitle(data.threadTitle);
+        setCurrentSession(response.currentSessionId);
+        setThreadId(`#${Math.floor(Math.random() * 9000 + 1000)}`);
+        setThreadTitle("BOARD_ROOM");
       } catch (error) {
         console.error("Failed to fetch chat sessions:", error);
         // Fallback to local initialization
