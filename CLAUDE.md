@@ -171,13 +171,14 @@ Next.js 15 App Router, Tailwind CSS v4, no UI framework. All pages are client co
 - **6-step approve workflow**: Progress bars with tool calls (Read, Grep, Edit, Write)
 - **Thinking panel**: Shows agent reasoning during progress
 - **Navigate messages**: "Back to Game Director" button after task completion
-- **Message types**: `system`, `agent`, `user`, `progress`, `welcome`, `diff`, `navigate`, `question`
+- **Message types**: `system`, `agent`, `user`, `progress`, `welcome`, `diff`, `navigate`, `question`, `plan`
 - **Markdown rendering**: Messages render markdown with code blocks, lists, links
 - **Image paste**: Base64 inline images via clipboard paste (50mb body limit)
 - **Typing indicator**: Immediate visual feedback when agent is responding
 - **Message deduplication**: Prevents duplicate messages on re-renders
 - **showActions**: Approve/Override/Pause buttons only appear when explicitly requested by the agent
 - **Interactive Q&A**: Agents can ask questions with selectable options (radio/checkbox), custom input, keyboard navigation via `AskUserQuestion` tool
+- **Plan phases**: Agents can propose structured plans with phases via `ProposePlan` tool — users can execute individual phases or all at once
 
 ## Data Flow
 
