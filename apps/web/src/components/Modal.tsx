@@ -24,9 +24,9 @@ export function Modal({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/50" onClick={onClose} />
-      <div className="relative bg-white border-2 border-black shadow-[8px_8px_0_0_rgba(0,0,0,1)] w-full max-w-md p-6">
+      <div className="relative bg-white border-2 border-black shadow-[8px_8px_0_0_rgba(0,0,0,1)] w-full max-w-lg p-6">
         <div className="flex justify-between items-center border-b-2 border-black pb-4 mb-4">
           <h2 className="font-[var(--font-headline)] text-2xl font-bold uppercase">{title}</h2>
           <button
