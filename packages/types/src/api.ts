@@ -2,6 +2,7 @@ import type { AgentRole } from "./agent.js";
 import type { SessionState, SessionConfig } from "./session.js";
 import type { GateResult, GateStatus } from "./gate.js";
 import type { ReviewMode } from "./gate.js";
+import type { DocumentCategory, DocumentEntry, DocumentDetail, CategoryMeta, GraphData } from "./document.js";
 
 /** WebSocket event types for real-time frontend updates */
 export type WSEvent =
@@ -13,6 +14,8 @@ export type WSEvent =
   | { type: "checkpoint:saved"; checkpointId: string; sessionId: string }
   | { type: "session:status"; sessionId: string; status: string }
   | { type: "log:entry"; sessionId: string; level: string; message: string; timestamp: string }
+  | { type: "document:created"; documentId: string; category: DocumentCategory; title: string }
+  | { type: "document:updated"; documentId: string; category: DocumentCategory; title: string }
   | { type: "error"; error: string; sessionId?: string };
 
 /** API request/response types */
@@ -66,4 +69,18 @@ export interface RunGateRequest {
 
 export interface GetGatesResponse {
   gates: GateStatus[];
+}
+
+// Documents
+export interface ListDocumentsResponse {
+  documents: DocumentEntry[];
+  categories: CategoryMeta[];
+}
+
+export interface GetDocumentResponse {
+  document: DocumentDetail;
+}
+
+export interface GetGraphResponse {
+  graph: GraphData;
 }

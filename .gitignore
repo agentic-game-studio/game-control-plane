@@ -50,7 +50,6 @@ coverage/
 *.tmp
 *.temp
 Thumbs.db
-postcss.config.mjs
 
 # Reference and dev files
 Claude-Code-Game-Studios-main/
