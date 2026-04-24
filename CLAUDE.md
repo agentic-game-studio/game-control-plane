@@ -117,7 +117,7 @@ Next.js 15 App Router, Tailwind CSS v4, no UI framework. All pages are client co
 | `/` | Dashboard — session stats, agent hierarchy, team skills, live event feed |
 | `/sessions` | Session table with create/delete |
 | `/sessions/[id]` | Session detail — logs, checkpoints, config tabs + quick actions |
-| `/chat` | Board room command page — Game Director orchestrator, per-agent isolated sessions, sidebar with agent threads, hierarchy tree toggle, mock commands (spawn/approve/done) |
+| `/chat` | Board room command page — Game Director orchestrator, slash commands, step-based approve workflow, diff viewer, tool calls activity log |
 | `/agents` | Searchable agent registry with tier filter + spawn dialog |
 | `/skills` | Filterable skill list (all/team/solo) with phase stepper + invoke |
 | `/teams` | Workflow timeline with member roster + run dialog |
@@ -135,6 +135,23 @@ Next.js 15 App Router, Tailwind CSS v4, no UI framework. All pages are client co
 | `/settings` | Ledger & config — engine selection, model dropdown, API key, webhook, reset functionality |
 
 **Shared Components**: `components/Modal.tsx` (reusable modal), `components/DataLoader.tsx` (loading/error states)
+
+### Chat UI Components (apps/web/src/app/(studio)/chat/components/)
+
+| Component | Purpose |
+|-----------|---------|
+| `ChatThread.tsx` | Message rendering with agent/user/system/welcome/progress/diff/navigate types |
+| `CommandInput.tsx` | Slash command autocomplete with dropdown hints |
+| `DiffView.tsx` | Line-by-line diff rendering with syntax highlighting |
+| `AgentTree.tsx` | Sidebar with agent sessions and hierarchy tree |
+
+### Chat Features
+
+- **Slash commands**: `/spawn`, `/approve`, `/done`, `/clear`, `/help`, `/cost`, `/diff`
+- **6-step approve workflow**: Progress bars with tool calls (Read, Grep, Edit, Write)
+- **Thinking panel**: Shows agent reasoning during progress
+- **Navigate messages**: "Back to Game Director" button after task completion
+- **Message types**: `system`, `agent`, `user`, `progress`, `welcome`, `diff`, `navigate`
 
 ## Data Flow
 
@@ -197,10 +214,13 @@ pnpm generate          # Both validations
 - `apps/api/src/routes/tickets.ts` — Kanban board CRUD
 - `apps/api/src/routes/assets.ts` — Asset inventory + art bible CRUD
 - `apps/api/src/routes/settings.ts` — Config CRUD
-- `apps/api/src/routes/chat.ts` — Session management
+- `apps/api/src/routes/chat.ts` — Session management + diff API
 - `apps/api/src/services/websocket.ts` — WebSocket broadcast + SSE client tracking
 - `apps/api/src/services/document-store.ts` — Workspace file scanning, wikilink extraction, backlink computation, fs.watch for real-time updates
 - `apps/api/src/services/data-store.ts` — File-based JSON persistence for studio data
+- `apps/web/src/hooks/useCommandRoom.ts` — Chat state management with tool calls, diff, navigate
+- `apps/web/src/app/(studio)/chat/components/DiffView.tsx` — Diff rendering component
 - `packages/types/src/api.ts` — WSEvent union type (all real-time event types)
 - `packages/types/src/document.ts` — DocumentEntry, DocumentDetail, GraphData types
+- `packages/types/src/chat.ts` — ChatMessage, ToolCall, DiffBlock types
 - `packages/state/src/session-store.ts` — File-based session persistence
