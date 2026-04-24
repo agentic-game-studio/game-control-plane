@@ -31,6 +31,18 @@ export default function ChatPage() {
     selectSession(targetSession);
   };
 
+  const handleAnswer = (questionId: string, selected: string[], customInput?: string) => {
+    // Build answer content from selections and custom input
+    const parts: string[] = [];
+    if (selected.length > 0) {
+      parts.push(`Selected: ${selected.join(", ")}`);
+    }
+    if (customInput) {
+      parts.push(`Additional input: ${customInput}`);
+    }
+    executeCommand(parts.join("\n"));
+  };
+
   if (!initialized) {
     return (
       <div className="flex h-full items-center justify-center bg-surface">
@@ -59,6 +71,7 @@ export default function ChatPage() {
         currentSession={currentSession}
         onDecision={handleDecision}
         onNavigate={handleNavigate}
+        onAnswer={handleAnswer}
       />
       <CommandInput onSend={executeCommand} />
     </div>

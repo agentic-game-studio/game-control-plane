@@ -288,6 +288,22 @@ export async function callLLMWithTools(
     const toolResults: string[] = [];
     for (const tc of response.tool_calls) {
       const result = await toolExecutor(tc.name, tc.input);
+
+      // Special case: AskUserQuestion should stop the loop and return the question
+      if (result.startsWith("__ASK_USER_QUESTION__")) {
+        const questionJson = result.substring("__ASK_USER_QUESTION__".length);
+        const questionData = JSON.parse(questionJson);
+        return {
+          content: questionData.question,
+          tool_calls: [{
+            id: tc.id ?? `call_${Date.now()}`,
+            name: tc.name,
+            input: questionData,
+          }],
+          usage: response.usage ?? undefined,
+        };
+      }
+
       toolResults.push(`[Tool: ${tc.name}]\n${truncate(result, MAX_TOOL_RESULT_BYTES)}`);
     }
 
@@ -392,6 +408,33 @@ export const GAME_STUDIO_TOOLS: LLMTool[] = [
         context: { type: "string", description: "Relevant context and files to pass" },
       },
       required: ["agent", "task"],
+    },
+  },
+  {
+    name: "AskUserQuestion",
+    description: "Present a question with selectable options to the user. Use when you need user input to proceed.",
+    input_schema: {
+      type: "object",
+      properties: {
+        questionId: { type: "string", description: "Unique identifier for this question" },
+        question: { type: "string", description: "The question to ask the user" },
+        options: {
+          type: "array",
+          description: "Available options for the user to select",
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "string", description: "Unique option identifier" },
+              label: { type: "string", description: "Short label (1-5 words)" },
+              description: { type: "string", description: "Brief description explaining the trade-off" },
+            },
+            required: ["id", "label"],
+          },
+        },
+        allowMultiple: { type: "boolean", description: "Whether user can select multiple options" },
+        allowCustomInput: { type: "boolean", description: "Whether user can provide custom text input" },
+      },
+      required: ["questionId", "question", "options"],
     },
   },
 ];

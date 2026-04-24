@@ -32,6 +32,8 @@ export type WSEvent =
   | { type: "asset:updated"; asset: GameAsset }
   | { type: "asset:deleted"; assetId: string }
   | { type: "settings:updated"; settings: SettingsConfig }
+  | { type: "team:started"; teamId: string; sessionId: string }
+  | { type: "team:completed"; teamId: string; sessionId: string; output: string }
   | { type: "chat:message"; sessionId: string; message: ChatMessage }
   | { type: "chat:session:created"; session: ChatSession }
   | { type: "chat:session:deleted"; sessionId: string }
