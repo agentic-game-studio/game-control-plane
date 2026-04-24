@@ -67,6 +67,19 @@ export function renderMarkdown(md: string): string {
   // Unordered lists
   html = html.replace(/^- (.+)$/gm, '<li class="ml-4 list-disc my-0.5">$1</li>');
 
+  // Task lists: - [ ] or - [x]
+  html = html.replace(
+    /^- \[ \] (.+)$/gm,
+    '<li class="ml-4 list-disc my-0.5"><input type="checkbox" disabled class="mr-2 accent-black" />$1</li>'
+  );
+  html = html.replace(
+    /^- \[x\] (.+)$/gi,
+    '<li class="ml-4 list-disc my-0.5"><input type="checkbox" checked disabled class="mr-2 accent-black" />$1</li>'
+  );
+
+  // Strikethrough
+  html = html.replace(/~~(.+?)~~/g, '<del class="opacity-60 line-through">$1</del>');
+
   // Links [text](url)
   html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" class="text-[#0055FF] underline hover:bg-[#0055FF] hover:text-white px-0.5 transition-colors">$1</a>');
 

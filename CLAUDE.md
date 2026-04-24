@@ -45,7 +45,7 @@ game-control-plane/
 
 ### Agent Hierarchy (49 agents)
 
-- **Tier 1 (Opus → glm-5.1)**: game-director, creative-director, technical-director, producer
+- **Tier 1 (Opus → glm-5.1)**: game-director (standalone, owns orchestration), creative-director, technical-director, producer
 - **Tier 2 (Sonnet → glm-4.7)**: game-designer, lead-programmer, art-director, audio-director, narrative-director, qa-lead, release-manager, localization-lead
 - **Tier 3 (Sonnet/Haiku → glm-4.7/glm-4.7-flash)**: 37 specialists — systems-designer, gameplay-programmer, godot-specialist, unreal-specialist, unity-specialist, etc.
 
@@ -91,6 +91,7 @@ Review modes: `solo` (AI-only), `lean` (key checkpoints, default), `full` (all g
 
 Express server on port 3001 with:
 
+- **Express body limit**: 50mb for image payloads (clipboard paste base64)
 - **Routes**:
   - `/api/sessions`, `/api/agents`, `/api/skills`, `/api/teams`, `/api/gates`, `/api/design`, `/api/documents` — Core orchestration
   - `/api/dashboard` — Projects CRUD (`GET`, `POST/DELETE /projects`)
@@ -146,7 +147,7 @@ Next.js 15 App Router, Tailwind CSS v4, no UI framework. All pages are client co
 | `/dashboard` | Project management with create/delete modals, activity log, credit summary |
 | `/tickets` | Kanban board with 4 columns (Available, Processing, Verify, Archived), create/delete quests |
 | `/assets` | Asset inventory grid with create/delete, Art Bible sidebar with constraints |
-| `/settings` | Ledger & config — engine selection, model dropdown, API key, webhook, reset functionality |
+| `/settings` | Ledger & config — credit/tier pools, subscription, top-up history, usage log, engine selection, model dropdown, API key, webhook, reset |
 | `/agents` | Agent registry page with searchable list + tier filter |
 | `/skills` | Skills library with filterable categories |
 | `/teams` | Team workflows with workflow timeline + run dialog |
@@ -170,6 +171,11 @@ Next.js 15 App Router, Tailwind CSS v4, no UI framework. All pages are client co
 - **Thinking panel**: Shows agent reasoning during progress
 - **Navigate messages**: "Back to Game Director" button after task completion
 - **Message types**: `system`, `agent`, `user`, `progress`, `welcome`, `diff`, `navigate`
+- **Markdown rendering**: Messages render markdown with code blocks, lists, links
+- **Image paste**: Base64 inline images via clipboard paste (50mb body limit)
+- **Typing indicator**: Immediate visual feedback when agent is responding
+- **Message deduplication**: Prevents duplicate messages on re-renders
+- **showActions**: Approve/Override/Pause buttons only appear when explicitly requested by the agent
 
 ## Data Flow
 
