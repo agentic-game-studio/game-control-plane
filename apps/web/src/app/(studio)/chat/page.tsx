@@ -43,6 +43,14 @@ export default function ChatPage() {
     executeCommand(parts.join("\n"));
   };
 
+  const handlePlanAction = (phaseId: string, action: "execute" | "execute-all") => {
+    if (action === "execute-all") {
+      executeCommand(`Execute all phases of the plan. Start with Phase 1 and proceed sequentially.`);
+    } else {
+      executeCommand(`Execute phase: ${phaseId}`);
+    }
+  };
+
   if (!initialized) {
     return (
       <div className="flex h-full items-center justify-center bg-surface">
@@ -72,6 +80,7 @@ export default function ChatPage() {
         onDecision={handleDecision}
         onNavigate={handleNavigate}
         onAnswer={handleAnswer}
+        onPlanAction={handlePlanAction}
       />
       <CommandInput onSend={executeCommand} />
     </div>

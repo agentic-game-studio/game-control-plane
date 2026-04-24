@@ -62,6 +62,51 @@ function parseQuestionFromToolResult(toolCalls?: { name: string; input: Record<s
   return null;
 }
 
+interface PlanPhase {
+  id: string;
+  label: string;
+  description?: string;
+  status: "pending" | "active" | "completed";
+  estimatedEffort?: string;
+}
+
+function parsePlanPhasesFromToolResult(toolCalls?: { name: string; input: Record<string, unknown> }[]): PlanPhase[] | null {
+  if (!toolCalls) return null;
+  for (const tc of toolCalls) {
+    if (tc.name === "ProposePlan" && tc.input) {
+      try {
+        const inputStr = typeof tc.input === "string" ? tc.input : JSON.stringify(tc.input);
+        const parsed = JSON.parse(inputStr);
+        if (parsed.__PLAN__) {
+          return parsed.phases.map((p: { id: string; label: string; description?: string; estimatedEffort?: string }) => ({
+            id: p.id,
+            label: p.label,
+            description: p.description,
+            status: "pending" as const,
+            estimatedEffort: p.estimatedEffort,
+          }));
+        }
+      } catch {
+        // Try parsing from raw input
+        if (typeof tc.input === "object") {
+          const input = tc.input as Record<string, unknown>;
+          if (input.planId && input.phases) {
+            const phases = input.phases as Array<{ id: string; label: string; description?: string; estimatedEffort?: string }>;
+            return phases.map((p) => ({
+              id: p.id,
+              label: p.label,
+              description: p.description,
+              status: "pending" as const,
+              estimatedEffort: p.estimatedEffort,
+            }));
+          }
+        }
+      }
+    }
+  }
+  return null;
+}
+
 // In-memory store for chat sessions with conversation history
 interface ExtendedChatSession extends ChatSession {
   conversationHistory: LLMMessage[];
@@ -333,10 +378,18 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
     // Check if LLM asked a question via AskUserQuestion tool
     const questionData = parseQuestionFromToolResult(result.toolCalls);
 
+    // Check if LLM proposed a plan via ProposePlan tool
+    const planPhases = parsePlanPhasesFromToolResult(result.toolCalls);
+
+    // Determine message type: question > plan > agent
+    let messageType: "question" | "plan" | "agent" = "agent";
+    if (questionData) messageType = "question";
+    else if (planPhases) messageType = "plan";
+
     // Create assistant message
     const assistantMessage: ChatMessage = {
       id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      type: questionData ? "question" : "agent",
+      type: messageType,
       sender: agentRole,
       // For questions, use the question text as content (not the raw tool result)
       content: questionData ? questionData.question : result.content,
@@ -349,6 +402,7 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
         status: "success",
       })),
       question: questionData ?? undefined,
+      planPhases: planPhases ?? undefined,
     };
 
     session.messages.push(assistantMessage);

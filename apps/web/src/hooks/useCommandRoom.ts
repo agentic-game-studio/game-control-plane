@@ -29,7 +29,7 @@ function normalizeToolCalls(toolCalls?: { tool?: string; name?: string; args?: R
 
 export interface ChatMessage {
   id: string;
-  type: "system" | "agent" | "user" | "progress" | "welcome" | "diff" | "navigate" | "question";
+  type: "system" | "agent" | "user" | "progress" | "welcome" | "diff" | "navigate" | "question" | "plan";
   sender: string;
   content: string;
   timestamp: string;
@@ -49,6 +49,13 @@ export interface ChatMessage {
     allowMultiple?: boolean;
     allowCustomInput?: boolean;
   };
+  planPhases?: {
+    id: string;
+    label: string;
+    description?: string;
+    status: "pending" | "active" | "completed";
+    estimatedEffort?: string;
+  }[];
 }
 
 export interface FileOp {
@@ -196,11 +203,12 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, addS
           progress: message.progress,
           toolCalls: message.toolCalls as ToolCall[] | undefined,
           question: message.question as ChatMessage["question"],
+          planPhases: message.planPhases as ChatMessage["planPhases"],
           thinking: message.thinking,
           navigate: message.navigate,
         }],
         progress: message.progress ?? session.progress,
-        status: message.type === "agent" || message.type === "question" ? "done" : session.status,
+        status: message.type === "agent" || message.type === "question" || message.type === "plan" ? "done" : session.status,
       });
       return next;
     }
@@ -738,6 +746,7 @@ Agents: 3 active`,
             progress: result.assistantMessage.progress,
             toolCalls: normalizeToolCalls(result.assistantMessage.toolCalls),
             question: result.assistantMessage.question as ChatMessage["question"],
+            planPhases: result.assistantMessage.planPhases as ChatMessage["planPhases"],
           });
         } else if (result.errorMessage) {
           addSessionMessage("game-director", {

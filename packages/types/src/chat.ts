@@ -1,4 +1,4 @@
-export type MessageType = "system" | "agent" | "user" | "progress" | "welcome" | "diff" | "navigate" | "question";
+export type MessageType = "system" | "agent" | "user" | "progress" | "welcome" | "diff" | "navigate" | "question" | "plan";
 export type ChatSessionStatus = "active" | "done" | "completed";
 
 export interface QuestionOption {
@@ -13,6 +13,19 @@ export interface QuestionData {
   options: QuestionOption[];
   allowMultiple?: boolean;
   allowCustomInput?: boolean;
+}
+
+export interface PlanPhase {
+  id: string;
+  label: string;
+  description?: string;
+  status: "pending" | "active" | "completed";
+  estimatedEffort?: string;
+}
+
+export interface PlanData {
+  phases: PlanPhase[];
+  summary?: string;
 }
 
 export interface CodeBlock {
@@ -60,6 +73,7 @@ export interface ChatMessage {
   navigate?: NavigateAction;
   images?: string[];
   question?: QuestionData;
+  planPhases?: PlanPhase[];
 }
 
 export interface CreateMessageRequest {

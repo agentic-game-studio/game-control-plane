@@ -304,6 +304,21 @@ export async function callLLMWithTools(
         };
       }
 
+      // Special case: ProposePlan should stop the loop and return the plan
+      if (result.startsWith("__PROPOSE_PLAN__")) {
+        const planJson = result.substring("__PROPOSE_PLAN__".length);
+        const planData = JSON.parse(planJson);
+        return {
+          content: planData.title,
+          tool_calls: [{
+            id: tc.id ?? `call_${Date.now()}`,
+            name: tc.name,
+            input: planData,
+          }],
+          usage: response.usage ?? undefined,
+        };
+      }
+
       toolResults.push(`[Tool: ${tc.name}]\n${truncate(result, MAX_TOOL_RESULT_BYTES)}`);
     }
 
@@ -435,6 +450,32 @@ export const GAME_STUDIO_TOOLS: LLMTool[] = [
         allowCustomInput: { type: "boolean", description: "Whether user can provide custom text input" },
       },
       required: ["questionId", "question", "options"],
+    },
+  },
+  {
+    name: "ProposePlan",
+    description: "Propose a structured execution plan with phases. Use when presenting a multi-step approach to the user that they can execute.",
+    input_schema: {
+      type: "object",
+      properties: {
+        planId: { type: "string", description: "Unique identifier for this plan" },
+        title: { type: "string", description: "Brief title for the plan" },
+        phases: {
+          type: "array",
+          description: "Ordered list of execution phases",
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "string", description: "Unique phase identifier (e.g., 'phase-1')" },
+              label: { type: "string", description: "Short label (e.g., 'Phase 1 — Foundation')" },
+              description: { type: "string", description: "Brief description of what this phase does" },
+              estimatedEffort: { type: "string", description: "Estimated time/effort (e.g., '~2 hours', '1 day')" },
+            },
+            required: ["id", "label", "description"],
+          },
+        },
+      },
+      required: ["planId", "title", "phases"],
     },
   },
 ];

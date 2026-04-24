@@ -166,6 +166,31 @@ async function executeTool(
         });
       }
 
+      case "ProposePlan": {
+        const planId = input.planId as string;
+        const title = input.title as string;
+        const phases = input.phases as Array<{
+          id: string;
+          label: string;
+          description?: string;
+          estimatedEffort?: string;
+        }>;
+
+        if (!planId || !title || !phases) {
+          return "Error: planId, title, and phases are required";
+        }
+
+        logEntry(sessionId, "info", `[${agentRole}] Proposing plan: ${title}`, agentRole);
+
+        // Return special marker that tells callLLMWithTools to STOP and return the plan
+        return "__PROPOSE_PLAN__" + JSON.stringify({
+          __PLAN__: true,
+          planId,
+          title,
+          phases,
+        });
+      }
+
       default:
         return `Unknown tool: ${name}`;
     }
