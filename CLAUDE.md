@@ -37,6 +37,7 @@ game-control-plane/
 └── workspace/            # Gitignored — game development directory
     ├── design/gdd/       # Game Design Documents
     ├── docs/architecture/ # Architecture Decision Records
+    ├── docs/narrative/   # Narrative documents (world lore, etc.)
     └── production/        # Session state + logs
 ```
 
@@ -76,10 +77,11 @@ Review modes: `solo` (AI-only), `lean` (key checkpoints, default), `full` (all g
 
 Express server on port 3001 with:
 
-- **Routes**: `/api/sessions`, `/api/agents`, `/api/skills`, `/api/teams`, `/api/gates`, `/api/design`
+- **Routes**: `/api/sessions`, `/api/agents`, `/api/skills`, `/api/teams`, `/api/gates`, `/api/design`, `/api/documents`
 - **WebSocket**: Real-time events (agent:spawned, checkpoint:saved, gate:verdict, log:entry)
 - **SSE**: Log streaming at `/api/sessions/:sessionId/stream`
 - **LLM**: ZAI API client (`src/llm/zai-client.ts`) with tool execution loop, retry, message pruning
+- **Document Store**: `src/services/document-store.ts` — scans workspace dirs, parses YAML frontmatter, extracts `[[wikilink]]` connections, computes backlinks, serves via `/api/documents`, watches files with `fs.watch` for real-time updates
 
 ### LLM Tool Execution
 
@@ -108,11 +110,13 @@ Next.js 15 App Router, Tailwind CSS v4, no UI framework. All pages are client co
 | `/` | Dashboard — session stats, agent hierarchy, team skills, live event feed |
 | `/sessions` | Session table with create/delete |
 | `/sessions/[id]` | Session detail — logs, checkpoints, config tabs + quick actions |
+| `/chat` | Board room command page — Game Director orchestrator, per-agent isolated sessions, sidebar with agent threads, hierarchy tree toggle, mock commands (spawn/approve/done) |
 | `/agents` | Searchable agent registry with tier filter + spawn dialog |
 | `/skills` | Filterable skill list (all/team/solo) with phase stepper + invoke |
 | `/teams` | Workflow timeline with member roster + run dialog |
 | `/gates` | 18-gate matrix with category filter + run functionality |
 | `/design` | GDD and ADR creation with status tracking |
+| `/wiki` | Obsidian-style knowledge graph — collapsible file tree, inline markdown renderer, SVG force-directed graph with drag support |
 
 ## Data Flow
 
@@ -148,7 +152,7 @@ GDD files use 8-section format:
 
 | Package | Description | Key Files |
 |---------|-------------|-----------|
-| `@game-studio/types` | Shared interfaces | 8 type files (agent, skill, team, session, gate, design, sprint, api) |
+| `@game-studio/types` | Shared interfaces | 9 type files (agent, skill, team, session, gate, design, sprint, api, document) |
 | `@game-studio/agents` | Agent definitions | 7 definition files + tiers.ts + delegation-map.ts |
 | `@game-studio/skills` | Skill definitions | skills-by-phase.ts + team-skills.ts + skill-model-tier.ts |
 | `@game-studio/config` | Zod schemas | schema.ts + templates.ts |
@@ -170,6 +174,9 @@ pnpm generate          # Both validations
 - `apps/api/src/config.ts` — Environment validation
 - `apps/api/src/routes/sessions.ts` — Session CRUD + checkpointing
 - `apps/api/src/routes/skills.ts` — Skill invocation
+- `apps/api/src/routes/documents.ts` — Document store routes
 - `apps/api/src/services/websocket.ts` — WebSocket broadcast + SSE client tracking
+- `apps/api/src/services/document-store.ts` — Workspace file scanning, wikilink extraction, backlink computation, fs.watch for real-time updates
 - `packages/types/src/api.ts` — WSEvent union type (all real-time event types)
+- `packages/types/src/document.ts` — DocumentEntry, DocumentDetail, GraphData types
 - `packages/state/src/session-store.ts` — File-based session persistence
