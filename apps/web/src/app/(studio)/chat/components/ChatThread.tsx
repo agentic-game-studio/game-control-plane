@@ -3,6 +3,7 @@
 import { useEffect, useRef } from "react";
 import type { ChatMessage } from "@/hooks/useCommandRoom";
 import { getAgentIcon } from "@/lib/agent-icons";
+import DiffView from "./DiffView";
 
 interface ChatThreadProps {
   messages: ChatMessage[];
@@ -10,7 +11,30 @@ interface ChatThreadProps {
   threadTitle: string;
   currentSession: string;
   onDecision: (action: string, sender: string) => void;
+  onNavigate?: (target: string) => void;
 }
+
+const TOOL_ICONS: Record<string, string> = {
+  Read: "description",
+  Write: "edit_note",
+  Edit: "edit",
+  Glob: "folder_open",
+  Grep: "search",
+  Bash: "terminal",
+  Task: "group",
+  AskUserQuestion: "help",
+};
+
+const TOOL_COLORS: Record<string, string> = {
+  Read: "#0055FF",
+  Write: "#df2b31",
+  Edit: "#c13301",
+  Glob: "#737688",
+  Grep: "#737688",
+  Bash: "#191b25",
+  Task: "#0055FF",
+  AskUserQuestion: "#c13301",
+};
 
 function SystemMessage({ msg }: { msg: ChatMessage }) {
   return (
@@ -88,15 +112,55 @@ function AgentMessage({ msg, onDecision }: { msg: ChatMessage; onDecision: (acti
                 <code className="whitespace-pre-wrap">{msg.codeBlock}</code>
               </div>
             )}
-            <p className="font-[var(--font-terminal)] text-base">{msg.content}</p>
+            <p className="font-[var(--font-terminal)] text-base whitespace-pre-wrap">{msg.content}</p>
 
+            {/* Rich progress message */}
             {msg.type === "progress" && msg.progress !== undefined && (
-              <div className="mt-4 border-2 border-black p-1 bg-[#f3f2ff] flex items-center gap-2">
-                <span className="material-symbols-outlined animate-spin text-sm">sync</span>
-                <div className="flex-1 h-3 border border-black bg-white">
-                  <div className="h-full bg-[#0055FF] transition-all duration-500" style={{ width: `${msg.progress}%` }} />
+              <div className="mt-4 border-2 border-black bg-[#f3f2ff]">
+                <div className="p-1 flex items-center gap-2">
+                  <span className="material-symbols-outlined animate-spin text-sm">sync</span>
+                  <div className="flex-1 h-3 border border-black bg-white">
+                    <div className="h-full bg-[#0055FF] transition-all duration-500" style={{ width: `${msg.progress}%` }} />
+                  </div>
+                  <span className="font-[var(--font-terminal)] text-xs">{msg.progress}%</span>
                 </div>
-                <span className="font-[var(--font-terminal)] text-xs">{msg.progress}%</span>
+
+                {msg.thinking && (
+                  <div className="border-t border-black px-3 py-2 bg-[#faf8ff]">
+                    <span className="font-[var(--font-label)] text-[10px] uppercase text-[#737688] tracking-widest block mb-1">Thinking</span>
+                    <span className="font-[var(--font-terminal)] text-xs text-[#737688]">{msg.thinking}</span>
+                  </div>
+                )}
+
+                {msg.toolCalls && msg.toolCalls.length > 0 && (
+                  <div className="border-t-2 border-black bg-white">
+                    <div className="px-3 py-1 bg-black">
+                      <span className="font-[var(--font-label)] text-[10px] uppercase text-white tracking-widest">Activity</span>
+                    </div>
+                    <div className="divide-y divide-[#e1e1ef]">
+                      {msg.toolCalls.map((tc, i) => (
+                        <div key={i} className="flex items-center gap-2 px-3 py-1.5">
+                          <span className="material-symbols-outlined text-sm" style={{ color: TOOL_COLORS[tc.name] ?? '#737688' }}>
+                            {TOOL_ICONS[tc.name] ?? 'build'}
+                          </span>
+                          <span className="font-[var(--font-terminal)] text-xs flex-1 truncate">
+                            {tc.name} {Object.values(tc.args)[0] ? `· ${String(Object.values(tc.args)[0]).slice(0, 40)}` : ''}
+                          </span>
+                          <span className="font-[var(--font-terminal)] text-[10px] uppercase px-1.5 py-0.5 border border-black bg-[#e7e7f5] text-[#191b25]">
+                            {tc.status}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {msg.type !== "progress" && msg.thinking && (
+              <div className="mt-3 border border-[#e1e1ef] bg-[#faf8ff] p-2">
+                <span className="font-[var(--font-label)] text-[10px] uppercase text-[#737688] tracking-widest block mb-1">Thinking</span>
+                <span className="font-[var(--font-terminal)] text-xs text-[#737688]">{msg.thinking}</span>
               </div>
             )}
 
@@ -151,7 +215,7 @@ function UserMessage({ msg }: { msg: ChatMessage }) {
           <div className="absolute right-[-10px] top-4 w-0 h-0 border-y-[6px] border-y-transparent border-l-[10px] border-l-black z-0" />
           <div className="absolute right-[-6px] top-[18px] w-0 h-0 border-y-[4px] border-y-transparent border-l-[8px] border-l-[#dce1ff] z-10" />
           <div className="border-2 border-black bg-[#dce1ff] p-3 shadow-[-4px_4px_0_0_rgba(0,0,0,1)] relative z-10 text-right">
-            <p className="font-[var(--font-terminal)] text-base">{msg.content}</p>
+            <p className="font-[var(--font-terminal)] text-base whitespace-pre-wrap">{msg.content}</p>
           </div>
         </div>
       </div>
@@ -159,7 +223,47 @@ function UserMessage({ msg }: { msg: ChatMessage }) {
   );
 }
 
-export default function ChatThread({ messages, threadId, threadTitle, currentSession, onDecision }: ChatThreadProps) {
+function NavigateMessage({ msg, onNavigate }: { msg: ChatMessage; onNavigate: (target: string) => void }) {
+  if (!msg.navigateTo) return null;
+  return (
+    <div className="flex justify-center my-4 px-8">
+      <button
+        onClick={() => onNavigate(msg.navigateTo!)}
+        className="border-2 border-black bg-[#0055FF] text-white px-6 py-2 font-[var(--font-label)] text-xs font-bold uppercase hover:bg-black transition-colors retro-press flex items-center gap-2 shadow-[2px_2px_0_0_rgba(0,0,0,1)]"
+      >
+        <span className="material-symbols-outlined text-sm">arrow_back</span>
+        {msg.content}
+      </button>
+    </div>
+  );
+}
+
+function DiffMessage({ msg }: { msg: ChatMessage }) {
+  if (!msg.diff) return null;
+  const icon = getAgentIcon(msg.sender);
+  const label = msg.sender.replace(/-/g, "_").toUpperCase();
+
+  return (
+    <div className="flex gap-4 w-full max-w-4xl self-start">
+      <div className="w-12 h-12 shrink-0 border-2 border-black bg-[#0055FF] flex justify-center items-center text-white shadow-[2px_2px_0_0_rgba(0,0,0,1)] relative z-10">
+        <span className="material-symbols-outlined">{icon}</span>
+      </div>
+      <div className="flex-1">
+        <div className="flex items-baseline gap-3 mb-1 ml-2">
+          <span className="font-[var(--font-label)] text-xs font-bold uppercase">{label}</span>
+          <span className="font-[var(--font-terminal)] text-[10px] text-[#737688]">{msg.timestamp}</span>
+        </div>
+        <DiffView
+          oldContent={msg.diff.oldContent}
+          newContent={msg.diff.newContent}
+          filePath={msg.diff.filePath}
+        />
+      </div>
+    </div>
+  );
+}
+
+export default function ChatThread({ messages, threadId, threadTitle, currentSession, onDecision, onNavigate }: ChatThreadProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -206,6 +310,10 @@ export default function ChatThread({ messages, threadId, threadTitle, currentSes
               return <UserMessage key={msg.id} msg={msg} />;
             case "progress":
               return <AgentMessage key={msg.id} msg={msg} onDecision={onDecision} />;
+            case "diff":
+              return <DiffMessage key={msg.id} msg={msg} />;
+            case "navigate":
+              return <NavigateMessage key={msg.id} msg={msg} onNavigate={onNavigate ?? (() => {})} />;
             default:
               return null;
           }

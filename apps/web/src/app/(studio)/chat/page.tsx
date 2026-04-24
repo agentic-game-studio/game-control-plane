@@ -38,6 +38,7 @@ export default function ChatPage() {
         threadTitle={threadTitle}
         currentSession={currentSession}
         onDecision={handleDecision}
+        onNavigate={selectSession}
       />
       <CommandInput onSend={executeCommand} />
     </div>

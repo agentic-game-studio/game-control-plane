@@ -4,13 +4,23 @@ import { useState, useCallback, useEffect, useRef } from "react";
 
 export interface ChatMessage {
   id: string;
-  type: "system" | "agent" | "user" | "progress" | "welcome";
+  type: "system" | "agent" | "user" | "progress" | "welcome" | "diff" | "navigate";
   sender: string;
   content: string;
   timestamp: string;
   showActions?: boolean;
   progress?: number;
   codeBlock?: string;
+  toolCalls?: { name: string; args: Record<string, unknown>; status: string; result?: string }[];
+  diff?: { oldContent: string; newContent: string; filePath: string };
+  thinking?: string;
+  navigateTo?: string;
+}
+
+export interface FileOp {
+  path: string;
+  operation: "read" | "written" | "edited";
+  timestamp: string;
 }
 
 export interface AgentSession {
@@ -19,6 +29,7 @@ export interface AgentSession {
   status: "active" | "done";
   progress: number;
   spawnedAt: string;
+  fileOps: FileOp[];
 }
 
 const GREETINGS: Record<string, string> = {
@@ -50,6 +61,7 @@ export function useCommandRoom() {
   const [threadId, setThreadId] = useState("");
   const [threadTitle, setThreadTitle] = useState("Board Room");
   const lastSpawnedRef = useRef<string | null>(null);
+  const activityLogRef = useRef<string[]>([]);
 
   // Initialize on client only to avoid hydration mismatch
   useEffect(() => {
@@ -65,6 +77,7 @@ export function useCommandRoom() {
       status: "active",
       progress: 0,
       spawnedAt: timestamp(),
+      fileOps: [],
     };
     setSessions(new Map([["game-director", gd]]));
     setThreadId(`#${Math.floor(Math.random() * 9000 + 1000)}`);
@@ -86,7 +99,6 @@ export function useCommandRoom() {
   const spawnAgent = useCallback((role: string) => {
     const r = role.toLowerCase().trim();
 
-    // Create agent session
     setSessions((prev) => {
       if (prev.has(r)) return prev;
       const next = new Map(prev);
@@ -99,13 +111,13 @@ export function useCommandRoom() {
         status: "active",
         progress: 0,
         spawnedAt: timestamp(),
+        fileOps: [],
       });
       return next;
     });
 
     lastSpawnedRef.current = r;
 
-    // Notify Game Director
     addSessionMessage("game-director", {
       type: "system",
       sender: "SYSTEM",
@@ -123,9 +135,20 @@ export function useCommandRoom() {
     }
   }, [addSessionMessage, threadTitle]);
 
-  // Approve agent — called from decision buttons, does NOT auto-switch view
+  // Approve agent — step-based workflow with mock tool calls, thinking, diff
   const approveAgent = useCallback((role: string) => {
-    let progress = 15;
+    const steps = [
+      { progress: 10, label: "Analyzing task requirements...", thinking: "Breaking down the task into actionable steps..." },
+      { progress: 25, label: "Reading project context...", thinking: "Scanning relevant files for context..." },
+      { progress: 40, label: "Planning implementation...", thinking: "Designing the solution approach..." },
+      { progress: 55, label: "Implementing changes...", thinking: "Writing and editing code..." },
+      { progress: 75, label: "Verifying changes...", thinking: "Running checks and validation..." },
+      { progress: 100, label: "Complete", thinking: "Task finished successfully." },
+    ];
+
+    let stepIndex = 0;
+    const progressMsgId = uid();
+    activityLogRef.current = [];
 
     setSessions((prev) => {
       const next = new Map(prev);
@@ -133,58 +156,139 @@ export function useCommandRoom() {
       if (!session || session.status !== "active") return prev;
       next.set(role, {
         ...session,
-        progress: 15,
+        progress: 10,
         messages: [...session.messages, {
-          id: uid(),
+          id: progressMsgId,
           type: "progress" as const,
           sender: role,
-          content: "Commencing work on the assigned task...",
+          content: steps[0].label,
           timestamp: timestamp(),
-          progress: 15,
+          progress: 10,
+          thinking: steps[0].thinking,
         }],
       });
       return next;
     });
 
     const interval = setInterval(() => {
-      progress += Math.floor(Math.random() * 20 + 5);
-      if (progress >= 100) {
-        progress = 100;
+      stepIndex++;
+      if (stepIndex >= steps.length) {
         clearInterval(interval);
-        setSessions((prev) => {
-          const next = new Map(prev);
-          const session = next.get(role);
-          if (session) {
-            next.set(role, {
-              ...session,
-              progress: 100,
-              status: "done",
-              messages: [...session.messages, {
-                id: uid(),
-                type: "system" as const,
-                sender: "SYSTEM",
-                content: "Task completed successfully.",
-                timestamp: timestamp(),
-              }],
-            });
-          }
-          return next;
+        return;
+      }
+
+      const step = steps[stepIndex];
+
+      setSessions((prev) => {
+        const next = new Map(prev);
+        const session = next.get(role);
+        if (!session || session.status !== "active") return prev;
+
+        const newStandaloneMessages: ChatMessage[] = [];
+        const stepToolCalls: NonNullable<ChatMessage["toolCalls"]> = [];
+
+        if (step.progress === 25) {
+          stepToolCalls.push({
+            name: "Read",
+            args: { file_path: "src/utils.ts" },
+            status: "completed",
+            result: "function oldName() {\n  return 42;\n}",
+          });
+          activityLogRef.current.push("Read src/utils.ts — Retrieved source context");
+        }
+
+        if (step.progress === 40) {
+          stepToolCalls.push({
+            name: "Grep",
+            args: { pattern: "oldName", path: "src" },
+            status: "completed",
+            result: "src/utils.ts:1: function oldName()\nsrc/main.ts:5: oldName()",
+          });
+          activityLogRef.current.push("Grep 'oldName' in src/ — Found 2 references across codebase");
+        }
+
+        if (step.progress === 55) {
+          stepToolCalls.push({
+            name: "Edit",
+            args: { file_path: "src/utils.ts", old_string: "function oldName()", new_string: "function newName()" },
+            status: "completed",
+            result: "Done",
+          });
+          activityLogRef.current.push("Edit src/utils.ts — Renamed function oldName → newName");
+          newStandaloneMessages.push({
+            id: uid(),
+            type: "diff" as const,
+            sender: role,
+            content: "Edited src/utils.ts",
+            timestamp: timestamp(),
+            diff: {
+              filePath: "src/utils.ts",
+              oldContent: "function oldName() {\n  return 42;\n}",
+              newContent: "function newName() {\n  return 42;\n}",
+            },
+          });
+        }
+
+        if (step.progress === 75) {
+          stepToolCalls.push({
+            name: "Write",
+            args: { file_path: "src/utils.test.ts", content: "import { newName } from './utils';\n\ntest('newName', () => {\n  expect(newName()).toBe(42);\n});" },
+            status: "completed",
+            result: "Done",
+          });
+          activityLogRef.current.push("Write src/utils.test.ts — Added unit test coverage");
+        }
+
+        const updatedMessages = session.messages.map((m) => {
+          if (m.id !== progressMsgId) return m;
+          return {
+            ...m,
+            progress: step.progress,
+            content: step.label,
+            thinking: step.thinking,
+            timestamp: timestamp(),
+            toolCalls: [...(m.toolCalls ?? []), ...stepToolCalls],
+          };
         });
-        // Notify Game Director
+
+        if (step.progress === 100) {
+          newStandaloneMessages.push({
+            id: uid(),
+            type: "system" as const,
+            sender: "SYSTEM",
+            content: "Task completed successfully.",
+            timestamp: timestamp(),
+          });
+          newStandaloneMessages.push({
+            id: uid(),
+            type: "navigate" as const,
+            sender: "SYSTEM",
+            content: "Back to Game Director",
+            timestamp: timestamp(),
+            navigateTo: "game-director",
+          });
+        }
+
+        next.set(role, {
+          ...session,
+          progress: step.progress,
+          status: step.progress === 100 ? "done" : "active",
+          messages: [...updatedMessages, ...newStandaloneMessages],
+        });
+
+        return next;
+      });
+
+      if (step.progress === 100) {
+        clearInterval(interval);
+        const bullets = activityLogRef.current.length > 0
+          ? "\n\n" + activityLogRef.current.map((s) => `• ${s}`).join("\n")
+          : "";
         addSessionMessage("game-director", {
           type: "agent",
           sender: "game-director",
-          content: `${role.replace(/-/g, " ")} reports task complete.`,
+          content: `${role.replace(/-/g, " ")} reports task complete.${bullets}`,
           showActions: false,
-        });
-      } else {
-        setSessions((prev) => {
-          const next = new Map(prev);
-          const session = next.get(role);
-          if (session) {
-            next.set(role, { ...session, progress });
-          }
-          return next;
         });
       }
     }, 1500);
@@ -198,6 +302,75 @@ export function useCommandRoom() {
 
     // Always switch to GD view for typed commands
     setCurrentSession("game-director");
+
+    // Slash commands
+    if (lower.startsWith("/")) {
+      const parts = lower.slice(1).split(" ");
+      const cmd = parts[0];
+      const args = parts.slice(1).join(" ");
+
+      switch (cmd) {
+        case "clear": {
+          setSessions((prev) => {
+            const next = new Map(prev);
+            const gd = next.get("game-director");
+            if (gd) {
+              next.set("game-director", { ...gd, messages: [] });
+            }
+            return next;
+          });
+          addSessionMessage("game-director", { type: "system", sender: "SYSTEM", content: "Chat cleared." });
+          return;
+        }
+        case "help": {
+          addSessionMessage("game-director", { type: "user", sender: "DIRECTOR", content: trimmed });
+          addSessionMessage("game-director", {
+            type: "agent",
+            sender: "game-director",
+            content: `Available commands:\n- /clear — Clear the chat\n- /help — Show this message\n- /spawn <agent> — Bring an agent online\n- /cost — Show mock token usage\n- /diff — Show recent changes\nYou can also use: spawn <agent>, approve, done <agent>`,
+            showActions: false,
+          });
+          return;
+        }
+        case "spawn": {
+          if (!args) {
+            addSessionMessage("game-director", { type: "system", sender: "SYSTEM", content: "Usage: /spawn <agent-role>" });
+            return;
+          }
+          addSessionMessage("game-director", { type: "user", sender: "DIRECTOR", content: trimmed });
+          spawnAgent(args);
+          return;
+        }
+        case "cost": {
+          addSessionMessage("game-director", { type: "user", sender: "DIRECTOR", content: trimmed });
+          addSessionMessage("game-director", {
+            type: "agent",
+            sender: "game-director",
+            content: `Token usage (mock):\n- Input: 1,247 tokens\n- Output: 892 tokens\n- Total: 2,139 tokens\n- Estimated cost: $0.0042`,
+            showActions: false,
+          });
+          return;
+        }
+        case "diff": {
+          addSessionMessage("game-director", { type: "user", sender: "DIRECTOR", content: trimmed });
+          addSessionMessage("game-director", {
+            type: "diff",
+            sender: "game-director",
+            content: "Recent changes",
+            diff: {
+              filePath: "src/utils.ts",
+              oldContent: "function oldName() {\n  return 42;\n}",
+              newContent: "function newName() {\n  return 42;\n}",
+            },
+          });
+          return;
+        }
+        default: {
+          addSessionMessage("game-director", { type: "system", sender: "SYSTEM", content: `Unknown command: /${cmd}. Type /help for available commands.` });
+          return;
+        }
+      }
+    }
 
     // spawn <agent>
     if (lower.startsWith("spawn ")) {
