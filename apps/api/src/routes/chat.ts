@@ -1,19 +1,20 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
-import type { AgentRole } from "@game-studio/types";
+import type { AgentRole, ChatSession, ChatMessage, CreateMessageRequest, CreateChatSessionRequest } from "@game-studio/types";
+import type { LLMMessage } from "../llm/zai-client.js";
 import { broadcastEvent } from "../services/data-store.js";
-import type {
-  ChatState,
-  ChatSession,
-  ChatMessage,
-  CreateMessageRequest,
-  CreateChatSessionRequest,
-} from "@game-studio/types";
+import { invokeAgent, continueConversation } from "../services/llm-service.js";
+import { getAgentSystemPrompt } from "../prompts/agent-prompt-loader.js";
 import type { WSEvent } from "@game-studio/types";
+import { broadcast } from "../services/websocket.js";
 
 export const chatRouter: Router = Router();
 
-// In-memory store for chat sessions (can be persisted to file if needed)
+// In-memory store for chat sessions with conversation history
+interface ExtendedChatSession extends ChatSession {
+  conversationHistory: LLMMessage[];
+}
+
 const chatStore: ChatState = {
   sessions: {
     "game-director": {
@@ -42,6 +43,7 @@ const chatStore: ChatState = {
       status: "active" as const,
       progress: 0,
       spawnedAt: new Date().toISOString(),
+      conversationHistory: [],
     },
   },
   currentSessionId: "game-director",
@@ -49,12 +51,27 @@ const chatStore: ChatState = {
   threadTitle: "Game Director Session",
 };
 
-// GET /api/chat/sessions - Get all sessions
+interface ChatState {
+  sessions: Record<string, ExtendedChatSession>;
+  currentSessionId: string;
+  threadId: string;
+  threadTitle: string;
+}
+
+// GET /api/chat/sessions — Get all sessions
 chatRouter.get("/sessions", (_req: Request, res: Response) => {
-  res.json({ success: true, data: chatStore });
+  const sessionsData = Object.values(chatStore.sessions).map((s) => ({
+    id: s.id,
+    role: s.role,
+    messages: s.messages,
+    status: s.status,
+    progress: s.progress,
+    spawnedAt: s.spawnedAt,
+  }));
+  res.json({ success: true, data: { sessions: sessionsData, currentSessionId: chatStore.currentSessionId } });
 });
 
-// GET /api/chat/sessions/:id - Get session by ID
+// GET /api/chat/sessions/:id — Get session by ID
 chatRouter.get("/sessions/:id", (req: Request, res: Response) => {
   const id = String(req.params.id);
   const session = chatStore.sessions[id];
@@ -65,34 +82,60 @@ chatRouter.get("/sessions/:id", (req: Request, res: Response) => {
   res.json({ success: true, data: session });
 });
 
-// POST /api/chat/sessions - Create new session
-chatRouter.post("/sessions", (req: Request, res: Response) => {
+// POST /api/chat/sessions — Create new session
+chatRouter.post("/sessions", async (req: Request, res: Response) => {
   const body = req.body as CreateChatSessionRequest;
 
   const sessionId = `session-${Date.now()}`;
   const now = new Date().toISOString();
+  const role = (body.role ?? "agent") as AgentRole;
 
-  const newSession: ChatSession = {
+  // Load the agent's system prompt for the welcome message
+  let welcomeContent = `${role} session initialized.`;
+  try {
+    const systemPrompt = await getAgentSystemPrompt(role);
+    welcomeContent = systemPrompt.split("\n")[0]; // First line as welcome
+  } catch {
+    // Use default
+  }
+
+  const newSession: ExtendedChatSession = {
     id: sessionId,
-    role: body.role ?? "agent",
-    messages: [],
+    role,
+    messages: [
+      {
+        id: `msg-${Date.now()}-1`,
+        type: "system",
+        sender: "SYSTEM",
+        content: welcomeContent,
+        timestamp: now,
+        showActions: false,
+      },
+    ],
     status: "active",
     progress: 0,
     spawnedAt: now,
+    conversationHistory: [],
   };
 
   chatStore.sessions[sessionId] = newSession;
 
-  // Broadcast event
-  broadcastEvent({
+  broadcast({
     type: "chat:session:created",
-    session: newSession,
+    session: {
+      id: newSession.id,
+      role: newSession.role,
+      messages: newSession.messages,
+      status: newSession.status,
+      progress: newSession.progress,
+      spawnedAt: newSession.spawnedAt,
+    },
   } as WSEvent);
 
   res.status(201).json({ success: true, data: newSession });
 });
 
-// DELETE /api/chat/sessions/:id - Delete session
+// DELETE /api/chat/sessions/:id — Delete session
 chatRouter.delete("/sessions/:id", (req: Request, res: Response) => {
   const id = String(req.params.id);
 
@@ -109,8 +152,7 @@ chatRouter.delete("/sessions/:id", (req: Request, res: Response) => {
 
   delete chatStore.sessions[id];
 
-  // Broadcast event
-  broadcastEvent({
+  broadcast({
     type: "chat:session:deleted",
     sessionId: id,
   } as WSEvent);
@@ -118,8 +160,8 @@ chatRouter.delete("/sessions/:id", (req: Request, res: Response) => {
   res.json({ success: true });
 });
 
-// POST /api/chat/sessions/:id/messages - Add message to session
-chatRouter.post("/sessions/:id/messages", (req: Request, res: Response) => {
+// POST /api/chat/sessions/:id/messages — Add message and get LLM response
+chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) => {
   const id = String(req.params.id);
   const body = req.body as CreateMessageRequest;
 
@@ -134,10 +176,11 @@ chatRouter.post("/sessions/:id/messages", (req: Request, res: Response) => {
     return;
   }
 
-  const newMessage: ChatMessage = {
-    id: `msg-${Date.now()}`,
-    type: body.type ?? "system",
-    sender: body.sender ?? "SYSTEM",
+  const userMessageId = `msg-${Date.now()}`;
+  const userMessage: ChatMessage = {
+    id: userMessageId,
+    type: body.type ?? "user",
+    sender: body.sender ?? "USER",
     content: body.content,
     timestamp: new Date().toISOString(),
     showActions: body.showActions,
@@ -145,21 +188,116 @@ chatRouter.post("/sessions/:id/messages", (req: Request, res: Response) => {
     codeBlock: body.codeBlock,
   };
 
-  session.messages.push(newMessage);
+  session.messages.push(userMessage);
 
-  // Broadcast event
-  broadcastEvent({
+  // Add to conversation history
+  session.conversationHistory.push({
+    role: "user",
+    content: body.content,
+  });
+
+  // Broadcast user message
+  broadcast({
     type: "chat:message",
     sessionId: id,
-    message: newMessage,
+    message: userMessage,
   } as WSEvent);
 
-  res.status(201).json({ success: true, data: newMessage });
+  // If this is a system message or no auto-response needed, return early
+  if (body.type === "system" || body.type === "progress") {
+    res.status(201).json({ success: true, data: userMessage });
+    return;
+  }
+
+  // Get response from LLM
+  try {
+    const agentRole = session.role as AgentRole;
+
+    // Add thinking/progress message
+    const progressMsgId = `msg-${Date.now()}`;
+    const progressMessage: ChatMessage = {
+      id: progressMsgId,
+      type: "progress",
+      sender: agentRole,
+      content: `${agentRole} is thinking...`,
+      timestamp: new Date().toISOString(),
+      showActions: false,
+      progress: 0,
+    };
+    session.messages.push(progressMessage);
+    broadcast({
+      type: "chat:message",
+      sessionId: id,
+      message: progressMessage,
+    } as WSEvent);
+
+    // Call the LLM
+    const result = await continueConversation(agentRole, session.conversationHistory, id);
+
+    // Add assistant response to conversation
+    session.conversationHistory.push({
+      role: "assistant",
+      content: result.content,
+    });
+
+    // Create assistant message
+    const assistantMessage: ChatMessage = {
+      id: `msg-${Date.now()}`,
+      type: "agent",
+      sender: agentRole,
+      content: result.content,
+      timestamp: new Date().toISOString(),
+      showActions: true,
+      progress: 100,
+      toolCalls: result.toolCalls?.map((tc) => ({
+        tool: tc.name,
+        status: "success" as const,
+        input: JSON.stringify(tc.input),
+      })),
+    };
+
+    session.messages.push(assistantMessage);
+
+    // Update session progress
+    session.progress = Math.min(100, session.progress + 10);
+    if (session.progress >= 100) {
+      session.status = "completed";
+    }
+
+    // Broadcast assistant response
+    broadcast({
+      type: "chat:message",
+      sessionId: id,
+      message: assistantMessage,
+    } as WSEvent);
+
+    res.status(201).json({ success: true, data: { userMessage, assistantMessage } });
+  } catch (err: unknown) {
+    const error = err as Error;
+
+    const errorMessage: ChatMessage = {
+      id: `msg-${Date.now()}`,
+      type: "system",
+      sender: "SYSTEM",
+      content: `Error: ${error.message}`,
+      timestamp: new Date().toISOString(),
+      showActions: false,
+    };
+    session.messages.push(errorMessage);
+
+    broadcast({
+      type: "chat:message",
+      sessionId: id,
+      message: errorMessage,
+    } as WSEvent);
+
+    res.status(201).json({ success: true, data: { userMessage, errorMessage } });
+  }
 });
 
-// POST /api/chat/spawn - Spawn an agent
-chatRouter.post("/spawn", (req: Request, res: Response) => {
-  const { role } = req.body as { role?: string };
+// POST /api/chat/spawn — Spawn an agent with real ZAI API
+chatRouter.post("/spawn", async (req: Request, res: Response) => {
+  const { role, task } = req.body as { role?: string; task?: string };
 
   if (!role) {
     res.status(400).json({ success: false, error: "role is required" });
@@ -169,11 +307,12 @@ chatRouter.post("/spawn", (req: Request, res: Response) => {
   const invocationId = `invoke-${Date.now()}`;
   const sessionId = role.toLowerCase().replace(/\s+/g, "-");
   const now = new Date().toISOString();
+  const agentRole = role as AgentRole;
 
   // Create session for the spawned agent
-  const newSession: ChatSession = {
+  const newSession: ExtendedChatSession = {
     id: sessionId,
-    role: role as AgentRole,
+    role: agentRole,
     messages: [
       {
         id: `msg-${Date.now()}-1`,
@@ -187,28 +326,84 @@ chatRouter.post("/spawn", (req: Request, res: Response) => {
     status: "active",
     progress: 0,
     spawnedAt: now,
+    conversationHistory: [],
   };
 
   chatStore.sessions[sessionId] = newSession;
 
-  // Broadcast spawn event
-  broadcastEvent({
+  broadcast({
     type: "agent:spawned",
     agentId: invocationId,
-    agent: role as AgentRole,
+    agent: agentRole,
     sessionId: sessionId,
   } as WSEvent);
 
-  // Also broadcast session created
-  broadcastEvent({
+  broadcast({
     type: "chat:session:created",
-    session: newSession,
+    session: {
+      id: newSession.id,
+      role: newSession.role,
+      messages: newSession.messages,
+      status: newSession.status,
+      progress: newSession.progress,
+      spawnedAt: newSession.spawnedAt,
+    },
   } as WSEvent);
 
-  res.json({ success: true, data: { invocationId, role, sessionId } });
+  // If a task is provided, execute it immediately
+  if (task) {
+    try {
+      const result = await invokeAgent(agentRole, task, sessionId, undefined, []);
+
+      const responseMessage: ChatMessage = {
+        id: `msg-${Date.now()}`,
+        type: "agent",
+        sender: role,
+        content: result.content,
+        timestamp: new Date().toISOString(),
+        showActions: true,
+        progress: 100,
+        toolCalls: result.toolCalls?.map((tc) => ({
+          tool: tc.name,
+          status: "success" as const,
+          input: JSON.stringify(tc.input),
+        })),
+      };
+
+      newSession.messages.push(responseMessage);
+      newSession.conversationHistory.push({ role: "assistant", content: result.content });
+
+      broadcast({
+        type: "chat:message",
+        sessionId,
+        message: responseMessage,
+      } as WSEvent);
+
+      broadcast({
+        type: "agent:completed",
+        agentId: invocationId,
+        output: result.content,
+        sessionId: sessionId,
+      } as WSEvent);
+    } catch (err: unknown) {
+      const error = err as Error;
+
+      broadcast({
+        type: "agent:failed",
+        agentId: invocationId,
+        error: error.message,
+        sessionId: sessionId,
+      } as WSEvent);
+    }
+  }
+
+  res.json({
+    success: true,
+    data: { invocationId, role, sessionId, status: task ? "completed" : "ready" },
+  });
 });
 
-// POST /api/chat/approve - Approve agent
+// POST /api/chat/approve — Approve agent action
 chatRouter.post("/approve", (req: Request, res: Response) => {
   const { invocationId } = req.body as { invocationId?: string };
 
@@ -220,14 +415,13 @@ chatRouter.post("/approve", (req: Request, res: Response) => {
   res.json({ success: true, data: { invocationId, status: "approved" } });
 });
 
-// POST /api/chat/diff - Save or retrieve diffs
+// POST /api/chat/diff — Save or retrieve diffs
 chatRouter.post("/diff", (req: Request, res: Response) => {
   const { sessionId, diffBlocks } = req.body as { sessionId?: string; diffBlocks?: unknown[] };
 
-  // Store diff for the session
   const diffId = `diff-${Date.now()}`;
 
-  broadcastEvent({
+  broadcast({
     type: "chat:message",
     sessionId: sessionId ?? "game-director",
     message: {
@@ -243,9 +437,11 @@ chatRouter.post("/diff", (req: Request, res: Response) => {
   res.json({ success: true, data: { diffId, diffBlocks } });
 });
 
-// GET /api/chat/diff/:id - Get diff by ID
+// GET /api/chat/diff/:id — Get diff by ID
 chatRouter.get("/diff/:id", (req: Request, res: Response) => {
   const id = String(req.params.id);
-  // Return the diff (in real implementation, would fetch from store)
   res.json({ success: true, data: { id, diffBlocks: [] } });
 });
+
+// Export for use by other routes
+export { chatStore };

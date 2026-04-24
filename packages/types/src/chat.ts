@@ -1,5 +1,5 @@
 export type MessageType = "system" | "agent" | "user" | "progress" | "welcome" | "diff" | "navigate";
-export type ChatSessionStatus = "active" | "done";
+export type ChatSessionStatus = "active" | "done" | "completed";
 
 export interface CodeBlock {
   language: string;

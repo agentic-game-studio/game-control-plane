@@ -1,12 +1,20 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
 import { skills } from "@game-studio/skills";
+import { invokeAgent } from "../services/llm-service.js";
+import { SessionStore } from "@game-studio/state";
+import { loadConfig } from "../config.js";
+import { broadcast } from "../services/websocket.js";
+import type { WSEvent } from "@game-studio/types";
 
 export const skillsRouter: Router = Router();
 
+const config = loadConfig();
+const store = new SessionStore(config.WORKSPACE_DIR);
+
 // GET /skills — list all skills
 skillsRouter.get("/", (_req: Request, res: Response) => {
-  const all = Object.entries(skills).map(([name, def]) => ({ ...def }));
+  const all = Object.entries(skills).map(([, def]) => ({ ...def }));
   res.json({ success: true, data: all });
 });
 
@@ -20,7 +28,7 @@ skillsRouter.get("/:id", (req: Request, res: Response) => {
   res.json({ success: true, data: skill });
 });
 
-// POST /skills/:id/invoke — invoke a skill
+// POST /skills/:id/invoke — invoke a skill with real ZAI API
 skillsRouter.post("/:id/invoke", async (req: Request, res: Response) => {
   const skill = skills[req.params.id as keyof typeof skills];
   if (!skill) {
@@ -33,19 +41,152 @@ skillsRouter.post("/:id/invoke", async (req: Request, res: Response) => {
     args?: Record<string, string>;
     reviewMode?: string;
   };
+
   if (!sessionId) {
     res.status(400).json({ success: false, error: "sessionId is required" });
     return;
   }
 
+  const session = await store.get(sessionId);
+  if (!session) {
+    res.status(404).json({ success: false, error: "Session not found" });
+    return;
+  }
+
+  // Start the skill invocation asynchronously
+  const skillId = skill.name;
+  let currentPhase = 0;
+
+  // Build task description from args
+  const taskArgs = args
+    ? Object.entries(args)
+        .map(([k, v]) => `- ${k}: ${v}`)
+        .join("\n")
+    : "No additional arguments provided.";
+
+  // Execute phases sequentially if skill has phases
+  if (skill.phases.length > 0) {
+    const runPhases = async () => {
+      for (const phase of skill.phases) {
+        currentPhase = phase.order;
+
+        broadcast({
+          type: "skill:phase:complete",
+          skillId,
+          phase: currentPhase,
+          output: `Starting phase: ${phase.name}`,
+          sessionId,
+        } as WSEvent);
+
+        // Execute each agent in the phase
+        for (const agentRole of phase.agents) {
+          const task = `SKILL: ${skillId}
+PHASE: ${phase.name} (${phase.order}/${skill.phases.length})
+DESCRIPTION: ${phase.description}
+
+TASK ARGUMENTS:
+${taskArgs}
+
+Execute this phase of the skill workflow.`;
+
+          const result = await invokeAgent(
+            agentRole as import("@game-studio/types").AgentRole,
+            task,
+            sessionId,
+            undefined
+          );
+
+          // Add log entry for the result
+          await store.addLog(sessionId, {
+            level: "info",
+            message: `[${agentRole}] Phase ${currentPhase}: ${result.content.slice(0, 200)}...`,
+            agent: agentRole,
+            skill: skillId,
+          });
+
+          broadcast({
+            type: "skill:phase:complete",
+            skillId,
+            phase: currentPhase,
+            output: result.content,
+            sessionId,
+          } as WSEvent);
+
+          // Check for gates
+          if (phase.gates && reviewMode !== "solo") {
+            broadcast({
+              type: "log:entry",
+              sessionId,
+              level: "info",
+              message: `Gate check required: ${phase.gates.join(", ")}`,
+              agent: agentRole,
+              skill: skillId,
+              timestamp: new Date().toISOString(),
+            } as WSEvent);
+          }
+        }
+      }
+
+      // Update session status
+      await store.save({ ...session, status: "completed", updatedAt: new Date().toISOString() });
+      broadcast({
+        type: "session:status",
+        sessionId,
+        status: "completed",
+      } as WSEvent);
+    };
+
+    // Start running phases in background
+    runPhases().catch((err) => {
+      console.error(`Skill ${skillId} failed:`, err);
+      store.addLog(sessionId, {
+        level: "error",
+        message: `Skill failed: ${String(err)}`,
+        skill: skillId,
+      });
+    });
+  } else {
+    // Simple skill with no phases — run directly
+    const task = `SKILL: ${skillId}
+DESCRIPTION: ${skill.description}
+
+TASK ARGUMENTS:
+${taskArgs}
+
+Execute this skill.`;
+
+    // Use creative-director as default orchestrator for simple skills
+    const result = await invokeAgent(
+      "creative-director",
+      task,
+      sessionId,
+      undefined
+    );
+
+    await store.addLog(sessionId, {
+      level: "info",
+      message: result.content.slice(0, 500),
+      skill: skillId,
+    });
+
+    broadcast({
+      type: "skill:phase:complete",
+      skillId,
+      phase: 1,
+      output: result.content,
+      sessionId,
+    } as WSEvent);
+  }
+
   res.json({
     success: true,
     data: {
-      skillId: skill.name,
+      skillId,
       phases: skill.phases.length,
       teamMembers: skill.teamMembers,
-      status: "queued",
+      status: "running",
       reviewMode: reviewMode ?? "lean",
+      sessionId,
     },
   });
 });

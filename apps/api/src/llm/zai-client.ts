@@ -166,34 +166,25 @@ export async function callZAI(request: LLMRequest): Promise<LLMResponse> {
     }
   }
 
-  const messages = request.messages.map((m) => {
-    if (Array.isArray(m.content)) {
-      const toolResult = m.content[0] as ToolResultContent | undefined;
-      if (toolResult?.type === "tool_result") {
-        return {
-          role: "tool" as const,
-          tool_call_id: toolResult.tool_use_id,
-          content: toolResult.content,
-        };
+  // Filter out system messages from the array (they go in the separate system field)
+  const messages = request.messages
+    .filter((m) => m.role !== "system")
+    .map((m) => {
+      if (Array.isArray(m.content)) {
+        const toolResult = m.content[0] as ToolResultContent | undefined;
+        if (toolResult?.type === "tool_result") {
+          return {
+            role: "tool" as const,
+            tool_call_id: toolResult.tool_use_id,
+            content: toolResult.content,
+          };
+        }
       }
-    }
-    if (m.role === "system") {
-      const existingSystem = typeof m.content === "string" ? m.content : JSON.stringify(m.content);
       return {
-        role: "system" as const,
-        content: systemPrompt ? `${systemPrompt}\n\n${existingSystem}` : existingSystem,
+        role: m.role as "user" | "assistant",
+        content: typeof m.content === "string" ? m.content : JSON.stringify(m.content),
       };
-    }
-    return {
-      role: m.role as "user" | "assistant",
-      content: typeof m.content === "string" ? m.content : JSON.stringify(m.content),
-    };
-  });
-
-  // Add system prompt if provided but no system message exists
-  if (systemPrompt && !messages.some((m) => m.role === "system")) {
-    messages.unshift({ role: "system", content: systemPrompt });
-  }
+    });
 
   const body: Record<string, unknown> = {
     model,
@@ -201,6 +192,11 @@ export async function callZAI(request: LLMRequest): Promise<LLMResponse> {
     temperature: request.temperature ?? 1.0,
     messages,
   };
+
+  // Add system prompt as separate field (ZAI API format)
+  if (systemPrompt) {
+    body.system = systemPrompt;
+  }
 
   if (request.tools && request.tools.length > 0) {
     body.tools = request.tools.map((tool) => ({
@@ -210,7 +206,7 @@ export async function callZAI(request: LLMRequest): Promise<LLMResponse> {
     }));
   }
 
-  const url = `${config.ZAI_BASE_URL}/messages`;
+  const url = `${config.ZAI_BASE_URL}/v1/messages`;
   const response = await fetchWithRetry(url, {
     method: "POST",
     headers: {
