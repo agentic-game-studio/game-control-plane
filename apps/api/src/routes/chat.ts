@@ -10,6 +10,58 @@ import { broadcast } from "../services/websocket.js";
 
 export const chatRouter: Router = Router();
 
+/** Parse question data from tool call results */
+interface QuestionData {
+  questionId: string;
+  question: string;
+  options: { id: string; label: string; description?: string }[];
+  allowMultiple: boolean;
+  allowCustomInput: boolean;
+}
+
+function parseQuestionFromContent(content: string): QuestionData | null {
+  // Now the question data is in toolCalls, not content
+  // This function is kept for backwards compatibility but will rarely match
+  return null;
+}
+
+function parseQuestionFromToolResult(toolCalls?: { name: string; input: Record<string, unknown> }[]): QuestionData | null {
+  if (!toolCalls) return null;
+  for (const tc of toolCalls) {
+    if (tc.name === "AskUserQuestion" && tc.input) {
+      try {
+        // The tool returns JSON string in the input field
+        const inputStr = typeof tc.input === "string" ? tc.input : JSON.stringify(tc.input);
+        const parsed = JSON.parse(inputStr);
+        if (parsed.__QUESTION__) {
+          return {
+            questionId: parsed.questionId,
+            question: parsed.question,
+            options: parsed.options,
+            allowMultiple: parsed.allowMultiple,
+            allowCustomInput: parsed.allowCustomInput,
+          };
+        }
+      } catch {
+        // Try parsing from raw input
+        if (typeof tc.input === "object") {
+          const input = tc.input as Record<string, unknown>;
+          if (input.questionId && input.question && input.options) {
+            return {
+              questionId: input.questionId as string,
+              question: input.question as string,
+              options: input.options as QuestionData["options"],
+              allowMultiple: (input.allowMultiple as boolean) ?? false,
+              allowCustomInput: (input.allowCustomInput as boolean) ?? false,
+            };
+          }
+        }
+      }
+    }
+  }
+  return null;
+}
+
 // In-memory store for chat sessions with conversation history
 interface ExtendedChatSession extends ChatSession {
   conversationHistory: LLMMessage[];
@@ -278,12 +330,16 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
       content: result.content,
     });
 
+    // Check if LLM asked a question via AskUserQuestion tool
+    const questionData = parseQuestionFromToolResult(result.toolCalls);
+
     // Create assistant message
     const assistantMessage: ChatMessage = {
       id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      type: "agent",
+      type: questionData ? "question" : "agent",
       sender: agentRole,
-      content: result.content,
+      // For questions, use the question text as content (not the raw tool result)
+      content: questionData ? questionData.question : result.content,
       timestamp: new Date().toISOString(),
       showActions: false,
       progress: 100,
@@ -292,6 +348,7 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
         args: tc.input,
         status: "success",
       })),
+      question: questionData ?? undefined,
     };
 
     session.messages.push(assistantMessage);

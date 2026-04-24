@@ -141,6 +141,31 @@ async function executeTool(
         return `Subagent ${agent} output:\n${subResult.content}`;
       }
 
+      case "AskUserQuestion": {
+        const questionId = input.questionId as string;
+        const question = input.question as string;
+        const options = input.options as Array<{ id: string; label: string; description?: string }>;
+        const allowMultiple = input.allowMultiple as boolean | undefined;
+        const allowCustomInput = input.allowCustomInput as boolean | undefined;
+
+        if (!questionId || !question || !options) {
+          return "Error: questionId, question, and options are required";
+        }
+
+        logEntry(sessionId, "info", `[${agentRole}] Asking question: ${questionId}`, agentRole);
+
+        // Return special marker that tells callLLMWithTools to STOP and return the question
+        // This prevents the LLM from seeing the question data and responding with "Waiting..."
+        return "__ASK_USER_QUESTION__" + JSON.stringify({
+          __QUESTION__: true,
+          questionId,
+          question,
+          options,
+          allowMultiple: allowMultiple ?? false,
+          allowCustomInput: allowCustomInput ?? false,
+        });
+      }
+
       default:
         return `Unknown tool: ${name}`;
     }

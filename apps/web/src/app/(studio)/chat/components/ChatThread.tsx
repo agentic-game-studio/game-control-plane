@@ -5,6 +5,7 @@ import type { ChatMessage } from "@/hooks/useCommandRoom";
 import { getAgentIcon } from "@/lib/agent-icons";
 import { renderMarkdown } from "@/lib/markdown";
 import DiffView from "./DiffView";
+import QuestionMessage from "./QuestionMessage";
 
 interface ChatThreadProps {
   messages: ChatMessage[];
@@ -13,6 +14,7 @@ interface ChatThreadProps {
   currentSession: string;
   onDecision: (action: string, sender: string) => void;
   onNavigate?: (targetSession: string) => void;
+  onAnswer?: (questionId: string, selected: string[], customInput?: string) => void;
 }
 
 const TOOL_ICONS: Record<string, string> = {
@@ -298,7 +300,7 @@ function NavigateMessage({ msg, onNavigate }: { msg: ChatMessage; onNavigate?: (
   );
 }
 
-export default function ChatThread({ messages, threadId, threadTitle, currentSession, onDecision, onNavigate }: ChatThreadProps) {
+export default function ChatThread({ messages, threadId, threadTitle, currentSession, onDecision, onNavigate, onAnswer }: ChatThreadProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -349,6 +351,8 @@ export default function ChatThread({ messages, threadId, threadTitle, currentSes
               return <DiffMessage key={msg.id} msg={msg} onNavigate={onNavigate} />;
             case "navigate":
               return <NavigateMessage key={msg.id} msg={msg} onNavigate={onNavigate} />;
+            case "question":
+              return onAnswer ? <QuestionMessage key={`${msg.id}-${msg.question?.questionId}`} msg={msg} onAnswer={onAnswer} sender={msg.sender} /> : null;
             default:
               return null;
           }

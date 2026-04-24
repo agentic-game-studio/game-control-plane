@@ -1,5 +1,19 @@
-export type MessageType = "system" | "agent" | "user" | "progress" | "welcome" | "diff" | "navigate";
+export type MessageType = "system" | "agent" | "user" | "progress" | "welcome" | "diff" | "navigate" | "question";
 export type ChatSessionStatus = "active" | "done" | "completed";
+
+export interface QuestionOption {
+  id: string;
+  label: string;
+  description?: string;
+}
+
+export interface QuestionData {
+  questionId: string;
+  question: string;
+  options: QuestionOption[];
+  allowMultiple?: boolean;
+  allowCustomInput?: boolean;
+}
 
 export interface CodeBlock {
   language: string;
@@ -45,6 +59,7 @@ export interface ChatMessage {
   thinking?: string;
   navigate?: NavigateAction;
   images?: string[];
+  question?: QuestionData;
 }
 
 export interface CreateMessageRequest {

@@ -29,7 +29,7 @@ function normalizeToolCalls(toolCalls?: { tool?: string; name?: string; args?: R
 
 export interface ChatMessage {
   id: string;
-  type: "system" | "agent" | "user" | "progress" | "welcome" | "diff" | "navigate";
+  type: "system" | "agent" | "user" | "progress" | "welcome" | "diff" | "navigate" | "question";
   sender: string;
   content: string;
   timestamp: string;
@@ -42,6 +42,13 @@ export interface ChatMessage {
   navigate?: { targetSession: string; label: string };
   navigateTo?: string;
   images?: string[];
+  question?: {
+    questionId: string;
+    question: string;
+    options: { id: string; label: string; description?: string }[];
+    allowMultiple?: boolean;
+    allowCustomInput?: boolean;
+  };
 }
 
 export interface FileOp {
@@ -188,9 +195,12 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, addS
           showActions: message.showActions,
           progress: message.progress,
           toolCalls: message.toolCalls as ToolCall[] | undefined,
+          question: message.question as ChatMessage["question"],
+          thinking: message.thinking,
+          navigate: message.navigate,
         }],
         progress: message.progress ?? session.progress,
-        status: message.type === "agent" ? "done" : session.status,
+        status: message.type === "agent" || message.type === "question" ? "done" : session.status,
       });
       return next;
     }
@@ -721,11 +731,13 @@ Agents: 3 active`,
         removeTyping();
         if (result.assistantMessage) {
           addSessionMessage("game-director", {
-            type: "agent",
+            type: result.assistantMessage.type as ChatMessage["type"],
             sender: result.assistantMessage.sender,
             content: result.assistantMessage.content,
             showActions: false,
+            progress: result.assistantMessage.progress,
             toolCalls: normalizeToolCalls(result.assistantMessage.toolCalls),
+            question: result.assistantMessage.question as ChatMessage["question"],
           });
         } else if (result.errorMessage) {
           addSessionMessage("game-director", {

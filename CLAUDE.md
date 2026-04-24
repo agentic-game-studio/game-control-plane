@@ -163,6 +163,7 @@ Next.js 15 App Router, Tailwind CSS v4, no UI framework. All pages are client co
 | `CommandInput.tsx` | Slash command autocomplete with dropdown hints |
 | `DiffView.tsx` | Line-by-line diff rendering with syntax highlighting |
 | `AgentTree.tsx` | Sidebar with agent sessions and hierarchy tree |
+| `QuestionMessage.tsx` | Interactive Q&A with radio/checkbox options |
 
 ### Chat Features
 
@@ -170,12 +171,13 @@ Next.js 15 App Router, Tailwind CSS v4, no UI framework. All pages are client co
 - **6-step approve workflow**: Progress bars with tool calls (Read, Grep, Edit, Write)
 - **Thinking panel**: Shows agent reasoning during progress
 - **Navigate messages**: "Back to Game Director" button after task completion
-- **Message types**: `system`, `agent`, `user`, `progress`, `welcome`, `diff`, `navigate`
+- **Message types**: `system`, `agent`, `user`, `progress`, `welcome`, `diff`, `navigate`, `question`
 - **Markdown rendering**: Messages render markdown with code blocks, lists, links
 - **Image paste**: Base64 inline images via clipboard paste (50mb body limit)
 - **Typing indicator**: Immediate visual feedback when agent is responding
 - **Message deduplication**: Prevents duplicate messages on re-renders
 - **showActions**: Approve/Override/Pause buttons only appear when explicitly requested by the agent
+- **Interactive Q&A**: Agents can ask questions with selectable options (radio/checkbox), custom input, keyboard navigation via `AskUserQuestion` tool
 
 ## Data Flow
 
