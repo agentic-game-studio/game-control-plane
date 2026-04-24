@@ -3,6 +3,9 @@ import type { SessionState, SessionConfig } from "./session.js";
 import type { GateResult, GateStatus } from "./gate.js";
 import type { ReviewMode } from "./gate.js";
 import type { DocumentCategory, DocumentEntry, DocumentDetail, CategoryMeta, GraphData } from "./document.js";
+import type { DashboardSummary } from "./dashboard.js";
+import type { TicketStatus } from "./tickets.js";
+import type { GameAsset } from "./assets.js";
 
 /** WebSocket event types for real-time frontend updates */
 export type WSEvent =
@@ -16,6 +19,10 @@ export type WSEvent =
   | { type: "log:entry"; sessionId: string; level: string; message: string; timestamp: string }
   | { type: "document:created"; documentId: string; category: DocumentCategory; title: string }
   | { type: "document:updated"; documentId: string; category: DocumentCategory; title: string }
+  | { type: "dashboard:updated"; summary: DashboardSummary }
+  | { type: "ticket:updated"; ticketId: string; status: TicketStatus }
+  | { type: "asset:created"; asset: GameAsset }
+  | { type: "credits:updated"; credits: { current: number; max: number } }
   | { type: "error"; error: string; sessionId?: string };
 
 /** API request/response types */

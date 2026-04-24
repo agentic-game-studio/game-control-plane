@@ -1,6 +1,9 @@
 "use client";
 
 import { useState, useCallback, useEffect, useRef } from "react";
+import { apiFetch } from "@/lib/api";
+import { useWebSocket } from "./useWebSocket";
+import type { WSEvent } from "@game-studio/types";
 
 export interface ChatMessage {
   id: string;
@@ -24,7 +27,7 @@ export interface AgentSession {
 const GREETINGS: Record<string, string> = {
   "creative-director": "I'm the Creative Director. I oversee the artistic vision and ensure all creative elements align. What would you like to explore?",
   "technical-director": "Technical Director online. I manage the technical architecture and engineering pipeline. What system needs attention?",
-  "producer": "Producer here. I manage timelines, resources, and coordination across teams. What's the priority?",
+  producer: "Producer here. I manage timelines, resources, and coordination across teams. What's the priority?",
   "game-designer": "Game Designer ready. I design core mechanics, systems, and gameplay loops. What system should we work on?",
   "lead-programmer": "Lead Programmer spawned. I coordinate all programming tasks and code architecture. What needs implementation?",
   "art-director": "Art Director online. I define the visual style and guide all artistic output. What's the creative brief?",
@@ -44,30 +47,139 @@ function uid(): string {
   return Math.random().toString(36).slice(2, 8);
 }
 
+function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, addSessionMessage: (role: string, msg: Omit<ChatMessage, "id" | "timestamp">) => void): Map<string, AgentSession> | null {
+  switch (event.type) {
+    case "agent:spawned": {
+      const role = event.agent;
+      if (sessions.has(role)) return null;
+      const next = new Map(sessions);
+      next.set(role, {
+        role,
+        messages: [
+          { id: uid(), type: "system", sender: "SYSTEM", content: `${role.toUpperCase()} session initialized.`, timestamp: timestamp() },
+          { id: uid(), type: "agent", sender: role, content: GREETINGS[role] ?? DEFAULT_GREETING, timestamp: timestamp(), showActions: true },
+        ],
+        status: "active",
+        progress: 0,
+        spawnedAt: timestamp(),
+      });
+      addSessionMessage("game-director", {
+        type: "system",
+        sender: "SYSTEM",
+        content: `${role.toUpperCase()} spawned via WebSocket at ${timestamp()} UTC`,
+      });
+      return next;
+    }
+    case "agent:completed": {
+      const role = event.agentId;
+      const session = sessions.get(role);
+      if (!session) return null;
+      const next = new Map(sessions);
+      next.set(role, {
+        ...session,
+        status: "done",
+        progress: 100,
+        messages: [...session.messages, {
+          id: uid(),
+          type: "system" as const,
+          sender: "SYSTEM",
+          content: `Task completed: ${event.output}`,
+          timestamp: timestamp(),
+        }],
+      });
+      addSessionMessage("game-director", {
+        type: "agent",
+        sender: "game-director",
+        content: `${role.replace(/-/g, " ")} reports task complete.`,
+        showActions: false,
+      });
+      return next;
+    }
+    case "agent:failed": {
+      const role = event.agentId;
+      const session = sessions.get(role);
+      if (!session) return null;
+      const next = new Map(sessions);
+      next.set(role, {
+        ...session,
+        status: "done",
+        messages: [...session.messages, {
+          id: uid(),
+          type: "system" as const,
+          sender: "SYSTEM",
+          content: `Task failed: ${event.error}`,
+          timestamp: timestamp(),
+        }],
+      });
+      addSessionMessage("game-director", {
+        type: "system",
+        sender: "SYSTEM",
+        content: `${role.toUpperCase()} failed: ${event.error}`,
+      });
+      return next;
+    }
+    case "log:entry": {
+      addSessionMessage("game-director", {
+        type: "system",
+        sender: "SYSTEM",
+        content: `[${event.level.toUpperCase()}] ${event.message}`,
+      });
+      return null;
+    }
+    default:
+      return null;
+  }
+}
+
 export function useCommandRoom() {
   const [sessions, setSessions] = useState<Map<string, AgentSession>>(new Map());
   const [currentSession, setCurrentSession] = useState("game-director");
   const [threadId, setThreadId] = useState("");
   const [threadTitle, setThreadTitle] = useState("Board Room");
+  const [initialized, setInitialized] = useState(false);
   const lastSpawnedRef = useRef<string | null>(null);
+  const addSessionMessageRef = useRef<(role: string, msg: Omit<ChatMessage, "id" | "timestamp">) => void | undefined>(undefined);
 
-  // Initialize on client only to avoid hydration mismatch
+  // Initialize on client by fetching from API
   useEffect(() => {
-    const gd: AgentSession = {
-      role: "game-director",
-      messages: [{
-        id: uid(),
-        type: "welcome",
-        sender: "GAME_DIRECTOR",
-        content: "BOARD_ROOM initialized. Game Director online.",
-        timestamp: timestamp(),
-      }],
-      status: "active",
-      progress: 0,
-      spawnedAt: timestamp(),
+    const init = async () => {
+      try {
+        const data = await apiFetch<{
+          sessions: Record<string, AgentSession>;
+          currentSessionId: string;
+          threadId: string;
+          threadTitle: string;
+        }>("/api/chat/sessions");
+
+        const sessionsMap = new Map(Object.entries(data.sessions));
+        setSessions(sessionsMap);
+        setCurrentSession(data.currentSessionId);
+        setThreadId(data.threadId);
+        setThreadTitle(data.threadTitle);
+      } catch (error) {
+        console.error("Failed to fetch chat sessions:", error);
+        // Fallback to local initialization
+        const gd: AgentSession = {
+          role: "game-director",
+          messages: [{
+            id: uid(),
+            type: "welcome",
+            sender: "GAME_DIRECTOR",
+            content: "BOARD_ROOM initialized. Game Director online.",
+            timestamp: timestamp(),
+          }],
+          status: "active",
+          progress: 0,
+          spawnedAt: timestamp(),
+        };
+        setSessions(new Map([["game-director", gd]]));
+        setThreadId(`#${Math.floor(Math.random() * 9000 + 1000)}`);
+      } finally {
+        setInitialized(true);
+      }
     };
-    setSessions(new Map([["game-director", gd]]));
-    setThreadId(`#${Math.floor(Math.random() * 9000 + 1000)}`);
+
+    init();
   }, []);
 
   const addSessionMessage = useCallback((sessionRole: string, msg: Omit<ChatMessage, "id" | "timestamp">) => {
@@ -83,10 +195,23 @@ export function useCommandRoom() {
     });
   }, []);
 
+  // Keep ref updated for WebSocket handler
+  addSessionMessageRef.current = addSessionMessage;
+
+  // WebSocket integration
+  const onWSEvent = useCallback((event: WSEvent) => {
+    const updated = handleWSEvent(event, sessions, addSessionMessageRef.current!);
+    if (updated) {
+      setSessions(updated);
+    }
+  }, []);
+
+  useWebSocket(onWSEvent);
+
   const spawnAgent = useCallback((role: string) => {
     const r = role.toLowerCase().trim();
 
-    // Create agent session
+    // Create agent session locally
     setSessions((prev) => {
       if (prev.has(r)) return prev;
       const next = new Map(prev);
@@ -121,6 +246,15 @@ export function useCommandRoom() {
     if (threadTitle === "Board Room") {
       setThreadTitle(`Session: ${r.replace(/-/g, " ")}`);
     }
+
+    // Broadcast to backend via API
+    apiFetch<{ invocationId: string; role: string }>("/api/chat/spawn", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ role: r }),
+    }).catch((error) => {
+      console.error("Failed to spawn agent via API:", error);
+    });
   }, [addSessionMessage, threadTitle]);
 
   // Approve agent — called from decision buttons, does NOT auto-switch view
@@ -146,6 +280,16 @@ export function useCommandRoom() {
       return next;
     });
 
+    // Call API to approve
+    apiFetch<{ invocationId: string; status: string }>("/api/chat/approve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ invocationId: role }),
+    }).catch((error) => {
+      console.error("Failed to approve agent via API:", error);
+    });
+
+    // Local progress simulation
     const interval = setInterval(() => {
       progress += Math.floor(Math.random() * 20 + 5);
       if (progress >= 100) {
@@ -284,5 +428,6 @@ export function useCommandRoom() {
     executeCommand,
     selectSession: setCurrentSession,
     approveAgent,
+    initialized,
   };
 }

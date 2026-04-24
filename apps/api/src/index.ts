@@ -11,6 +11,11 @@ import { gatesRouter } from "./routes/gates.js";
 import { designRouter } from "./routes/design.js";
 import { promptsRouter } from "./routes/prompts.js";
 import { documentsRouter } from "./routes/documents.js";
+import { dashboardRouter } from "./routes/dashboard.js";
+import { chatRouter } from "./routes/chat.js";
+import { ticketsRouter } from "./routes/tickets.js";
+import { assetsRouter } from "./routes/assets.js";
+import { settingsRouter } from "./routes/settings.js";
 import { errorHandler } from "./middleware/error-handler.js";
 import { authMiddleware } from "./middleware/auth.js";
 import { broadcast, wss, sseClients } from "./services/websocket.js";
@@ -40,6 +45,11 @@ app.use("/api/gates", gatesRouter);
 app.use("/api/design", designRouter);
 app.use("/api/prompts", promptsRouter);
 app.use("/api/documents", documentsRouter);
+app.use("/api/dashboard", dashboardRouter);
+app.use("/api/chat", chatRouter);
+app.use("/api/tickets", ticketsRouter);
+app.use("/api/assets", assetsRouter);
+app.use("/api/settings", settingsRouter);
 
 // Health check
 app.get("/health", (_req, res) => {
