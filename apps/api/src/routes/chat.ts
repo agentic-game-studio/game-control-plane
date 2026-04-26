@@ -4,6 +4,7 @@ import type { AgentRole, ChatSession, ChatMessage, CreateMessageRequest, CreateC
 import type { LLMMessage } from "../llm/zai-client.js";
 import { broadcastEvent } from "../services/data-store.js";
 import { invokeAgent, continueConversation } from "../services/llm-service.js";
+import { makeProgressCallback } from "../services/llm-service.js";
 import { getAgentSystemPrompt } from "../prompts/agent-prompt-loader.js";
 import type { WSEvent } from "@game-studio/types";
 import { broadcast } from "../services/websocket.js";
@@ -360,8 +361,28 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
   } as WSEvent);
 
   try {
-    // Call the LLM
-    const result = await continueConversation(agentRole, session.conversationHistory, id);
+    // Set up progress callback for tool execution updates
+    const onProgress = makeProgressCallback(id, progressMsgId);
+
+    // Heartbeat: broadcast periodic progress updates during long API waits
+    let heartbeatCount = 0;
+    const heartbeat = setInterval(() => {
+      heartbeatCount++;
+      const elapsed = heartbeatCount * 5;
+      broadcast({
+        type: "chat:progress",
+        sessionId: id,
+        progressMsgId,
+        progress: Math.min(85, 5 + heartbeatCount * 2),
+        content: `${agentRole} is thinking... (${elapsed}s)`,
+      } as WSEvent);
+    }, 5000);
+
+    // Call the LLM with progress callback
+    const result = await continueConversation(agentRole, session.conversationHistory, id, onProgress);
+
+    // Stop heartbeat
+    clearInterval(heartbeat);
 
     // Remove the progress placeholder before adding the real response
     const progressIndex = session.messages.findIndex((m) => m.id === progressMsgId);
@@ -507,8 +528,31 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
 
   // If a task is provided, execute it immediately
   if (task) {
+    // Create a progress message for this invocation
+    const progressMsgId = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    newSession.messages.push({
+      id: progressMsgId,
+      type: "progress",
+      sender: agentRole,
+      content: `${agentRole} is working...`,
+      timestamp: new Date().toISOString(),
+      showActions: false,
+      progress: 5,
+    });
+    broadcast({
+      type: "chat:message",
+      sessionId,
+      message: newSession.messages[newSession.messages.length - 1],
+    } as WSEvent);
+
+    const onProgress = makeProgressCallback(sessionId, progressMsgId);
+
     try {
-      const result = await invokeAgent(agentRole, task, sessionId, undefined, []);
+      const result = await invokeAgent(agentRole, task, sessionId, undefined, [], onProgress);
+
+      // Remove progress placeholder
+      const idx = newSession.messages.findIndex((m) => m.id === progressMsgId);
+      if (idx !== -1) newSession.messages.splice(idx, 1);
 
       const responseMessage: ChatMessage = {
         id: `msg-${Date.now()}`,

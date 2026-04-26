@@ -10,6 +10,7 @@ interface AgentTreeProps {
   currentSession: string;
   totalProgress: number;
   onSelectSession: (role: string) => void;
+  onCloseSession?: (role: string) => void;
 }
 
 /* ─── Hierarchy Tree ─── */
@@ -24,13 +25,13 @@ function TreeNode({ node, activeRoles }: { node: AgentTreeNode; activeRoles: str
     return (
       <div className="mb-2">
         <div className="flex items-center gap-3 mb-4 relative z-10 group">
-          <div className={`w-10 h-10 border-2 border-black flex items-center justify-center relative shadow-[4px_4px_0_0_rgba(0,85,255,1)] group-hover:shadow-[2px_2px_0_0_rgba(0,0,0,1)] transition-all cursor-pointer ${
+          <div className={`w-10 h-10 border-2 border-black flex items-center justify-center relative shadow-[4px_4px_0_0_rgba(0,85,255,1)] group-hover:shadow-[2px_2px_0_0_rgba(0,0,0,1)] transition-all ${
             isActive ? "bg-[#0055FF] text-white" : "bg-black text-white"
           }`}>
             <span className="material-symbols-outlined">{icon}</span>
             {isActive && <div className="absolute -right-1 -top-1 w-2 h-2 bg-[#df2b31] border border-black animate-pulse" />}
           </div>
-          <div className={`border-2 px-3 py-1 cursor-pointer group-hover:bg-[#0055FF] group-hover:text-white transition-colors ${
+          <div className={`border-2 px-3 py-1 group-hover:bg-[#0055FF] group-hover:text-white transition-colors ${
             isActive ? "bg-[#0055FF] text-white border-black" : "bg-white border-black"
           }`}>
             <span className="font-[var(--font-label)] text-xs font-bold uppercase">{label}</span>
@@ -58,13 +59,13 @@ function TreeNode({ node, activeRoles }: { node: AgentTreeNode; activeRoles: str
       <div className="relative mb-4">
         <div className="absolute -left-8 top-5 w-8 h-[2px] bg-black" />
         <div className="flex items-center gap-3 group">
-          <div className={`w-8 h-8 border-2 border-black flex items-center justify-center text-sm cursor-pointer group-hover:bg-black group-hover:text-white transition-colors relative ${
+          <div className={`w-8 h-8 border-2 border-black flex items-center justify-center text-sm relative ${
             isActive ? "bg-[#0055FF] text-white shadow-[2px_2px_0_0_rgba(0,0,0,1)]" : "bg-white text-black"
           }`}>
             <span className="material-symbols-outlined text-sm">{icon}</span>
             {isActive && <div className="absolute -right-1 -top-1 w-2 h-2 bg-[#df2b31] border border-black animate-pulse" />}
           </div>
-          <div className={`border-2 px-2 py-1 cursor-pointer group-hover:bg-black group-hover:text-white transition-colors ${
+          <div className={`border-2 px-2 py-1 ${
             isActive ? "bg-[#0055FF] text-white border-black" : "bg-white border-black"
           }`}>
             <span className="font-[var(--font-label)] text-xs font-bold uppercase">{label}</span>
@@ -90,14 +91,14 @@ function TreeNode({ node, activeRoles }: { node: AgentTreeNode; activeRoles: str
   return (
     <div className="relative mb-2 z-10">
       <div className="absolute -left-8 top-3 w-8 h-[2px] bg-black" />
-      <div className={`flex items-center gap-2 group ${isActive ? "opacity-100" : "opacity-60 hover:opacity-100"} transition-opacity`}>
-        <div className={`w-6 h-6 border-2 border-black flex items-center justify-center cursor-pointer relative ${
+      <div className={`flex items-center gap-2 ${isActive ? "opacity-100" : "opacity-60"} transition-opacity`}>
+        <div className={`w-6 h-6 border-2 border-black flex items-center justify-center relative ${
           isActive ? "bg-[#0055FF] text-white" : "bg-[#e7e7f5] text-[#434656]"
         }`}>
           <span className="material-symbols-outlined" style={{ fontSize: 12 }}>{icon}</span>
           {isActive && <div className="absolute -right-0.5 -top-0.5 w-1.5 h-1.5 bg-[#df2b31] border border-black animate-pulse" />}
         </div>
-        <span className={`font-[var(--font-label)] text-xs ${isActive ? "text-black font-bold" : "text-[#434656] group-hover:text-black"}`}>{label}</span>
+        <span className={`font-[var(--font-label)] text-xs ${isActive ? "text-black font-bold" : "text-[#434656]"}`}>{label}</span>
       </div>
       {hasChildren && (
         <div className="relative ml-6 mt-1 z-10">
@@ -127,16 +128,61 @@ function filterActiveTree(nodes: AgentTreeNode[], activeRoles: string[]): AgentT
     .filter((n): n is AgentTreeNode => n !== null);
 }
 
+/* ─── Background Task Card ─── */
+
+function BackgroundTaskCard({ session, onSelect, onClose }: { session: AgentSession; onSelect?: (role: string) => void; onClose?: (role: string) => void }) {
+  const icon = getAgentIcon(session.role);
+  const label = session.role.replace(/-/g, "_").toUpperCase();
+  const isDone = session.status === "done";
+  const isActive = session.status === "active";
+
+  return (
+    <div
+      onClick={() => onSelect?.(session.role)}
+      className={`border-2 border-black p-3 relative cursor-pointer ${isDone ? "bg-[#e7e7f5] opacity-70" : "bg-white hover:bg-[#f3f2ff]"} transition-colors`}
+    >
+      <div className="flex items-center gap-2 mb-2">
+        <div className={`w-7 h-7 border-2 border-black flex items-center justify-center ${isActive ? "bg-[#0055FF] text-white" : "bg-white text-black"}`}>
+          <span className="material-symbols-outlined" style={{ fontSize: 14 }}>{icon}</span>
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="font-[var(--font-label)] text-[11px] font-bold uppercase truncate">{label}</div>
+          <div className="flex items-center gap-1.5">
+            <span className={`w-1.5 h-1.5 border border-black ${isDone ? "bg-[#737688]" : "bg-[#0055FF] animate-pulse"}`} />
+            <span className="font-[var(--font-terminal)] text-[9px] uppercase text-[#737688]">
+              {isDone ? "Complete" : isActive ? "Active" : "Idle"}
+            </span>
+          </div>
+        </div>
+        {onClose && (
+          <button
+            onClick={() => onClose(session.role)}
+            className="w-5 h-5 border border-black flex items-center justify-center text-[10px] hover:bg-[#df2b31] hover:text-white transition-colors"
+            title="Dismiss"
+          >
+            ×
+          </button>
+        )}
+      </div>
+      {isActive && session.progress > 0 && (
+        <div className="w-full h-2 border border-black bg-white">
+          <div className="h-full bg-[#0055FF] transition-all duration-500" style={{ width: `${session.progress}%` }} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ─── Main Sidebar ─── */
 
-export default function AgentTree({ sessions, currentSession, totalProgress, onSelectSession }: AgentTreeProps) {
+export default function AgentTree({ sessions, currentSession, totalProgress, onSelectSession, onCloseSession }: AgentTreeProps) {
   const [showHierarchy, setShowHierarchy] = useState(false);
   const activeRoles = [...sessions.values()]
     .filter((s) => s.role !== "game-director" && s.status === "active")
     .map((s) => s.role);
 
-  // Derive sessions list (exclude game-director, it's shown separately)
-  const agentSessions = [...sessions.values()].filter((s) => s.role !== "game-director");
+  // Background tasks (all non-GD sessions)
+  const backgroundTasks = [...sessions.values()].filter((s) => s.role !== "game-director");
 
   const treeData = showHierarchy ? AGENT_TREE : [];
 
@@ -184,53 +230,21 @@ export default function AgentTree({ sessions, currentSession, totalProgress, onS
           </button>
         </div>
 
-        {/* Agent Sessions */}
-        {agentSessions.length > 0 && (
+        {/* Background Tasks */}
+        {backgroundTasks.length > 0 && (
           <div className="px-4 pb-2">
             <span className="font-[var(--font-label)] text-[10px] uppercase text-[#434656] tracking-widest block mb-2">
-              Sessions ({agentSessions.length})
+              Background Tasks ({backgroundTasks.length})
             </span>
-            <div className="space-y-1">
-              {agentSessions.map((session) => {
-                const icon = getAgentIcon(session.role);
-                const label = session.role.replace(/-/g, "_").toUpperCase();
-                const isSelected = currentSession === session.role;
-                const isDone = session.status === "done";
-
-                return (
-                  <button
-                    key={session.role}
-                    onClick={() => onSelectSession(session.role)}
-                    className={`w-full flex items-center gap-2 p-2 border-2 border-black transition-colors ${
-                      isSelected
-                        ? "bg-[#0055FF] text-white shadow-[2px_2px_0_0_rgba(0,0,0,1)]"
-                        : isDone
-                        ? "bg-white opacity-50 hover:opacity-80"
-                        : "bg-white hover:bg-[#e7e7f5]"
-                    }`}
-                  >
-                    <div className={`w-7 h-7 border-2 border-black flex items-center justify-center shrink-0 ${
-                      isSelected ? "bg-black text-white" : "bg-white text-black"
-                    }`}>
-                      <span className="material-symbols-outlined" style={{ fontSize: 14 }}>{icon}</span>
-                    </div>
-                    <div className="text-left flex-1 min-w-0">
-                      <div className="font-[var(--font-label)] text-[11px] font-bold uppercase truncate">{label}</div>
-                      {session.status === "active" && session.progress > 0 && (
-                        <div className="w-full h-1.5 border border-black bg-white mt-1">
-                          <div className="h-full bg-[#0055FF] transition-all duration-500" style={{ width: `${session.progress}%` }} />
-                        </div>
-                      )}
-                      {isDone && (
-                        <span className="font-[var(--font-terminal)] text-[9px] text-[#737688] uppercase">Complete</span>
-                      )}
-                    </div>
-                    <div className={`w-2 h-2 border border-black shrink-0 ${
-                      isDone ? "bg-[#737688]" : "bg-[#0055FF] animate-pulse"
-                    }`} />
-                  </button>
-                );
-              })}
+            <div className="space-y-2">
+              {backgroundTasks.map((session) => (
+                <BackgroundTaskCard
+                  key={session.role}
+                  session={session}
+                  onSelect={onSelectSession}
+                  onClose={onCloseSession}
+                />
+              ))}
             </div>
           </div>
         )}

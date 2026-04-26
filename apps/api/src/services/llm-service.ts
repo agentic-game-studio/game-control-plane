@@ -11,7 +11,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { loadConfig } from "../config.js";
 import { getAgentSystemPrompt, loadAgentPrompts } from "../prompts/agent-prompt-loader.js";
-import { callLLMWithTools, GAME_STUDIO_TOOLS, type LLMMessage } from "../llm/zai-client.js";
+import { callLLMWithTools, GAME_STUDIO_TOOLS, type LLMMessage, type ProgressCallback } from "../llm/zai-client.js";
 import { broadcast } from "./websocket.js";
 import { getZaiModel } from "../config/model-mapping.js";
 import type { WSEvent, AgentRole } from "@game-studio/types";
@@ -32,6 +32,21 @@ export interface InvokeResult {
   content: string;
   toolCalls?: { name: string; input: Record<string, unknown> }[];
   usage?: { input_tokens: number; output_tokens: number };
+}
+
+/** Create a progress callback that broadcasts chat:progress events */
+export function makeProgressCallback(sessionId: string, progressMsgId: string): ProgressCallback {
+  return (info) => {
+    const toolLabel = info.currentTool ? ` — ${info.currentTool}` : "";
+    const phaseLabel = info.phase === "thinking" ? "Thinking" : info.phase === "executing" ? `Running tool${toolLabel}` : "Generating response";
+    broadcast({
+      type: "chat:progress",
+      sessionId,
+      progressMsgId,
+      progress: Math.min(90, info.totalTools * 5 + info.iteration * 3),
+      content: `${phaseLabel}... (step ${info.iteration})`,
+    } as WSEvent);
+  };
 }
 
 /**
@@ -359,7 +374,8 @@ export async function invokeAgent(
   task: string,
   sessionId: string,
   context?: string,
-  conversationHistory?: LLMMessage[]
+  conversationHistory?: LLMMessage[],
+  onProgress?: ProgressCallback
 ): Promise<InvokeResult> {
   const invocationId = `invoke-${Date.now()}`;
 
@@ -407,7 +423,8 @@ export async function invokeAgent(
         systemPrompt,
         model,
       },
-      (name, input) => executeTool(name, input, sessionId, agentRole)
+      (name, input) => executeTool(name, input, sessionId, agentRole),
+      onProgress
     );
 
     broadcast({
@@ -442,7 +459,8 @@ export async function invokeAgent(
 export async function continueConversation(
   agentRole: AgentRole,
   messages: LLMMessage[],
-  sessionId: string
+  sessionId: string,
+  onProgress?: ProgressCallback
 ): Promise<InvokeResult> {
   try {
     // Load agent's system prompt and model tier from MD file
@@ -464,7 +482,8 @@ export async function continueConversation(
         systemPrompt,
         model,
       },
-      (name, input) => executeTool(name, input, sessionId, agentRole)
+      (name, input) => executeTool(name, input, sessionId, agentRole),
+      onProgress
     );
 
     return {

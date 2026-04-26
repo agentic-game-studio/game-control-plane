@@ -74,30 +74,33 @@ export default function SkillsPage() {
     initSession();
   }, []);
 
+  const getSkillCategory = (skill: Skill): string => {
+    if (skill.name.startsWith("start") || skill.name.startsWith("help") || skill.name.startsWith("setup")) {
+      return "onboarding";
+    } else if (skill.name.startsWith("ux-")) {
+      return "ux-design";
+    } else if (skill.name.startsWith("create-architecture") || skill.name.startsWith("architecture")) {
+      return "architecture";
+    } else if (skill.name.startsWith("create-") && (skill.name.includes("epic") || skill.name.includes("story") || skill.name.includes("sprint"))) {
+      return "stories-sprints";
+    } else if (skill.name.includes("-review") || skill.name === "design-review" || skill.name === "code-review") {
+      return "reviews";
+    } else if (skill.name.startsWith("test") || skill.name.startsWith("qa-") || skill.name === "smoke-check") {
+      return "qa";
+    } else if (skill.name.startsWith("milestone") || skill.name === "retrospective" || skill.name.startsWith("bug")) {
+      return "production";
+    } else if (skill.name.startsWith("release") || skill.name.startsWith("launch") || skill.name.includes("-checklist")) {
+      return "release";
+    } else if (skill.name.startsWith("team-")) {
+      return "team";
+    }
+    return "design";
+  };
+
   const categorizeSkills = () => {
     const categorized: Record<string, Skill[]> = {};
     skills.forEach((skill) => {
-      // Determine category based on name prefixes
-      let cat = "design";
-      if (skill.name.startsWith("start") || skill.name.startsWith("help") || skill.name.startsWith("setup")) {
-        cat = "onboarding";
-      } else if (skill.name.startsWith("ux-")) {
-        cat = "ux-design";
-      } else if (skill.name.startsWith("create-architecture") || skill.name.startsWith("architecture")) {
-        cat = "architecture";
-      } else if (skill.name.startsWith("create-") && (skill.name.includes("epic") || skill.name.includes("story") || skill.name.includes("sprint"))) {
-        cat = "stories-sprints";
-      } else if (skill.name.includes("-review") || skill.name === "design-review" || skill.name === "code-review") {
-        cat = "reviews";
-      } else if (skill.name.startsWith("test") || skill.name.startsWith("qa-") || skill.name === "smoke-check") {
-        cat = "qa";
-      } else if (skill.name.startsWith("milestone") || skill.name === "retrospective" || skill.name.startsWith("bug")) {
-        cat = "production";
-      } else if (skill.name.startsWith("release") || skill.name.startsWith("launch") || skill.name.includes("-checklist")) {
-        cat = "release";
-      } else if (skill.name.startsWith("team-")) {
-        cat = "team";
-      }
+      const cat = getSkillCategory(skill);
       if (!categorized[cat]) categorized[cat] = [];
       categorized[cat].push(skill);
     });
@@ -108,10 +111,8 @@ export default function SkillsPage() {
     const matchesSearch =
       skill.name.toLowerCase().includes(search.toLowerCase()) ||
       skill.description.toLowerCase().includes(search.toLowerCase());
-    const matchesCategory =
-      category === "all" ||
-      (category === "team" && skill.name.startsWith("team-")) ||
-      (category === "solo" && !skill.name.startsWith("team-"));
+    const skillCategory = getSkillCategory(skill);
+    const matchesCategory = category === "all" || category === skillCategory;
     const isTeamSkill = skill.name.startsWith("team-");
     const matchesTab =
       activeTab === "all" ||

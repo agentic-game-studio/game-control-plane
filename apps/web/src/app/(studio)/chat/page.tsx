@@ -1,6 +1,7 @@
 "use client";
 
 import AgentTree from "./components/AgentTree";
+import ChatTabs from "./components/ChatTabs";
 import ChatThread from "./components/ChatThread";
 import CommandInput from "./components/CommandInput";
 import { useCommandRoom } from "@/hooks/useCommandRoom";
@@ -16,6 +17,7 @@ export default function ChatPage() {
     executeCommand,
     selectSession,
     approveAgent,
+    closeSession,
     initialized,
   } = useCommandRoom();
 
@@ -24,6 +26,8 @@ export default function ChatPage() {
       approveAgent(sender);
     } else if (action === "navigate") {
       selectSession(sender === "game-director" ? "game-director" : sender);
+    } else if (action === "close") {
+      closeSession(sender);
     }
   };
 
@@ -32,7 +36,6 @@ export default function ChatPage() {
   };
 
   const handleAnswer = (questionId: string, selected: string[], customInput?: string) => {
-    // Build answer content from selections and custom input
     const parts: string[] = [];
     if (selected.length > 0) {
       parts.push(`Selected: ${selected.join(", ")}`);
@@ -71,18 +74,68 @@ export default function ChatPage() {
         currentSession={currentSession}
         totalProgress={totalProgress}
         onSelectSession={selectSession}
+        onCloseSession={closeSession}
       />
-      <ChatThread
-        messages={currentMessages}
-        threadId={threadId}
-        threadTitle={threadTitle}
-        currentSession={currentSession}
-        onDecision={handleDecision}
-        onNavigate={handleNavigate}
-        onAnswer={handleAnswer}
-        onPlanAction={handlePlanAction}
-      />
-      <CommandInput onSend={executeCommand} />
+      <div className="flex-1 flex flex-col min-w-0 min-h-0">
+        <ChatTabs
+          sessions={sessions}
+          currentSession={currentSession}
+          onSelectSession={selectSession}
+          onCloseSession={closeSession}
+        />
+        <ChatThread
+          messages={currentMessages}
+          sessions={sessions}
+          threadId={threadId}
+          threadTitle={threadTitle}
+          currentSession={currentSession}
+          onDecision={handleDecision}
+          onNavigate={handleNavigate}
+          onAnswer={handleAnswer}
+          onPlanAction={handlePlanAction}
+        />
+      </div>
+      {currentSession === "game-director" ? (
+        <CommandInput onSend={executeCommand} />
+      ) : (
+        <AgentStatusBar session={sessions.get(currentSession)} onClose={() => closeSession(currentSession)} />
+      )}
+    </div>
+  );
+}
+
+function AgentStatusBar({ session, onClose }: { session?: { role: string; status: string; progress: number }; onClose: () => void }) {
+  const isDone = session?.status === "done";
+  const label = session?.role.replace(/-/g, "_").toUpperCase() ?? "AGENT";
+
+  return (
+    <div className="h-14 border-t-2 border-black bg-[#f3f2ff] flex items-center justify-between px-6 shrink-0 z-30">
+      <div className="flex items-center gap-3">
+        <span className={`w-2 h-2 border border-black ${isDone ? "bg-[#737688]" : "bg-[#0055FF] animate-pulse"}`} />
+        <span className="font-[var(--font-label)] text-xs font-bold uppercase">
+          {label} — {isDone ? "COMPLETE" : "WORKING"}
+        </span>
+        {!isDone && (
+          <span className="font-[var(--font-terminal)] text-[10px] text-[#737688]">
+            Will prompt when input is needed
+          </span>
+        )}
+      </div>
+      <div className="flex items-center gap-3">
+        {session?.progress !== undefined && session.progress > 0 && (
+          <div className="w-32 h-2 border border-black bg-white">
+            <div className="h-full bg-[#0055FF] transition-all duration-500" style={{ width: `${session.progress}%` }} />
+          </div>
+        )}
+        {isDone && (
+          <button
+            onClick={onClose}
+            className="border-2 border-black bg-[#df2b31] text-white px-3 py-1 font-[var(--font-label)] text-[10px] font-bold uppercase hover:bg-black retro-press"
+          >
+            CLOSE SESSION
+          </button>
+        )}
+      </div>
     </div>
   );
 }

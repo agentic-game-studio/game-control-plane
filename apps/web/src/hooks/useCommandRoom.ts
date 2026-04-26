@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "./useWebSocket";
 import type { WSEvent } from "@game-studio/types";
@@ -152,8 +152,8 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, addS
       addSessionMessage("game-director", {
         type: "agent",
         sender: "game-director",
-        content: `${role.replace(/-/g, " ")} reports task complete.`,
-        showActions: false,
+        content: `${role.replace(/-/g, " ")} reports task complete. Session awaiting closure.`,
+        showActions: true,
       });
       return next;
     }
@@ -212,6 +212,23 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, addS
       });
       return next;
     }
+    case "chat:progress": {
+      // Update existing progress message in place
+      const sessionId = event.sessionId;
+      const session = sessions.get(sessionId);
+      if (!session) return null;
+      const next = new Map(sessions);
+      next.set(sessionId, {
+        ...session,
+        messages: session.messages.map((m) =>
+          m.id === event.progressMsgId
+            ? { ...m, progress: event.progress, content: event.content }
+            : m
+        ),
+        progress: event.progress,
+      });
+      return next;
+    }
     case "skill:phase:complete": {
       addSessionMessage("game-director", {
         type: "system",
@@ -221,12 +238,22 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, addS
       return null;
     }
     case "log:entry": {
-      addSessionMessage("game-director", {
+      // Route to the agent session that generated the log, or game-director as fallback
+      const agentRole = event.agent;
+      const targetSession = (agentRole && sessions.has(agentRole)) ? agentRole : "game-director";
+      addSessionMessage(targetSession, {
         type: "system",
         sender: "SYSTEM",
         content: `[${event.level.toUpperCase()}] ${event.message}`,
       });
       return null;
+    }
+    case "chat:session:deleted": {
+      const sid = event.sessionId;
+      if (!sessions.has(sid)) return null;
+      const next = new Map(sessions);
+      next.delete(sid);
+      return next;
     }
     default:
       return null;
@@ -536,11 +563,9 @@ export function useCommandRoom() {
 
     const lower = trimmed.toLowerCase();
 
-    // Always switch to GD view for typed commands
-    setCurrentSession("game-director");
-
-    // Slash commands
+    // Slash commands — always route through game-director
     if (lower.startsWith("/")) {
+      setCurrentSession("game-director");
       const parts = lower.slice(1).split(" ");
       const cmd = parts[0];
       const args = parts.slice(1).join(" ");
@@ -628,8 +653,9 @@ Agents: 3 active`,
       }
     }
 
-    // spawn <agent>
+    // spawn <agent> — orchestration command
     if (lower.startsWith("spawn ")) {
+      setCurrentSession("game-director");
       const role = lower.slice(6).trim();
       if (!role) {
         addSessionMessage("game-director", { type: "system", sender: "SYSTEM", content: "Usage: spawn <agent-role>" });
@@ -640,8 +666,9 @@ Agents: 3 active`,
       return;
     }
 
-    // approve — from text command, approves last spawned
+    // approve — orchestration command
     if (lower === "approve") {
+      setCurrentSession("game-director");
       const role = lastSpawnedRef.current;
       if (!role) {
         addSessionMessage("game-director", { type: "system", sender: "SYSTEM", content: "No agent to approve." });
@@ -652,8 +679,9 @@ Agents: 3 active`,
       return;
     }
 
-    // done <agent>
+    // done <agent> — orchestration command
     if (lower.startsWith("done ")) {
+      setCurrentSession("game-director");
       const role = lower.slice(5).trim();
       addSessionMessage("game-director", { type: "user", sender: "DIRECTOR", content: trimmed });
 
@@ -683,21 +711,21 @@ Agents: 3 active`,
       return;
     }
 
-    // Default: plain message to Game Director via real API
-    addSessionMessage("game-director", { type: "user", sender: "DIRECTOR", content: trimmed, images });
+    // Default: normal message routed to current session
+    addSessionMessage(currentSession, { type: "user", sender: "DIRECTOR", content: trimmed, images });
 
-    // Show immediate local typing indicator
+    // Show immediate local typing indicator in current session
     const typingId = uid();
     setSessions((prev) => {
-      const session = prev.get("game-director");
+      const session = prev.get(currentSession);
       if (!session) return prev;
       const next = new Map(prev);
-      next.set("game-director", {
+      next.set(currentSession, {
         ...session,
         messages: [...session.messages, {
           id: typingId,
           type: "progress" as const,
-          sender: "game-director",
+          sender: session.role,
           content: "Reviewing your request...",
           timestamp: timestamp(),
           progress: 10,
@@ -710,10 +738,10 @@ Agents: 3 active`,
     // Helper to remove typing indicator
     const removeTyping = () => {
       setSessions((prev) => {
-        const session = prev.get("game-director");
+        const session = prev.get(currentSession);
         if (!session) return prev;
         const next = new Map(prev);
-        next.set("game-director", {
+        next.set(currentSession, {
           ...session,
           messages: session.messages.filter((m) => m.id !== typingId),
         });
@@ -721,9 +749,9 @@ Agents: 3 active`,
       });
     };
 
-    // Call real API
+    // Call real API for current session
     apiFetch<{ userMessage: ChatMessage; assistantMessage?: ChatMessage; errorMessage?: ChatMessage }>(
-      "/api/chat/sessions/game-director/messages",
+      `/api/chat/sessions/${currentSession}/messages`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -738,7 +766,7 @@ Agents: 3 active`,
       .then((result) => {
         removeTyping();
         if (result.assistantMessage) {
-          addSessionMessage("game-director", {
+          addSessionMessage(currentSession, {
             type: result.assistantMessage.type as ChatMessage["type"],
             sender: result.assistantMessage.sender,
             content: result.assistantMessage.content,
@@ -749,7 +777,7 @@ Agents: 3 active`,
             planPhases: result.assistantMessage.planPhases as ChatMessage["planPhases"],
           });
         } else if (result.errorMessage) {
-          addSessionMessage("game-director", {
+          addSessionMessage(currentSession, {
             type: "system",
             sender: "SYSTEM",
             content: result.errorMessage.content,
@@ -759,7 +787,7 @@ Agents: 3 active`,
       .catch((error) => {
         removeTyping();
         console.error("Failed to send message:", error);
-        addSessionMessage("game-director", {
+        addSessionMessage(currentSession, {
           type: "system",
           sender: "SYSTEM",
           content: `Error: ${error instanceof Error ? error.message : "Failed to get response"}`,
@@ -767,12 +795,28 @@ Agents: 3 active`,
       });
   }, [addSessionMessage, spawnAgent, approveAgent, currentSession]);
 
-  // Derived state
-  const currentMessages = sessions.get(currentSession)?.messages ?? [];
-  const activeAgentList = [...sessions.values()].filter((s) => s.role !== "game-director" && s.status === "active");
-  const totalProgress = activeAgentList.length > 0
-    ? Math.round(activeAgentList.reduce((sum, s) => sum + s.progress, 0) / activeAgentList.length)
-    : 0;
+  const closeSession = useCallback((role: string) => {
+    // Delete from backend so it doesn't reappear on refresh
+    apiFetch(`/api/chat/sessions/${role}`, { method: "DELETE" }).catch((err) =>
+      console.error("Failed to delete session:", err)
+    );
+    setSessions((prev) => {
+      const next = new Map(prev);
+      next.delete(role);
+      return next;
+    });
+    // Switch back to game-director if we closed the current session
+    setCurrentSession((current) => (current === role ? "game-director" : current));
+  }, []);
+
+  // Derived state — memoized to avoid unnecessary re-renders
+  const currentMessages = useMemo(() => sessions.get(currentSession)?.messages ?? [], [sessions, currentSession]);
+  const totalProgress = useMemo(() => {
+    const active = [...sessions.values()].filter((s) => s.role !== "game-director" && s.status === "active");
+    return active.length > 0
+      ? Math.round(active.reduce((sum, s) => sum + s.progress, 0) / active.length)
+      : 0;
+  }, [sessions]);
 
   return {
     sessions,
@@ -784,6 +828,7 @@ Agents: 3 active`,
     executeCommand,
     selectSession: setCurrentSession,
     approveAgent,
+    closeSession,
     initialized,
   };
 }

@@ -1,15 +1,16 @@
 ---
 id: ADR-001
 title: Entity Component System Architecture
-status: proposed
+status: superseded
 created: 2026-04-23
+superseded_by: adr-001-tech-stack
 ---
 
 # ADR-001: Entity Component System
 
 ## Status
 
-Proposed — awaiting technical director review.
+**Superseded** — This ADR has been absorbed into [ADR-001: Tech Stack & Architecture](./adr-001-tech-stack.md) which provides the complete engine, architecture, and prototype scope decisions.
 
 ## Context
 

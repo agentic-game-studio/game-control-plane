@@ -18,7 +18,7 @@ export type WSEvent =
   | { type: "skill:phase:complete"; skillId: string; phase: number; output: string; sessionId: string }
   | { type: "checkpoint:saved"; checkpointId: string; sessionId: string }
   | { type: "session:status"; sessionId: string; status: string }
-  | { type: "log:entry"; sessionId: string; level: string; message: string; timestamp: string }
+  | { type: "log:entry"; sessionId: string; level: string; message: string; timestamp: string; agent?: string }
   | { type: "document:created"; documentId: string; category: DocumentCategory; title: string }
   | { type: "document:updated"; documentId: string; category: DocumentCategory; title: string }
   | { type: "project:created"; project: Project }
@@ -35,6 +35,7 @@ export type WSEvent =
   | { type: "team:started"; teamId: string; sessionId: string }
   | { type: "team:completed"; teamId: string; sessionId: string; output: string }
   | { type: "chat:message"; sessionId: string; message: ChatMessage }
+  | { type: "chat:progress"; sessionId: string; progressMsgId: string; progress: number; content: string }
   | { type: "chat:session:created"; session: ChatSession }
   | { type: "chat:session:deleted"; sessionId: string }
   | { type: "error"; error: string; sessionId?: string };
