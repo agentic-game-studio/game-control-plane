@@ -7,6 +7,7 @@ import { renderMarkdown } from "@/lib/markdown";
 import DiffView from "./DiffView";
 import QuestionMessage from "./QuestionMessage";
 import PlanMessage from "./PlanMessage";
+import WorkflowMessage from "./WorkflowMessage";
 
 interface ChatThreadProps {
   messages: ChatMessage[];
@@ -14,10 +15,24 @@ interface ChatThreadProps {
   threadId: string;
   threadTitle: string;
   currentSession: string;
+  connected?: boolean;
   onDecision: (action: string, sender: string) => void;
   onNavigate?: (targetSession: string) => void;
   onAnswer?: (questionId: string, selected: string[], customInput?: string) => void;
   onPlanAction?: (phaseId: string, action: "execute" | "execute-all") => void;
+}
+
+function formatTime(ts: string): string {
+  try {
+    const d = new Date(ts);
+    const mo = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    const hr = String(d.getHours()).padStart(2, "0");
+    const mn = String(d.getMinutes()).padStart(2, "0");
+    return `${mo}/${day} ${hr}:${mn}`;
+  } catch {
+    return ts;
+  }
 }
 
 const TOOL_ICONS: Record<string, string> = {
@@ -76,12 +91,12 @@ const WelcomeMessage = memo(function WelcomeMessage({ msg }: { msg: ChatMessage 
         <div className="bg-black p-3 flex items-center gap-3">
           <span className="material-symbols-outlined text-white">stadia_controller</span>
           <span className="font-[var(--font-terminal)] text-sm font-bold uppercase text-white tracking-wider">
-            GAME DIRECTOR ONLINE
+            PRODUCER ONLINE
           </span>
         </div>
         <div className="p-5">
           <p className="font-[var(--font-terminal)] text-base mb-4">
-            Welcome, Director. Game Director is online and ready to orchestrate your team.
+            Welcome, Director. Producer is online and ready to orchestrate your team.
           </p>
           <div className="border-2 border-black bg-[#f3f2ff] p-4">
             <span className="font-[var(--font-label)] text-[10px] uppercase text-[#434656] tracking-widest block mb-3">Quick Reference</span>
@@ -101,7 +116,7 @@ const WelcomeMessage = memo(function WelcomeMessage({ msg }: { msg: ChatMessage 
             </div>
           </div>
           <span className="font-[var(--font-terminal)] text-[10px] text-[#737688] block mt-3 text-right">
-            {msg.timestamp} UTC
+            {formatTime(msg.timestamp)} UTC
           </span>
         </div>
       </div>
@@ -155,7 +170,7 @@ const AgentMessage = memo(function AgentMessage({
       <div className="flex-1">
         <div className="flex items-baseline gap-3 mb-1 ml-2">
           <span className="font-[var(--font-label)] text-xs font-bold uppercase">{label}</span>
-          <span className="font-[var(--font-terminal)] text-[10px] text-[#737688]">{msg.timestamp}</span>
+          <span className="font-[var(--font-terminal)] text-[10px] text-[#737688]">{formatTime(msg.timestamp)}</span>
         </div>
         <div className="relative group">
           <div className="absolute left-[-10px] top-4 w-0 h-0 border-y-[6px] border-y-transparent border-r-[10px] border-r-black z-0" />
@@ -175,13 +190,15 @@ const AgentMessage = memo(function AgentMessage({
 
             {/* Rich progress message */}
             {isProgress && msg.progress !== undefined && (
-              <div className="mt-4 border-2 border-black bg-[#f3f2ff]">
-                <div className="p-1 flex items-center gap-2">
-                  <span className="material-symbols-outlined animate-spin text-sm">sync</span>
-                  <div className="flex-1 h-3 border border-black bg-white">
-                    <div className="h-full bg-[#0055FF] transition-all duration-500" style={{ width: `${msg.progress}%` }} />
+              <div className="mt-4 border-2 border-black bg-[#f3f2ff] shadow-[2px_2px_0_0_rgba(0,0,0,1)]">
+                <div className="p-2 flex items-center gap-3">
+                  <span className="material-symbols-outlined animate-spin text-sm text-[#0055FF]">sync</span>
+                  <div className="flex-1 h-4 border-2 border-black bg-white relative overflow-hidden">
+                    <div className="h-full bg-[#0055FF] transition-[width] duration-700 ease-out relative" style={{ width: `${msg.progress}%` }}>
+                      <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent animate-shimmer" />
+                    </div>
                   </div>
-                  <span className="font-[var(--font-terminal)] text-xs">{msg.progress}%</span>
+                  <span className="font-[var(--font-terminal)] text-xs font-bold tabular-nums min-w-[3ch] text-right">{msg.progress}%</span>
                 </div>
 
                 {msg.thinking && (
@@ -220,6 +237,30 @@ const AgentMessage = memo(function AgentMessage({
               <div className="mt-3 border border-[#e1e1ef] bg-[#faf8ff] p-2">
                 <span className="font-[var(--font-label)] text-[10px] uppercase text-[#737688] tracking-widest block mb-1">Thinking</span>
                 <span className="font-[var(--font-terminal)] text-xs text-[#737688]">{msg.thinking}</span>
+              </div>
+            )}
+
+            {/* Activity log for completed messages */}
+            {!isProgress && toolCalls && toolCalls.length > 0 && (
+              <div className="mt-4 border-2 border-black bg-white shadow-[2px_2px_0_0_rgba(0,0,0,1)]">
+                <div className="px-3 py-1 bg-black">
+                  <span className="font-[var(--font-label)] text-[10px] uppercase text-white tracking-widest">Activity</span>
+                </div>
+                <div className="divide-y divide-[#e1e1ef]">
+                  {toolCalls.map((tc, i) => (
+                    <div key={i} className="flex items-center gap-2 px-3 py-1.5">
+                      <span className="material-symbols-outlined text-sm" style={{ color: TOOL_COLORS[tc.name] ?? '#737688' }}>
+                        {TOOL_ICONS[tc.name] ?? 'build'}
+                      </span>
+                      <span className="font-[var(--font-terminal)] text-xs flex-1 truncate">
+                        {tc.name} {Object.values(tc.args)[0] ? `· ${String(Object.values(tc.args)[0]).slice(0, 40)}` : ''}
+                      </span>
+                      <span className="font-[var(--font-terminal)] text-[10px] uppercase px-1.5 py-0.5 border border-black bg-[#e7e7f5] text-[#191b25]">
+                        {tc.status}
+                      </span>
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
 
@@ -282,7 +323,7 @@ const UserMessage = memo(function UserMessage({ msg }: { msg: ChatMessage }) {
       <div className="flex-1 flex flex-col items-end">
         <div className="flex items-baseline gap-3 mb-1 mr-2 flex-row-reverse">
           <span className="font-[var(--font-label)] text-xs font-bold uppercase text-[#0055FF]">DIRECTOR (YOU)</span>
-          <span className="font-[var(--font-terminal)] text-[10px] text-[#737688]">{msg.timestamp}</span>
+          <span className="font-[var(--font-terminal)] text-[10px] text-[#737688]">{formatTime(msg.timestamp)}</span>
         </div>
         <div className="relative group">
           <div className="absolute right-[-10px] top-4 w-0 h-0 border-y-[6px] border-y-transparent border-l-[10px] border-l-black z-0" />
@@ -314,7 +355,7 @@ const DiffMessage = memo(function DiffMessage({ msg, onNavigate }: { msg: ChatMe
       <div className="flex-1">
         <div className="flex items-baseline gap-3 mb-1 ml-2">
           <span className="font-[var(--font-label)] text-xs font-bold uppercase">{label}</span>
-          <span className="font-[var(--font-terminal)] text-[10px] text-[#737688]">{msg.timestamp}</span>
+          <span className="font-[var(--font-terminal)] text-[10px] text-[#737688]">{formatTime(msg.timestamp)}</span>
         </div>
         <DiffView
           oldContent={msg.diff.oldContent}
@@ -343,7 +384,7 @@ const NavigateMessage = memo(function NavigateMessage({ msg, onNavigate }: { msg
   );
 });
 
-export default function ChatThread({ messages, sessions, threadId, threadTitle, currentSession, onDecision, onNavigate, onAnswer, onPlanAction }: ChatThreadProps) {
+export default function ChatThread({ messages, sessions, threadId, threadTitle, currentSession, connected, onDecision, onNavigate, onAnswer, onPlanAction }: ChatThreadProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const prevMsgCountRef = useRef(0);
 
@@ -367,7 +408,7 @@ export default function ChatThread({ messages, sessions, threadId, threadTitle, 
     return map;
   }, [sessions]);
 
-  const sessionLabel = currentSession === "game-director"
+  const sessionLabel = currentSession === "producer"
     ? "BOARD_ROOM"
     : currentSession.replace(/-/g, "_").toUpperCase();
 
@@ -376,17 +417,27 @@ export default function ChatThread({ messages, sessions, threadId, threadTitle, 
       {/* Header */}
       <div className="h-14 border-b-2 border-black bg-white flex items-center justify-between px-6 shrink-0 z-20">
         <div className="flex items-center gap-4">
-          <span className="material-symbols-outlined">{currentSession === "game-director" ? "forum" : "smart_toy"}</span>
+          <span className="material-symbols-outlined">{currentSession === "producer" ? "forum" : "smart_toy"}</span>
           <h2 className="font-[var(--font-terminal)] text-base font-bold uppercase tracking-widest">
             {sessionLabel}
           </h2>
-          {currentSession !== "game-director" && (
+          {currentSession !== "producer" && (
             <span className="font-[var(--font-label)] text-[10px] uppercase bg-[#e7e7f5] px-2 py-1 border border-black">
               Agent Session
             </span>
           )}
         </div>
         <div className="flex items-center gap-2">
+          {connected === false && (
+            <span className="font-[var(--font-label)] text-[10px] font-bold uppercase bg-[#df2b31] text-white px-2 py-1 border border-black animate-pulse">
+              OFFLINE
+            </span>
+          )}
+          {connected === true && (
+            <span className="font-[var(--font-label)] text-[10px] font-bold uppercase bg-[#2ECC71] text-white px-2 py-1 border border-black">
+              LIVE
+            </span>
+          )}
           <span className="font-[var(--font-label)] text-xs bg-[#e7e7f5] px-2 py-1 border-2 border-black">
             ID: {threadId}
           </span>
@@ -411,10 +462,27 @@ export default function ChatThread({ messages, sessions, threadId, threadTitle, 
               return <DiffMessage key={msg.id} msg={msg} onNavigate={onNavigate} />;
             case "navigate":
               return <NavigateMessage key={msg.id} msg={msg} onNavigate={onNavigate} />;
-            case "question":
-              return onAnswer ? <QuestionMessage key={`${msg.id}-${msg.question?.questionId}`} msg={msg} onAnswer={onAnswer} sender={msg.sender} /> : null;
+            case "question": {
+              if (!onAnswer) return null;
+              const msgIndex = messages.indexOf(msg);
+              const answerMsg = messages.slice(msgIndex + 1).find(
+                (m) => m.type === "user" && (m.content.startsWith("Selected:") || m.content.startsWith("Additional input:"))
+              );
+              return (
+                <QuestionMessage
+                  key={`${msg.id}-${msg.question?.questionId}`}
+                  msg={msg}
+                  onAnswer={onAnswer}
+                  sender={msg.sender}
+                  isAnswered={!!answerMsg}
+                  answerContent={answerMsg?.content}
+                />
+              );
+            }
             case "plan":
               return onPlanAction ? <PlanMessage key={`${msg.id}-plan`} msg={msg} onPlanAction={onPlanAction} sender={msg.sender} /> : null;
+            case "workflow":
+              return <WorkflowMessage key={msg.id} msg={msg} />;
             default:
               return null;
           }

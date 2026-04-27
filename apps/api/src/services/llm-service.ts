@@ -15,6 +15,7 @@ import { callLLMWithTools, GAME_STUDIO_TOOLS, type LLMMessage, type ProgressCall
 import { broadcast } from "./websocket.js";
 import { getZaiModel } from "../config/model-mapping.js";
 import type { WSEvent, AgentRole } from "@game-studio/types";
+import { getWorkflow, createQuestTicket, moveQuestTicket } from "./quest-bridge.js";
 
 /** Helper to broadcast log entries with timestamp */
 function logEntry(sessionId: string, level: string, message: string, agent?: AgentRole) {
@@ -37,15 +38,11 @@ export interface InvokeResult {
 /** Create a progress callback that broadcasts chat:progress events */
 export function makeProgressCallback(sessionId: string, progressMsgId: string): ProgressCallback {
   return (info) => {
-    const toolLabel = info.currentTool ? ` — ${info.currentTool}` : "";
-    const phaseLabel = info.phase === "thinking" ? "Thinking" : info.phase === "executing" ? `Running tool${toolLabel}` : "Generating response";
-    broadcast({
-      type: "chat:progress",
-      sessionId,
-      progressMsgId,
-      progress: Math.min(90, info.totalTools * 5 + info.iteration * 3),
-      content: `${phaseLabel}... (step ${info.iteration})`,
-    } as WSEvent);
+    // Progress updates are now handled by the heartbeat in chat.ts
+    // This callback is kept for future use (e.g., updating thinking text)
+    void info;
+    void sessionId;
+    void progressMsgId;
   };
 }
 
@@ -151,8 +148,24 @@ async function executeTool(
 
         logEntry(sessionId, "info", `[${agentRole}] Spawning subagent: ${agent}`, agentRole);
 
-        // Recursively invoke subagent
-        const subResult = await invokeAgent(agent, task, sessionId, context);
+        // Quest Bridge: always create a ticket for subagent tasks
+        const ticket = createQuestTicket(
+          sessionId,
+          task.slice(0, 80),
+          agent,
+          task,
+          "WORKFLOW",
+          agentRole,
+        );
+        const ticketId = ticket.id;
+        moveQuestTicket(ticketId, "in_progress", agent);
+
+        // Recursively invoke subagent (don't broadcast events — subagent runs inline within parent session)
+        const subResult = await invokeAgent(agent, task, sessionId, context, undefined, undefined, false);
+
+        // Quest Bridge: move ticket to QA
+        moveQuestTicket(ticketId, "qa", agent);
+
         return `Subagent ${agent} output:\n${subResult.content}`;
       }
 
@@ -375,16 +388,19 @@ export async function invokeAgent(
   sessionId: string,
   context?: string,
   conversationHistory?: LLMMessage[],
-  onProgress?: ProgressCallback
+  onProgress?: ProgressCallback,
+  broadcastEvents = true,
 ): Promise<InvokeResult> {
   const invocationId = `invoke-${Date.now()}`;
 
-  broadcast({
-    type: "agent:spawned",
-    agentId: invocationId,
-    agent: agentRole,
-    sessionId,
-  } as WSEvent);
+  if (broadcastEvents) {
+    broadcast({
+      type: "agent:spawned",
+      agentId: invocationId,
+      agent: agentRole,
+      sessionId,
+    } as WSEvent);
+  }
 
   try {
     // Load agent's system prompt and model tier from MD file
@@ -427,12 +443,14 @@ export async function invokeAgent(
       onProgress
     );
 
-    broadcast({
-      type: "agent:completed",
-      agentId: invocationId,
-      output: response.content,
-      sessionId,
-    } as WSEvent);
+    if (broadcastEvents) {
+      broadcast({
+        type: "agent:completed",
+        agentId: invocationId,
+        output: response.content,
+        sessionId,
+      } as WSEvent);
+    }
 
     return {
       content: response.content,
@@ -441,12 +459,14 @@ export async function invokeAgent(
     };
   } catch (err: unknown) {
     const error = err as Error;
-    broadcast({
-      type: "agent:failed",
-      agentId: invocationId,
-      error: error.message,
-      sessionId,
-    } as WSEvent);
+    if (broadcastEvents) {
+      broadcast({
+        type: "agent:failed",
+        agentId: invocationId,
+        error: error.message,
+        sessionId,
+      } as WSEvent);
+    }
     return {
       content: `Error invoking agent: ${error.message}`,
     };

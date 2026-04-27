@@ -12,20 +12,20 @@ test.describe("Chat Flow", () => {
     await page.waitForSelector("textarea", { timeout: 15_000 });
   });
 
-  test("chat page loads with Game Director session", async ({ page }) => {
+  test("chat page loads with Producer session", async ({ page }) => {
     // Should show BOARD_ROOM heading (use role to avoid strict mode violation with tab + header)
     await expect(page.getByRole("heading", { name: "BOARD_ROOM" })).toBeVisible({ timeout: 10_000 });
     // Should show welcome message
-    await expect(page.getByText(/Game Director/i).first()).toBeVisible();
+    await expect(page.getByText(/Producer/i).first()).toBeVisible();
   });
 
-  test("can type and send a message to Game Director", async ({ page }) => {
+  test("can type and send a message to Producer", async ({ page }) => {
     const input = page.locator("textarea").first();
-    await input.fill("Hello Game Director");
+    await input.fill("Hello Producer");
     await input.press("Enter");
 
     // Message should appear in the thread as user message
-    await expect(page.getByText("Hello Game Director").first()).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText("Hello Producer").first()).toBeVisible({ timeout: 10_000 });
   });
 
   test("spawn command creates agent session", async ({ page }) => {

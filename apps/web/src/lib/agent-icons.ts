@@ -1,12 +1,11 @@
 /** Material Symbol icon for each agent role */
 export const AGENT_ICONS: Record<string, string> = {
   // Orchestrator
-  "game-director": "stadia_controller",
+  "producer": "stadia_controller",
 
   // Tier 1 — Leadership
   "creative-director": "psychology",
   "technical-director": "engineering",
-  "producer": "movie_creation",
 
   // Tier 2 — Department Leads
   "game-designer": "sports_esports",

@@ -4,6 +4,7 @@ import { useState, useRef, useEffect, type KeyboardEvent } from "react";
 
 interface CommandInputProps {
   onSend: (input: string, images?: string[]) => void;
+  isLoading?: boolean;
 }
 
 const COMMANDS = [
@@ -16,7 +17,7 @@ const COMMANDS = [
   { cmd: "/diff", desc: "Show recent changes" },
 ];
 
-export default function CommandInput({ onSend }: CommandInputProps) {
+export default function CommandInput({ onSend, isLoading }: CommandInputProps) {
   const [value, setValue] = useState("");
   const [showHints, setShowHints] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -36,6 +37,7 @@ export default function CommandInput({ onSend }: CommandInputProps) {
   const handleSend = (text?: string) => {
     const input = text ?? value;
     if (!input.trim() && pendingImages.length === 0) return;
+    if (isLoading) return;
     onSend(input, pendingImages.length > 0 ? pendingImages : undefined);
     setValue("");
     setShowHints(false);
@@ -130,7 +132,7 @@ export default function CommandInput({ onSend }: CommandInputProps) {
                   className="absolute -top-2 -right-2 w-5 h-5 bg-[#df2b31] text-white border border-black flex items-center justify-center text-xs hover:bg-black"
                   title="Remove image"
                 >
-                  ×
+                  &times;
                 </button>
               </div>
             ))}
@@ -145,11 +147,18 @@ export default function CommandInput({ onSend }: CommandInputProps) {
               onChange={handleChange}
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
-              className="w-full h-12 border-2 border-black bg-white p-3 pr-10 font-[var(--font-terminal)] text-base focus:outline-none focus:ring-2 focus:ring-[#0055FF] resize-none"
-              placeholder="Enter command or reply..."
+              disabled={isLoading}
+              className={`w-full h-12 border-2 border-black bg-white p-3 pr-10 font-[var(--font-terminal)] text-base focus:outline-none focus:ring-2 focus:ring-[#0055FF] resize-none ${
+                isLoading ? "opacity-50 cursor-not-allowed bg-[#f3f2ff]" : ""
+              }`}
+              placeholder={isLoading ? "Processing..." : "Enter command or reply..."}
             />
             <div className="absolute right-3 top-3 text-[#737688]">
-              <span className="animate-pulse block w-2 h-4 bg-black" />
+              {isLoading ? (
+                <span className="animate-spin block w-4 h-4 border-2 border-black border-t-transparent rounded-full" />
+              ) : (
+                <span className="animate-pulse block w-2 h-4 bg-black" />
+              )}
             </div>
 
             {/* Slash command hints */}
@@ -180,10 +189,17 @@ export default function CommandInput({ onSend }: CommandInputProps) {
           </div>
           <button
             onClick={() => handleSend()}
-            className="h-12 px-6 border-2 border-black bg-black text-white font-[var(--font-label)] text-xs font-bold uppercase hover:bg-[#0055FF] retro-press shadow-[2px_2px_0_0_rgba(0,85,255,1)] transition-colors flex items-center gap-2"
+            disabled={isLoading}
+            className={`h-12 px-6 border-2 border-black font-[var(--font-label)] text-xs font-bold uppercase retro-press flex items-center gap-2 transition-colors ${
+              isLoading
+                ? "bg-[#e7e7f5] text-[#737688] cursor-not-allowed shadow-none"
+                : "bg-black text-white hover:bg-[#0055FF] shadow-[2px_2px_0_0_rgba(0,85,255,1)]"
+            }`}
           >
-            <span className="material-symbols-outlined text-sm">send</span>
-            EXECUTE
+            <span className="material-symbols-outlined text-sm">
+              {isLoading ? "sync" : "send"}
+            </span>
+            {isLoading ? "WORKING..." : "EXECUTE"}
           </button>
         </div>
       </div>

@@ -25,9 +25,19 @@ const config = loadConfig();
 const app = express();
 const server = createServer(app);
 
-// WebSocket server
-const ws = new WebSocketServer({ server, path: "/ws" });
-ws.on("connection", (socket) => {
+// WebSocket server — attach wss from websocket.ts to the HTTP server
+server.on("upgrade", (request, socket, head) => {
+  const { pathname } = new URL(request.url ?? "/", "http://localhost");
+  if (pathname === "/ws") {
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      wss.emit("connection", ws, request);
+    });
+  } else {
+    socket.destroy();
+  }
+});
+
+wss.on("connection", (socket) => {
   socket.on("error", (err) => console.error("WS error:", err));
 });
 

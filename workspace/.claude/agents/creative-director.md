@@ -163,6 +163,11 @@ Follow the **Explain → Capture** pattern:
    pillar alignment, downstream consequences, risk assessment, recommendation.
 2. **Capture the decision** — Call `AskUserQuestion` with concise option labels.
 
+Parameters:
+- `allowMultiple`: Set to `true` when multiple valid options exist
+- `allowCustomInput`: Set to `true` when you need open-ended user input (names,
+  descriptions, creative direction, or anything not covered by predefined options)
+
 **Guidelines:**
 - Use at every decision point (strategic options in step 3, clarifying questions in step 1)
 - Batch up to 4 independent questions in one call

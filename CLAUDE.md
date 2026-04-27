@@ -43,9 +43,9 @@ game-control-plane/
 
 ## Architecture
 
-### Agent Hierarchy (49 agents)
+### Agent Hierarchy (48 agents)
 
-- **Tier 1 (Opus → glm-5.1)**: game-director (standalone, owns orchestration), creative-director, technical-director, producer
+- **Tier 1 (Opus → glm-5.1)**: producer (standalone, owns orchestration), creative-director, technical-director
 - **Tier 2 (Sonnet → glm-4.7)**: game-designer, lead-programmer, art-director, audio-director, narrative-director, qa-lead, release-manager, localization-lead
 - **Tier 3 (Sonnet/Haiku → glm-4.7/glm-4.7-flash)**: 37 specialists — systems-designer, gameplay-programmer, godot-specialist, unreal-specialist, unity-specialist, etc.
 
@@ -132,7 +132,7 @@ Next.js 15 App Router, Tailwind CSS v4, no UI framework. All pages are client co
 | `/` | Dashboard — session stats, agent hierarchy, team skills, live event feed |
 | `/sessions` | Session table with create/delete |
 | `/sessions/[id]` | Session detail — logs, checkpoints, config tabs + quick actions |
-| `/chat` | Board room command page — Game Director orchestrator, slash commands, step-based approve workflow, diff viewer, tool calls activity log |
+| `/chat` | Board room command page — Producer orchestrator, slash commands, step-based approve workflow, diff viewer, tool calls activity log |
 | `/agents` | Searchable agent registry with tier filter + spawn dialog |
 | `/skills` | Filterable skill list (all/team/solo) with phase stepper + invoke |
 | `/teams` | Workflow timeline with member roster + run dialog |
@@ -170,7 +170,7 @@ Next.js 15 App Router, Tailwind CSS v4, no UI framework. All pages are client co
 - **Slash commands**: `/spawn`, `/approve`, `/done`, `/clear`, `/help`, `/cost`, `/diff`
 - **6-step approve workflow**: Progress bars with tool calls (Read, Grep, Edit, Write)
 - **Thinking panel**: Shows agent reasoning during progress
-- **Navigate messages**: "Back to Game Director" button after task completion
+- **Navigate messages**: "Back to Producer" button after task completion
 - **Message types**: `system`, `agent`, `user`, `progress`, `welcome`, `diff`, `navigate`, `question`, `plan`
 - **Markdown rendering**: Messages render markdown with code blocks, lists, links
 - **Image paste**: Base64 inline images via clipboard paste (50mb body limit)

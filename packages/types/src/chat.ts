@@ -1,4 +1,4 @@
-export type MessageType = "system" | "agent" | "user" | "progress" | "welcome" | "diff" | "navigate" | "question" | "plan";
+export type MessageType = "system" | "agent" | "user" | "progress" | "welcome" | "diff" | "navigate" | "question" | "plan" | "workflow";
 export type ChatSessionStatus = "active" | "done" | "completed";
 
 export interface QuestionOption {
@@ -58,6 +58,20 @@ export interface NavigateAction {
   label: string;
 }
 
+export interface WorkflowStep {
+  stage: import("./tickets.js").WorkflowStage;
+  label: string;
+  ticketId?: string;
+  agentRole?: string;
+  status: "pending" | "active" | "completed" | "failed";
+}
+
+export interface WorkflowData {
+  workflowId: string;
+  steps: WorkflowStep[];
+  currentStage: import("./tickets.js").WorkflowStage;
+}
+
 export interface ChatMessage {
   id: string;
   type: MessageType;
@@ -74,6 +88,7 @@ export interface ChatMessage {
   images?: string[];
   question?: QuestionData;
   planPhases?: PlanPhase[];
+  workflow?: WorkflowData;
 }
 
 export interface CreateMessageRequest {

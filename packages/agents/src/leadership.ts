@@ -1,18 +1,6 @@
 import type { AgentDefinition, AgentRole } from "@game-studio/types";
 
 export const leadershipAgents: Partial<Record<AgentRole, AgentDefinition>> = {
-  "game-director": {
-    name: "game-director",
-    description: "Orchestrates the multi-agent game development pipeline. Spawns teams, assigns tasks, and coordinates across creative, technical, and production departments.",
-    tier: 1,
-    model: "opus",
-    tools: ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Task", "AskUserQuestion"],
-    maxTurns: 50,
-    skills: ["brainstorm", "design-system", "design-review", "gate-check", "project-stage-detect", "team-combat", "team-narrative", "team-ui", "team-level", "sprint-plan", "create-epics", "create-stories", "milestone-review", "scope-check", "estimate"],
-    memory: "project",
-    reportsTo: [],
-    delegates: ["creative-director", "technical-director", "producer"],
-  },
   "creative-director": {
     name: "creative-director",
     description: "Vision, pillars, player experience, scope arbitration.",
@@ -39,14 +27,14 @@ export const leadershipAgents: Partial<Record<AgentRole, AgentDefinition>> = {
   },
   producer: {
     name: "producer",
-    description: "Sprint planning, milestone tracking, cross-department coordination.",
+    description: "Orchestrates the multi-agent game development pipeline. Manages sprint planning, milestone tracking, risk management, scope negotiation, and cross-department coordination. As the Board Room orchestrator, spawns teams, assigns tasks, and coordinates across all departments.",
     tier: 1,
     model: "opus",
-    tools: ["Read", "Write", "Edit", "Glob", "Grep", "Task", "AskUserQuestion"],
-    maxTurns: 40,
-    skills: ["sprint-plan", "create-epics", "create-stories", "milestone-review", "retrospective", "scope-check", "estimate", "bug-triage", "gate-check"],
+    tools: ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Task", "AskUserQuestion"],
+    maxTurns: 50,
+    skills: ["brainstorm", "design-system", "design-review", "gate-check", "project-stage-detect", "team-combat", "team-narrative", "team-ui", "team-level", "sprint-plan", "create-epics", "create-stories", "milestone-review", "retrospective", "scope-check", "estimate", "bug-triage"],
     memory: "project",
     reportsTo: [],
-    delegates: [],
+    delegates: ["creative-director", "technical-director", "game-designer", "lead-programmer", "art-director", "audio-director", "narrative-director", "qa-lead", "release-manager", "prototyper"],
   },
 };

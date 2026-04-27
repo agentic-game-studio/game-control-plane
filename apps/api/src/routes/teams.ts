@@ -6,6 +6,7 @@ import { broadcast } from "../services/websocket.js";
 import type { WSEvent, AgentRole } from "@game-studio/types";
 import type { LLMMessage } from "../llm/zai-client.js";
 import type { SkillDefinition } from "@game-studio/types";
+import { startWorkflow, advanceStage, createQuestTicket, moveQuestTicket, completeWorkflow, getWorkflow } from "../services/quest-bridge.js";
 
 export const teamsRouter: Router = Router();
 
@@ -89,7 +90,7 @@ teamsRouter.post("/:team/run", async (req: Request, res: Response) => {
 });
 
 /**
- * Run team workflow - orchestrates agents through phases
+ * Run team workflow - orchestrates agents through phases with Quest integration
  */
 async function runTeamWorkflow(
   team: SkillDefinition,
@@ -104,28 +105,48 @@ async function runTeamWorkflow(
 
   const teamMembers = team.teamMembers || [];
 
-  // Build initial task
-  let task = `You are coordinating the **${team.name.replace("team-", "").replace(/-/g, " ")}** team workflow.
+  // Start workflow pipeline for this team
+  startWorkflow(sessionId);
+  advanceStage(sessionId, "decompose");
 
-## Team Members
-${teamMembers.map((m) => `- ${m.replace(/-/g, " ")}`).join("\n")}
+  // Create Quest tickets for each team member upfront
+  const teamTickets: Map<string, string> = new Map(); // agentRole -> ticketId
+  for (const member of teamMembers) {
+    const ticket = createQuestTicket(
+      sessionId,
+      `${team.name.replace("team-", "")}: ${member.replace(/-/g, " ")} task`,
+      member as AgentRole,
+      `Part of ${team.name} team workflow. Assigned to ${member.replace(/-/g, " ")}.`,
+      team.name.replace("team-", "").toUpperCase(),
+      member,
+    );
+    teamTickets.set(member, ticket.id);
+  }
+
+  // Build task prompt for the Producer as team orchestrator
+  let task = `You are the **Producer** coordinating the **${team.name.replace("team-", "").replace(/-/g, " ")}** team workflow.
+
+## Team Members (Quest tickets already created)
+${teamMembers.map((m) => `- ${m.replace(/-/g, " ")} (ticket: ${teamTickets.get(m)})`).join("\n")}
 
 ## Workflow Phases
-${team.phases.map((p) => `${p.order}. ${p.name}: ${p.description}`).join("\n")}
+${team.phases.map((p) => `${p.order}. ${p.name}: ${p.description} — agents: ${(p.agents ?? []).join(", ") || "all"}`).join("\n")}
 
 ## Your Task
-Coordinate the team to complete this workflow. Spawn agents as needed using the Task tool, collect their outputs, and synthesize a final response.
-
-Start by analyzing the task and spawning the appropriate team members.`;
+Execute each phase IN ORDER. Use the Task tool to spawn each agent with clear instructions.
+After each phase, summarize the output before moving to the next phase.
+All Quest tickets have been created — agents just need to be spawned via Task tool.`;
 
   if (userInput) {
     task += `\n\n## User Input\n${userInput}`;
   }
 
+  advanceStage(sessionId, "execute");
+
   try {
-    // Use creative-director as the orchestrator for team workflows
+    // Use Producer as the orchestrator for team workflows
     const result = await invokeAgent(
-      "creative-director",
+      "producer",
       task,
       sessionId,
       undefined,
@@ -137,6 +158,14 @@ Start by analyzing the task and spawning the appropriate team members.`;
       { role: "user", content: task },
       { role: "assistant", content: result.content }
     );
+
+    // Move all tickets to completed
+    for (const [role, ticketId] of teamTickets) {
+      moveQuestTicket(ticketId, "completed", role);
+    }
+
+    // Complete workflow
+    completeWorkflow(sessionId, true);
 
     // Broadcast completion
     broadcast({
@@ -154,16 +183,22 @@ Start by analyzing the task and spawning the appropriate team members.`;
       sessionId,
     } as WSEvent);
 
-    // Log entry
     broadcast({
       type: "log:entry",
       sessionId,
       level: "info",
-      message: `[Team] ${team.name} completed`,
+      message: `[Team] ${team.name} completed — ${teamMembers.length} agents, ${team.phases.length} phases`,
       timestamp: new Date().toISOString(),
     } as WSEvent);
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : "Unknown error";
+
+    // Move tickets to qa (failed)
+    for (const [role, ticketId] of teamTickets) {
+      moveQuestTicket(ticketId, "qa", role);
+    }
+
+    completeWorkflow(sessionId, false);
 
     broadcast({
       type: "agent:failed",

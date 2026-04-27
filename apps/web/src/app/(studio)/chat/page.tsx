@@ -19,13 +19,15 @@ export default function ChatPage() {
     approveAgent,
     closeSession,
     initialized,
+    connected,
+    isLoading,
   } = useCommandRoom();
 
   const handleDecision = (action: string, sender: string) => {
     if (action === "approve") {
       approveAgent(sender);
     } else if (action === "navigate") {
-      selectSession(sender === "game-director" ? "game-director" : sender);
+      selectSession(sender === "producer" ? "producer" : sender);
     } else if (action === "close") {
       closeSession(sender);
     }
@@ -89,14 +91,15 @@ export default function ChatPage() {
           threadId={threadId}
           threadTitle={threadTitle}
           currentSession={currentSession}
+          connected={connected}
           onDecision={handleDecision}
           onNavigate={handleNavigate}
           onAnswer={handleAnswer}
           onPlanAction={handlePlanAction}
         />
       </div>
-      {currentSession === "game-director" ? (
-        <CommandInput onSend={executeCommand} />
+      {currentSession === "producer" ? (
+        <CommandInput onSend={executeCommand} isLoading={isLoading} />
       ) : (
         <AgentStatusBar session={sessions.get(currentSession)} onClose={() => closeSession(currentSession)} />
       )}
@@ -111,28 +114,47 @@ function AgentStatusBar({ session, onClose }: { session?: { role: string; status
   return (
     <div className="h-14 border-t-2 border-black bg-[#f3f2ff] flex items-center justify-between px-6 shrink-0 z-30">
       <div className="flex items-center gap-3">
-        <span className={`w-2 h-2 border border-black ${isDone ? "bg-[#737688]" : "bg-[#0055FF] animate-pulse"}`} />
-        <span className="font-[var(--font-label)] text-xs font-bold uppercase">
-          {label} — {isDone ? "COMPLETE" : "WORKING"}
-        </span>
-        {!isDone && (
-          <span className="font-[var(--font-terminal)] text-[10px] text-[#737688]">
-            Will prompt when input is needed
+        {/* Status icon */}
+        <div className={`w-6 h-6 border-2 border-black flex items-center justify-center ${isDone ? "bg-[#2ECC71] text-white" : "bg-[#0055FF] text-white"}`}>
+          <span className="material-symbols-outlined text-sm">
+            {isDone ? "check_circle" : "smart_toy"}
           </span>
-        )}
+        </div>
+        <div className="flex flex-col">
+          <span className="font-[var(--font-label)] text-xs font-bold uppercase leading-tight">
+            {label}
+          </span>
+          <span className="font-[var(--font-terminal)] text-[9px] text-[#737688] leading-tight">
+            {isDone ? "Task complete — awaiting closure" : "Working autonomously from Producer commands"}
+          </span>
+        </div>
       </div>
       <div className="flex items-center gap-3">
-        {session?.progress !== undefined && session.progress > 0 && (
-          <div className="w-32 h-2 border border-black bg-white">
-            <div className="h-full bg-[#0055FF] transition-all duration-500" style={{ width: `${session.progress}%` }} />
+        {/* Progress */}
+        {!isDone && session?.progress !== undefined && (
+          <div className="flex items-center gap-2">
+            <span className="font-[var(--font-terminal)] text-[10px] text-[#737688] tabular-nums">
+              {session.progress}%
+            </span>
+            <div className="w-24 h-2 border border-black bg-white">
+              <div className="h-full bg-[#0055FF] transition-all duration-500" style={{ width: `${session.progress}%` }} />
+            </div>
           </div>
         )}
+        {/* Done badge */}
+        {isDone && (
+          <span className="font-[var(--font-label)] text-[10px] font-bold uppercase bg-[#2ECC71] text-white px-2 py-0.5 border border-black">
+            COMPLETE
+          </span>
+        )}
+        {/* Close button */}
         {isDone && (
           <button
             onClick={onClose}
-            className="border-2 border-black bg-[#df2b31] text-white px-3 py-1 font-[var(--font-label)] text-[10px] font-bold uppercase hover:bg-black retro-press"
+            className="border-2 border-black bg-[#df2b31] text-white px-3 py-1 font-[var(--font-label)] text-[10px] font-bold uppercase hover:bg-black retro-press flex items-center gap-1"
           >
-            CLOSE SESSION
+            <span className="material-symbols-outlined text-sm">close</span>
+            CLOSE
           </button>
         )}
       </div>

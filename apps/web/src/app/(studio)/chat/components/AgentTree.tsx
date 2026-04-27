@@ -178,11 +178,11 @@ function BackgroundTaskCard({ session, onSelect, onClose }: { session: AgentSess
 export default function AgentTree({ sessions, currentSession, totalProgress, onSelectSession, onCloseSession }: AgentTreeProps) {
   const [showHierarchy, setShowHierarchy] = useState(false);
   const activeRoles = [...sessions.values()]
-    .filter((s) => s.role !== "game-director" && s.status === "active")
+    .filter((s) => s.role !== "producer" && s.status === "active")
     .map((s) => s.role);
 
   // Background tasks (all non-GD sessions)
-  const backgroundTasks = [...sessions.values()].filter((s) => s.role !== "game-director");
+  const backgroundTasks = [...sessions.values()].filter((s) => s.role !== "producer");
 
   const treeData = showHierarchy ? AGENT_TREE : [];
 
@@ -208,20 +208,20 @@ export default function AgentTree({ sessions, currentSession, totalProgress, onS
         {/* Game Director — always at top */}
         <div className="p-4 pb-2">
           <button
-            onClick={() => onSelectSession("game-director")}
+            onClick={() => onSelectSession("producer")}
             className={`w-full flex items-center gap-3 p-3 border-2 border-black transition-colors ${
-              currentSession === "game-director"
+              currentSession === "producer"
                 ? "bg-[#0055FF] text-white shadow-[4px_4px_0_0_rgba(0,0,0,1)]"
                 : "bg-white hover:bg-[#e7e7f5]"
             }`}
           >
             <div className={`w-10 h-10 border-2 border-black flex items-center justify-center shrink-0 ${
-              currentSession === "game-director" ? "bg-black text-white" : "bg-[#0055FF] text-white"
+              currentSession === "producer" ? "bg-black text-white" : "bg-[#0055FF] text-white"
             }`}>
               <span className="material-symbols-outlined">stadia_controller</span>
             </div>
             <div className="text-left flex-1 min-w-0">
-              <div className="font-[var(--font-label)] text-xs font-bold uppercase">GAME_DIRECTOR</div>
+              <div className="font-[var(--font-label)] text-xs font-bold uppercase">PRODUCER</div>
               <div className="font-[var(--font-terminal)] text-[10px] flex items-center gap-1">
                 <span className="w-1.5 h-1.5 bg-[#df2b31] border border-black inline-block animate-pulse" />
                 ORCHESTRATOR — ONLINE

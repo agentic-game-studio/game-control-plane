@@ -12,8 +12,8 @@ interface ChatTabsProps {
 
 export default function ChatTabs({ sessions, currentSession, onSelectSession, onCloseSession }: ChatTabsProps) {
   const sessionList = [...sessions.values()];
-  const gdSession = sessionList.find((s) => s.role === "game-director");
-  const agentSessions = sessionList.filter((s) => s.role !== "game-director");
+  const gdSession = sessionList.find((s) => s.role === "producer");
+  const agentSessions = sessionList.filter((s) => s.role !== "producer");
 
   return (
     <div className="h-12 bg-[#ededfb] border-b-2 border-black flex items-end px-2 gap-1 overflow-x-auto shrink-0">
@@ -21,9 +21,9 @@ export default function ChatTabs({ sessions, currentSession, onSelectSession, on
       {gdSession && (
         <TabButton
           session={gdSession}
-          isActive={currentSession === "game-director"}
+          isActive={currentSession === "producer"}
           isClosable={false}
-          onSelect={() => onSelectSession("game-director")}
+          onSelect={() => onSelectSession("producer")}
         />
       )}
 
@@ -56,7 +56,7 @@ function TabButton({
   onClose?: () => void;
 }) {
   const icon = getAgentIcon(session.role);
-  const label = session.role === "game-director" ? "BOARD_ROOM" : session.role.replace(/-/g, "_").toUpperCase();
+  const label = session.role === "producer" ? "BOARD_ROOM" : session.role.replace(/-/g, "_").toUpperCase();
   const isDone = session.status === "done";
 
   return (
@@ -76,7 +76,7 @@ function TabButton({
       {/* Status dot */}
       <span
         className={`w-2 h-2 border border-black ${
-          session.role === "game-director"
+          session.role === "producer"
             ? "bg-[#df2b31] animate-pulse"
             : isDone
             ? "bg-[#737688]"
