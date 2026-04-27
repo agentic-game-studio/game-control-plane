@@ -4,9 +4,11 @@ import type { AgentRole, ChatSession, ChatMessage, CreateMessageRequest, CreateC
 import type { LLMMessage } from "../llm/zai-client.js";
 import { broadcastEvent } from "../services/data-store.js";
 import { invokeAgent, continueConversation } from "../services/llm-service.js";
+import { makeProgressCallback } from "../services/llm-service.js";
 import { getAgentSystemPrompt } from "../prompts/agent-prompt-loader.js";
 import type { WSEvent } from "@game-studio/types";
 import { broadcast } from "../services/websocket.js";
+import { startWorkflow, advanceStage, completeWorkflow, cleanupWorkflow, getWorkflow, createQuestTicket, moveQuestTicket } from "../services/quest-bridge.js";
 
 export const chatRouter: Router = Router();
 
@@ -114,16 +116,16 @@ interface ExtendedChatSession extends ChatSession {
 
 const chatStore: ChatState = {
   sessions: {
-    "game-director": {
-      id: "game-director",
-      role: "game-director",
+    "producer": {
+      id: "producer",
+      role: "producer",
       messages: [
         {
           id: "msg-welcome",
           type: "welcome" as const,
-          sender: "Game Director",
+          sender: "Producer",
           content:
-            "Welcome to the Board Room. I'm the Game Director, orchestrating our studio's multi-agent game development pipeline.",
+            "Welcome to the Board Room. I'm the Producer, orchestrating our studio's multi-agent game development pipeline.",
           timestamp: new Date().toISOString(),
           showActions: false,
         },
@@ -143,9 +145,9 @@ const chatStore: ChatState = {
       conversationHistory: [],
     },
   },
-  currentSessionId: "game-director",
+  currentSessionId: "producer",
   threadId: "thread-001",
-  threadTitle: "Game Director Session",
+  threadTitle: "Producer Session",
 };
 
 interface ChatState {
@@ -236,9 +238,9 @@ chatRouter.post("/sessions", async (req: Request, res: Response) => {
 chatRouter.delete("/sessions/:id", (req: Request, res: Response) => {
   const id = String(req.params.id);
 
-  // Prevent deleting game-director
-  if (id === "game-director") {
-    res.status(400).json({ success: false, error: "Cannot delete game-director session" });
+  // Prevent deleting producer
+  if (id === "producer") {
+    res.status(400).json({ success: false, error: "Cannot delete producer session" });
     return;
   }
 
@@ -248,6 +250,7 @@ chatRouter.delete("/sessions/:id", (req: Request, res: Response) => {
   }
 
   delete chatStore.sessions[id];
+  cleanupWorkflow(id);
 
   broadcast({
     type: "chat:session:deleted",
@@ -267,10 +270,35 @@ chatRouter.post("/sessions/:id/clear", (req: Request, res: Response) => {
     return;
   }
 
-  session.messages = [];
   session.conversationHistory = [];
   session.progress = 0;
   session.status = "active";
+
+  // Reset producer session with welcome message; other sessions start empty
+  if (id === "producer") {
+    session.messages = [
+      {
+        id: `msg-welcome-${Date.now()}`,
+        type: "welcome" as const,
+        sender: "Producer",
+        content:
+          "Welcome to the Board Room. I'm the Producer, orchestrating our studio's multi-agent game development pipeline.",
+        timestamp: new Date().toISOString(),
+        showActions: false,
+      },
+      {
+        id: `msg-prompt-${Date.now()}`,
+        type: "system" as const,
+        sender: "SYSTEM",
+        content:
+          "Type a command to spawn an agent or request a task. Use /spawn <role> to bring in a specialist.",
+        timestamp: new Date().toISOString(),
+        showActions: false,
+      },
+    ];
+  } else {
+    session.messages = [];
+  }
 
   broadcast({
     type: "chat:message",
@@ -325,15 +353,16 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
     content: body.content,
   });
 
-  // Broadcast user message
-  broadcast({
-    type: "chat:message",
-    sessionId: id,
-    message: userMessage,
-  } as WSEvent);
+  // Note: We do NOT broadcast the user message here because the frontend
+  // already adds it optimistically. Broadcasting would create a duplicate.
 
   // If this is a system message or no auto-response needed, return early
   if (body.type === "system" || body.type === "progress") {
+    broadcast({
+      type: "chat:message",
+      sessionId: id,
+      message: userMessage,
+    } as WSEvent);
     res.status(201).json({ success: true, data: userMessage });
     return;
   }
@@ -360,8 +389,39 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
   } as WSEvent);
 
   try {
-    // Call the LLM
-    const result = await continueConversation(agentRole, session.conversationHistory, id);
+    // Set up progress callback for tool execution updates
+    const onProgress = makeProgressCallback(id, progressMsgId);
+
+    // Heartbeat: broadcast periodic progress updates during long API waits
+    let heartbeatCount = 0;
+    const heartbeat = setInterval(() => {
+      heartbeatCount++;
+      const elapsed = heartbeatCount * 2;
+      // Smooth progress: start at 10%, climb by 3% each tick, cap at 85%
+      const pct = Math.min(85, 10 + heartbeatCount * 3);
+      broadcast({
+        type: "chat:progress",
+        sessionId: id,
+        progressMsgId,
+        progress: pct,
+        content: `${agentRole} is thinking... (${elapsed}s)`,
+      } as WSEvent);
+    }, 2000);
+
+    // Call the LLM with progress callback
+    const result = await continueConversation(agentRole, session.conversationHistory, id, onProgress);
+
+    // Stop heartbeat
+    clearInterval(heartbeat);
+
+    // Broadcast final progress before removing (so frontend can clean up)
+    broadcast({
+      type: "chat:progress",
+      sessionId: id,
+      progressMsgId,
+      progress: 100,
+      content: `${agentRole} complete`,
+    } as WSEvent);
 
     // Remove the progress placeholder before adding the real response
     const progressIndex = session.messages.findIndex((m) => m.id === progressMsgId);
@@ -380,6 +440,16 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
 
     // Check if LLM proposed a plan via ProposePlan tool
     const planPhases = parsePlanPhasesFromToolResult(result.toolCalls);
+
+    // Workflow stage detection
+    if (planPhases && !getWorkflow(id)) {
+      // Plan proposed → start workflow and advance to decompose
+      startWorkflow(id);
+      advanceStage(id, "decompose");
+    }
+    if (result.toolCalls?.some((tc) => tc.name === "Task")) {
+      advanceStage(id, "execute");
+    }
 
     // Determine message type: question > plan > agent
     let messageType: "question" | "plan" | "agent" = "agent";
@@ -507,8 +577,40 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
 
   // If a task is provided, execute it immediately
   if (task) {
+    // Create a progress message for this invocation
+    const progressMsgId = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    newSession.messages.push({
+      id: progressMsgId,
+      type: "progress",
+      sender: agentRole,
+      content: `${agentRole} is working...`,
+      timestamp: new Date().toISOString(),
+      showActions: false,
+      progress: 5,
+    });
+    broadcast({
+      type: "chat:message",
+      sessionId,
+      message: newSession.messages[newSession.messages.length - 1],
+    } as WSEvent);
+
+    const onProgress = makeProgressCallback(sessionId, progressMsgId);
+
+    // Quest Bridge: create ticket for spawned agent task
+    let ticketId: string | undefined;
+    if (task) {
+      const ticket = createQuestTicket(sessionId, task.slice(0, 80), agentRole, task, "AGENT", "spawn");
+      ticketId = ticket.id;
+      moveQuestTicket(ticketId, "in_progress", agentRole);
+    }
+
     try {
-      const result = await invokeAgent(agentRole, task, sessionId, undefined, []);
+      // Don't broadcast agent events from invokeAgent — we handle them ourselves here
+      const result = await invokeAgent(agentRole, task, sessionId, undefined, [], onProgress, false);
+
+      // Remove progress placeholder
+      const idx = newSession.messages.findIndex((m) => m.id === progressMsgId);
+      if (idx !== -1) newSession.messages.splice(idx, 1);
 
       const responseMessage: ChatMessage = {
         id: `msg-${Date.now()}`,
@@ -540,6 +642,11 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
         output: result.content,
         sessionId: sessionId,
       } as WSEvent);
+
+      // Quest Bridge: move ticket to completed
+      if (ticketId) {
+        moveQuestTicket(ticketId, "completed", agentRole);
+      }
     } catch (err: unknown) {
       const error = err as Error;
 
@@ -549,6 +656,11 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
         error: error.message,
         sessionId: sessionId,
       } as WSEvent);
+
+      // Quest Bridge: move ticket back to available on failure
+      if (ticketId) {
+        moveQuestTicket(ticketId, "available", agentRole);
+      }
     }
   }
 
@@ -578,7 +690,7 @@ chatRouter.post("/diff", (req: Request, res: Response) => {
 
   broadcast({
     type: "chat:message",
-    sessionId: sessionId ?? "game-director",
+    sessionId: sessionId ?? "producer",
     message: {
       id: diffId,
       type: "diff" as const,

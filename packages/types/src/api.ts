@@ -1,7 +1,7 @@
 import type { AgentRole } from "./agent.js";
 import type { SessionState, SessionConfig } from "./session.js";
-import type { GateResult, GateStatus } from "./gate.js";
-import type { ReviewMode } from "./gate.js";
+import type { GateResult, GateStatus, ReviewMode } from "./gate.js";
+import type { WorkflowStage } from "./tickets.js";
 import type { DocumentCategory, DocumentEntry, DocumentDetail, CategoryMeta, GraphData } from "./document.js";
 import type { Project } from "./dashboard.js";
 import type { Ticket, TicketStatus } from "./tickets.js";
@@ -18,7 +18,7 @@ export type WSEvent =
   | { type: "skill:phase:complete"; skillId: string; phase: number; output: string; sessionId: string }
   | { type: "checkpoint:saved"; checkpointId: string; sessionId: string }
   | { type: "session:status"; sessionId: string; status: string }
-  | { type: "log:entry"; sessionId: string; level: string; message: string; timestamp: string }
+  | { type: "log:entry"; sessionId: string; level: string; message: string; timestamp: string; agent?: string }
   | { type: "document:created"; documentId: string; category: DocumentCategory; title: string }
   | { type: "document:updated"; documentId: string; category: DocumentCategory; title: string }
   | { type: "project:created"; project: Project }
@@ -35,8 +35,12 @@ export type WSEvent =
   | { type: "team:started"; teamId: string; sessionId: string }
   | { type: "team:completed"; teamId: string; sessionId: string; output: string }
   | { type: "chat:message"; sessionId: string; message: ChatMessage }
+  | { type: "chat:progress"; sessionId: string; progressMsgId: string; progress: number; content: string }
   | { type: "chat:session:created"; session: ChatSession }
   | { type: "chat:session:deleted"; sessionId: string }
+  | { type: "workflow:stage"; sessionId: string; workflowId: string; stage: WorkflowStage; ticketId?: string; agentRole?: string }
+  | { type: "workflow:complete"; sessionId: string; workflowId: string; success: boolean }
+  | { type: "quest:linked"; sessionId: string; ticketId: string; agentRole: string }
   | { type: "error"; error: string; sessionId?: string };
 
 /** API request/response types */

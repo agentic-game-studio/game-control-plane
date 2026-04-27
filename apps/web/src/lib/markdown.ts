@@ -2,7 +2,8 @@
 
 /** Minimal markdown-to-HTML renderer (safe — escapes HTML first) */
 export function renderMarkdown(md: string): string {
-  let html = md;
+  // Convert literal \n (from LLM JSON) to actual newlines
+  let html = md.replace(/\\n/g, "\n");
 
   // Escape HTML entities
   html = html.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");

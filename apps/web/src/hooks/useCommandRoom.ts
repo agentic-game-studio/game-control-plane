@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "./useWebSocket";
 import type { WSEvent } from "@game-studio/types";
@@ -29,7 +29,7 @@ function normalizeToolCalls(toolCalls?: { tool?: string; name?: string; args?: R
 
 export interface ChatMessage {
   id: string;
-  type: "system" | "agent" | "user" | "progress" | "welcome" | "diff" | "navigate" | "question" | "plan";
+  type: "system" | "agent" | "user" | "progress" | "welcome" | "diff" | "navigate" | "question" | "plan" | "workflow";
   sender: string;
   content: string;
   timestamp: string;
@@ -42,6 +42,17 @@ export interface ChatMessage {
   navigate?: { targetSession: string; label: string };
   navigateTo?: string;
   images?: string[];
+  workflow?: {
+    workflowId: string;
+    steps: Array<{
+      stage: string;
+      label: string;
+      ticketId?: string;
+      agentRole?: string;
+      status: "pending" | "active" | "completed" | "failed";
+    }>;
+    currentStage: string;
+  };
   question?: {
     questionId: string;
     question: string;
@@ -89,14 +100,14 @@ const GREETINGS: Record<string, string> = {
 const DEFAULT_GREETING = "Agent spawned and ready. Awaiting your instructions.";
 
 function timestamp(): string {
-  return new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  return new Date().toISOString();
 }
 
 function uid(): string {
   return Math.random().toString(36).slice(2, 8);
 }
 
-function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, addSessionMessage: (role: string, msg: Omit<ChatMessage, "id" | "timestamp">) => void): Map<string, AgentSession> | null {
+function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, addSessionMessage: (role: string, msg: Omit<ChatMessage, "id" | "timestamp">) => void, recentApiMessages?: Set<string>): Map<string, AgentSession> | null {
   switch (event.type) {
     case "agent:spawned": {
       const role = event.agent;
@@ -113,7 +124,7 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, addS
         spawnedAt: timestamp(),
         fileOps: [],
       });
-      addSessionMessage("game-director", {
+      addSessionMessage("producer", {
         type: "system",
         sender: "SYSTEM",
         content: `${role.toUpperCase()} spawned via WebSocket at ${timestamp()} UTC`,
@@ -122,6 +133,8 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, addS
     }
     case "agent:completed": {
       const role = event.sessionId;
+      // Producer is the main orchestrator — never mark it as "completed" via agent events
+      if (role === "producer") return null;
       const session = sessions.get(role);
       if (!session) return null;
       const next = new Map(sessions);
@@ -143,17 +156,17 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, addS
             id: uid(),
             type: "navigate" as const,
             sender: "SYSTEM",
-            content: "Back to Game Director",
+            content: "Back to Producer",
             timestamp: timestamp(),
-            navigate: { targetSession: "game-director", label: "Back to Game Director" },
+            navigate: { targetSession: "producer", label: "Back to Producer" },
           },
         ],
       });
-      addSessionMessage("game-director", {
+      addSessionMessage("producer", {
         type: "agent",
-        sender: "game-director",
-        content: `${role.replace(/-/g, " ")} reports task complete.`,
-        showActions: false,
+        sender: "producer",
+        content: `${role.replace(/-/g, " ")} reports task complete. Session awaiting closure.`,
+        showActions: true,
       });
       return next;
     }
@@ -173,7 +186,7 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, addS
           timestamp: timestamp(),
         }],
       });
-      addSessionMessage("game-director", {
+      addSessionMessage("producer", {
         type: "system",
         sender: "SYSTEM",
         content: `${role.toUpperCase()} failed: ${event.error}`,
@@ -190,10 +203,29 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, addS
       if (message.id && session.messages.some((m) => m.id === message.id)) {
         return null;
       }
+      // Deduplicate: skip if this message was already added via API response (ref-based, race-condition proof)
+      const msgContent = (message.content ?? "").trim();
+      const msgSig = `${message.type}:${message.sender}:${msgContent}`;
+      if (recentApiMessages?.has(msgSig)) {
+        recentApiMessages.delete(msgSig);
+        return null;
+      }
+      // Deduplicate: skip if last message in session already matches (catches WS-before-API race)
+      const lastMsg = session.messages[session.messages.length - 1];
+      if (lastMsg && lastMsg.type === message.type && lastMsg.sender === message.sender && (lastMsg.content ?? "").trim() === msgContent) {
+        return null;
+      }
       const next = new Map(sessions);
+
+      // Clean up stale progress messages when a real response arrives
+      const shouldCleanProgress = message.type !== "progress" && message.type !== "system";
+      const baseMessages = shouldCleanProgress
+        ? session.messages.filter((m) => m.type !== "progress")
+        : session.messages;
+
       next.set(sessionId, {
         ...session,
-        messages: [...session.messages, {
+        messages: [...baseMessages, {
           id: message.id || uid(),
           type: message.type,
           sender: message.sender,
@@ -201,7 +233,7 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, addS
           timestamp: message.timestamp || timestamp(),
           showActions: message.showActions,
           progress: message.progress,
-          toolCalls: message.toolCalls as ToolCall[] | undefined,
+          toolCalls: normalizeToolCalls(message.toolCalls),
           question: message.question as ChatMessage["question"],
           planPhases: message.planPhases as ChatMessage["planPhases"],
           thinking: message.thinking,
@@ -212,8 +244,36 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, addS
       });
       return next;
     }
+    case "chat:progress": {
+      // Update existing progress message in place, or remove if complete
+      const sessionId = event.sessionId;
+      const session = sessions.get(sessionId);
+      if (!session) return null;
+      const next = new Map(sessions);
+
+      // If progress is 100, remove the progress message
+      if (event.progress >= 100) {
+        next.set(sessionId, {
+          ...session,
+          messages: session.messages.filter((m) => m.id !== event.progressMsgId),
+          progress: 100,
+        });
+        return next;
+      }
+
+      next.set(sessionId, {
+        ...session,
+        messages: session.messages.map((m) =>
+          m.id === event.progressMsgId
+            ? { ...m, progress: event.progress, content: event.content }
+            : m
+        ),
+        progress: event.progress,
+      });
+      return next;
+    }
     case "skill:phase:complete": {
-      addSessionMessage("game-director", {
+      addSessionMessage("producer", {
         type: "system",
         sender: "SYSTEM",
         content: `Skill phase ${event.phase}: ${(event.output as string)?.slice(0, 100) ?? "complete"}...`,
@@ -221,10 +281,115 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, addS
       return null;
     }
     case "log:entry": {
-      addSessionMessage("game-director", {
+      // Prefer event.sessionId, fall back to agent role lookup
+      const targetSession = sessions.has(event.sessionId)
+        ? event.sessionId
+        : event.agent && sessions.has(event.agent)
+        ? event.agent
+        : "producer";
+      const session = sessions.get(targetSession);
+      if (!session) return null;
+
+      // Parse tool call from log message, e.g. "[producer] Read: /path/to/file"
+      const toolMatch = event.message.match(/^\[([^\]]+)\]\s+(\w+):\s*(.+)$/);
+      if (toolMatch) {
+        const [, , toolName, toolArg] = toolMatch;
+        const next = new Map(sessions);
+        const progressIndex = session.messages.findIndex((m) => m.type === "progress");
+        if (progressIndex !== -1) {
+          const progressMsg = session.messages[progressIndex];
+          const existingToolCalls = progressMsg.toolCalls ?? [];
+          // Avoid duplicate tool calls (same name + arg within last 5)
+          const isDuplicate = existingToolCalls.slice(-5).some(
+            (tc) => tc.name === toolName && Object.values(tc.args)[0] === toolArg
+          );
+          if (!isDuplicate) {
+            next.set(targetSession, {
+              ...session,
+              messages: session.messages.map((m, idx) =>
+                idx === progressIndex
+                  ? {
+                      ...m,
+                      toolCalls: [
+                        ...existingToolCalls,
+                        {
+                          name: toolName,
+                          args: { [toolName === "Bash" ? "command" : "file_path"]: toolArg },
+                          status: "success",
+                        },
+                      ],
+                    }
+                  : m
+              ),
+            });
+            return next;
+          }
+        }
+      }
+
+      // Fallback: add as system message if no progress message or couldn't parse
+      // Deduplicate: skip if same log message already exists in recent messages
+      const logContent = `[${event.level.toUpperCase()}] ${event.message}`;
+      const recentMessages = session.messages.slice(-10);
+      if (!recentMessages.some((m) => m.type === "system" && m.content === logContent)) {
+        addSessionMessage(targetSession, {
+          type: "system",
+          sender: "SYSTEM",
+          content: logContent,
+        });
+      }
+      return null;
+    }
+    case "chat:session:deleted": {
+      const sid = event.sessionId;
+      if (!sessions.has(sid)) return null;
+      const next = new Map(sessions);
+      next.delete(sid);
+      return next;
+    }
+    case "workflow:stage": {
+      const { sessionId, workflowId, stage, ticketId, agentRole } = event;
+      const stages: Array<{ stage: string; label: string }> = [
+        { stage: "plan", label: "Planning" },
+        { stage: "decompose", label: "Decomposing tasks" },
+        { stage: "execute", label: "Executing" },
+        { stage: "verify", label: "Verifying" },
+        { stage: "fix", label: "Fixing" },
+      ];
+      const steps = stages.map((s) => ({
+        stage: s.stage,
+        label: s.label,
+        ticketId: s.stage === stage ? ticketId : undefined,
+        agentRole: s.stage === stage ? agentRole : undefined,
+        status: stages.findIndex((x) => x.stage === stage) > stages.findIndex((x) => x.stage === s.stage)
+          ? "completed" as const
+          : s.stage === stage ? "active" as const : "pending" as const,
+      }));
+      addSessionMessage(sessionId, {
+        type: "workflow",
+        sender: "SYSTEM",
+        content: `Pipeline: ${stage.toUpperCase()}`,
+        workflow: {
+          workflowId,
+          steps,
+          currentStage: stage as "plan" | "decompose" | "execute" | "verify" | "fix",
+        },
+      });
+      return null;
+    }
+    case "quest:linked": {
+      addSessionMessage(event.sessionId, {
         type: "system",
         sender: "SYSTEM",
-        content: `[${event.level.toUpperCase()}] ${event.message}`,
+        content: `Quest ${event.ticketId.replace("ticket-", "#")} assigned to ${event.agentRole.replace(/-/g, " ")}`,
+      });
+      return null;
+    }
+    case "workflow:complete": {
+      addSessionMessage(event.sessionId, {
+        type: "system",
+        sender: "SYSTEM",
+        content: `Workflow ${event.success ? "completed successfully" : "failed"}`,
       });
       return null;
     }
@@ -235,13 +400,15 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, addS
 
 export function useCommandRoom() {
   const [sessions, setSessions] = useState<Map<string, AgentSession>>(new Map());
-  const [currentSession, setCurrentSession] = useState("game-director");
+  const [currentSession, setCurrentSession] = useState("producer");
   const [threadId, setThreadId] = useState("");
   const [threadTitle, setThreadTitle] = useState("Board Room");
   const [initialized, setInitialized] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
   const lastSpawnedRef = useRef<string | null>(null);
   const activityLogRef = useRef<string[]>([]);
   const addSessionMessageRef = useRef<(role: string, msg: Omit<ChatMessage, "id" | "timestamp">) => void | undefined>(undefined);
+  const recentApiMessagesRef = useRef<Set<string>>(new Set());
 
   // Initialize on client by fetching from API
   useEffect(() => {
@@ -261,6 +428,8 @@ export function useCommandRoom() {
               ...m,
               // Normalize progress messages that have progress 100
               type: m.type === "progress" && m.progress === 100 ? "agent" as const : m.type,
+              // Normalize tool calls from backend format (tool) to frontend format (name)
+              toolCalls: normalizeToolCalls(m.toolCalls),
             })),
             status: s.status as "active" | "done",
             progress: s.progress,
@@ -277,12 +446,12 @@ export function useCommandRoom() {
         console.error("Failed to fetch chat sessions:", error);
         // Fallback to local initialization
         const gd: AgentSession = {
-          role: "game-director",
+          role: "producer",
           messages: [{
             id: uid(),
             type: "welcome",
-            sender: "GAME_DIRECTOR",
-            content: "BOARD_ROOM initialized. Game Director online.",
+            sender: "PRODUCER",
+            content: "BOARD_ROOM initialized. Producer online.",
             timestamp: timestamp(),
           }],
           status: "active",
@@ -290,7 +459,7 @@ export function useCommandRoom() {
           spawnedAt: timestamp(),
           fileOps: [],
         };
-        setSessions(new Map([["game-director", gd]]));
+        setSessions(new Map([["producer", gd]]));
         setThreadId(`#${Math.floor(Math.random() * 9000 + 1000)}`);
       } finally {
         setInitialized(true);
@@ -304,10 +473,21 @@ export function useCommandRoom() {
     setSessions((prev) => {
       const session = prev.get(sessionRole);
       if (!session) return prev;
+
+      // Deduplicate: skip if same type+sender+content already exists as the last message
+      const lastMsg = session.messages[session.messages.length - 1];
+      if (lastMsg && lastMsg.type === msg.type && lastMsg.sender === msg.sender && (lastMsg.content ?? "").trim() === (msg.content ?? "").trim()) {
+        return prev;
+      }
+
       const next = new Map(prev);
+      const shouldCleanProgress = msg.type !== "progress" && msg.type !== "system";
       next.set(sessionRole, {
         ...session,
-        messages: [...session.messages, { ...msg, id: uid(), timestamp: timestamp() }],
+        messages: [
+          ...(shouldCleanProgress ? session.messages.filter((m) => m.type !== "progress") : session.messages),
+          { ...msg, id: uid(), timestamp: timestamp() },
+        ],
       });
       return next;
     });
@@ -319,12 +499,12 @@ export function useCommandRoom() {
   // WebSocket integration — use functional update to avoid stale closure
   const onWSEvent = useCallback((event: WSEvent) => {
     setSessions((prevSessions) => {
-      const updated = handleWSEvent(event, prevSessions, addSessionMessageRef.current!);
+      const updated = handleWSEvent(event, prevSessions, addSessionMessageRef.current!, recentApiMessagesRef.current);
       return updated ?? prevSessions;
     });
   }, []);
 
-  useWebSocket(onWSEvent);
+  const { connected } = useWebSocket(onWSEvent);
 
   const spawnAgent = useCallback(async (role: string, task?: string) => {
     const r = role.toLowerCase().trim();
@@ -349,7 +529,7 @@ export function useCommandRoom() {
 
     lastSpawnedRef.current = r;
 
-    addSessionMessage("game-director", {
+    addSessionMessage("producer", {
       type: "system",
       sender: "SYSTEM",
       content: `${r.toUpperCase()} spawned at ${timestamp()} UTC`,
@@ -387,15 +567,15 @@ export function useCommandRoom() {
 
       // The real response will come via WebSocket or we need to fetch it
       // For now, add a message that the agent is processing
-      addSessionMessage("game-director", {
+      addSessionMessage("producer", {
         type: "agent",
-        sender: "game-director",
+        sender: "producer",
         content: `${r.replace(/-/g, " ")} is online and processing your request...`,
         showActions: false,
       });
     } catch (error) {
       console.error("Failed to spawn agent via API:", error);
-      addSessionMessage("game-director", {
+      addSessionMessage("producer", {
         type: "system",
         sender: "SYSTEM",
         content: `Failed to spawn ${r}: ${error instanceof Error ? error.message : "Unknown error"}`,
@@ -489,18 +669,18 @@ export function useCommandRoom() {
                 id: uid(),
                 type: "navigate" as const,
                 sender: "SYSTEM",
-                content: "Back to Game Director",
+                content: "Back to Producer",
                 timestamp: timestamp(),
-                navigate: { targetSession: "game-director", label: "Back to Game Director" },
+                navigate: { targetSession: "producer", label: "Back to Producer" },
               },
             ],
           });
           return next;
         });
 
-        addSessionMessage("game-director", {
+        addSessionMessage("producer", {
           type: "agent",
-          sender: "game-director",
+          sender: "producer",
           content: `${role.replace(/-/g, " ")} completed the task.`,
           showActions: false,
         });
@@ -536,11 +716,9 @@ export function useCommandRoom() {
 
     const lower = trimmed.toLowerCase();
 
-    // Always switch to GD view for typed commands
-    setCurrentSession("game-director");
-
-    // Slash commands
+    // Slash commands — always route through producer
     if (lower.startsWith("/")) {
+      setCurrentSession("producer");
       const parts = lower.slice(1).split(" ");
       const cmd = parts[0];
       const args = parts.slice(1).join(" ");
@@ -566,10 +744,10 @@ export function useCommandRoom() {
           return;
         }
         case "help": {
-          addSessionMessage("game-director", { type: "user", sender: "DIRECTOR", content: trimmed });
-          addSessionMessage("game-director", {
+          addSessionMessage("producer", { type: "user", sender: "DIRECTOR", content: trimmed });
+          addSessionMessage("producer", {
             type: "agent",
-            sender: "game-director",
+            sender: "producer",
             content: `Available commands:
 - /clear — Clear the chat
 - /help — Show this message
@@ -583,18 +761,18 @@ You can also use: spawn <agent>, approve, done <agent>`,
         }
         case "spawn": {
           if (!args) {
-            addSessionMessage("game-director", { type: "system", sender: "SYSTEM", content: "Usage: /spawn <agent-role>" });
+            addSessionMessage("producer", { type: "system", sender: "SYSTEM", content: "Usage: /spawn <agent-role>" });
             return;
           }
-          addSessionMessage("game-director", { type: "user", sender: "DIRECTOR", content: trimmed });
+          addSessionMessage("producer", { type: "user", sender: "DIRECTOR", content: trimmed });
           spawnAgent(args);
           return;
         }
         case "cost": {
-          addSessionMessage("game-director", { type: "user", sender: "DIRECTOR", content: trimmed });
-          addSessionMessage("game-director", {
+          addSessionMessage("producer", { type: "user", sender: "DIRECTOR", content: trimmed });
+          addSessionMessage("producer", {
             type: "agent",
-            sender: "game-director",
+            sender: "producer",
             content: `Token Usage Estimates:
 ━━━━━━━━━━━━━━━━━━━━━━━
 Input:  ~12,500 tokens ($0.09)
@@ -608,10 +786,10 @@ Agents: 3 active`,
           return;
         }
         case "diff": {
-          addSessionMessage("game-director", { type: "user", sender: "DIRECTOR", content: trimmed });
-          addSessionMessage("game-director", {
+          addSessionMessage("producer", { type: "user", sender: "DIRECTOR", content: trimmed });
+          addSessionMessage("producer", {
             type: "diff",
-            sender: "game-director",
+            sender: "producer",
             content: "Recent changes",
             diff: {
               filePath: "src/utils.ts",
@@ -622,40 +800,43 @@ Agents: 3 active`,
           return;
         }
         default: {
-          addSessionMessage("game-director", { type: "system", sender: "SYSTEM", content: `Unknown command: /${cmd}. Type /help for available commands.` });
+          addSessionMessage("producer", { type: "system", sender: "SYSTEM", content: `Unknown command: /${cmd}. Type /help for available commands.` });
           return;
         }
       }
     }
 
-    // spawn <agent>
+    // spawn <agent> — orchestration command
     if (lower.startsWith("spawn ")) {
+      setCurrentSession("producer");
       const role = lower.slice(6).trim();
       if (!role) {
-        addSessionMessage("game-director", { type: "system", sender: "SYSTEM", content: "Usage: spawn <agent-role>" });
+        addSessionMessage("producer", { type: "system", sender: "SYSTEM", content: "Usage: spawn <agent-role>" });
         return;
       }
-      addSessionMessage("game-director", { type: "user", sender: "DIRECTOR", content: trimmed });
+      addSessionMessage("producer", { type: "user", sender: "DIRECTOR", content: trimmed });
       spawnAgent(role);
       return;
     }
 
-    // approve — from text command, approves last spawned
+    // approve — orchestration command
     if (lower === "approve") {
+      setCurrentSession("producer");
       const role = lastSpawnedRef.current;
       if (!role) {
-        addSessionMessage("game-director", { type: "system", sender: "SYSTEM", content: "No agent to approve." });
+        addSessionMessage("producer", { type: "system", sender: "SYSTEM", content: "No agent to approve." });
         return;
       }
-      addSessionMessage("game-director", { type: "user", sender: "DIRECTOR", content: "Approved. Proceed with the task." });
+      addSessionMessage("producer", { type: "user", sender: "DIRECTOR", content: "Approved. Proceed with the task." });
       approveAgent(role);
       return;
     }
 
-    // done <agent>
+    // done <agent> — orchestration command
     if (lower.startsWith("done ")) {
+      setCurrentSession("producer");
       const role = lower.slice(5).trim();
-      addSessionMessage("game-director", { type: "user", sender: "DIRECTOR", content: trimmed });
+      addSessionMessage("producer", { type: "user", sender: "DIRECTOR", content: trimmed });
 
       setSessions((prev) => {
         const session = prev.get(role);
@@ -675,7 +856,7 @@ Agents: 3 active`,
         return next;
       });
 
-      addSessionMessage("game-director", {
+      addSessionMessage("producer", {
         type: "system",
         sender: "SYSTEM",
         content: `${role.toUpperCase()} completed task and despawned.`,
@@ -683,47 +864,14 @@ Agents: 3 active`,
       return;
     }
 
-    // Default: plain message to Game Director via real API
-    addSessionMessage("game-director", { type: "user", sender: "DIRECTOR", content: trimmed, images });
+    // Default: normal message routed to current session
+    addSessionMessage(currentSession, { type: "user", sender: "DIRECTOR", content: trimmed, images });
 
-    // Show immediate local typing indicator
-    const typingId = uid();
-    setSessions((prev) => {
-      const session = prev.get("game-director");
-      if (!session) return prev;
-      const next = new Map(prev);
-      next.set("game-director", {
-        ...session,
-        messages: [...session.messages, {
-          id: typingId,
-          type: "progress" as const,
-          sender: "game-director",
-          content: "Reviewing your request...",
-          timestamp: timestamp(),
-          progress: 10,
-          showActions: false,
-        }],
-      });
-      return next;
-    });
+    setIsLoading(true);
 
-    // Helper to remove typing indicator
-    const removeTyping = () => {
-      setSessions((prev) => {
-        const session = prev.get("game-director");
-        if (!session) return prev;
-        const next = new Map(prev);
-        next.set("game-director", {
-          ...session,
-          messages: session.messages.filter((m) => m.id !== typingId),
-        });
-        return next;
-      });
-    };
-
-    // Call real API
+    // Call real API for current session
     apiFetch<{ userMessage: ChatMessage; assistantMessage?: ChatMessage; errorMessage?: ChatMessage }>(
-      "/api/chat/sessions/game-director/messages",
+      `/api/chat/sessions/${currentSession}/messages`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -736,12 +884,17 @@ Agents: 3 active`,
       }
     )
       .then((result) => {
-        removeTyping();
+        setIsLoading(false);
         if (result.assistantMessage) {
-          addSessionMessage("game-director", {
-            type: result.assistantMessage.type as ChatMessage["type"],
-            sender: result.assistantMessage.sender,
-            content: result.assistantMessage.content,
+          const msgType = result.assistantMessage.type as ChatMessage["type"];
+          const msgSender = result.assistantMessage.sender;
+          const msgContent = result.assistantMessage.content;
+          // Track signature for WebSocket deduplication
+          recentApiMessagesRef.current.add(`${msgType}:${msgSender}:${msgContent.trim()}`);
+          addSessionMessage(currentSession, {
+            type: msgType,
+            sender: msgSender,
+            content: msgContent,
             showActions: false,
             progress: result.assistantMessage.progress,
             toolCalls: normalizeToolCalls(result.assistantMessage.toolCalls),
@@ -749,7 +902,7 @@ Agents: 3 active`,
             planPhases: result.assistantMessage.planPhases as ChatMessage["planPhases"],
           });
         } else if (result.errorMessage) {
-          addSessionMessage("game-director", {
+          addSessionMessage(currentSession, {
             type: "system",
             sender: "SYSTEM",
             content: result.errorMessage.content,
@@ -757,9 +910,9 @@ Agents: 3 active`,
         }
       })
       .catch((error) => {
-        removeTyping();
+        setIsLoading(false);
         console.error("Failed to send message:", error);
-        addSessionMessage("game-director", {
+        addSessionMessage(currentSession, {
           type: "system",
           sender: "SYSTEM",
           content: `Error: ${error instanceof Error ? error.message : "Failed to get response"}`,
@@ -767,12 +920,28 @@ Agents: 3 active`,
       });
   }, [addSessionMessage, spawnAgent, approveAgent, currentSession]);
 
-  // Derived state
-  const currentMessages = sessions.get(currentSession)?.messages ?? [];
-  const activeAgentList = [...sessions.values()].filter((s) => s.role !== "game-director" && s.status === "active");
-  const totalProgress = activeAgentList.length > 0
-    ? Math.round(activeAgentList.reduce((sum, s) => sum + s.progress, 0) / activeAgentList.length)
-    : 0;
+  const closeSession = useCallback((role: string) => {
+    // Delete from backend so it doesn't reappear on refresh
+    apiFetch(`/api/chat/sessions/${role}`, { method: "DELETE" }).catch((err) =>
+      console.error("Failed to delete session:", err)
+    );
+    setSessions((prev) => {
+      const next = new Map(prev);
+      next.delete(role);
+      return next;
+    });
+    // Switch back to producer if we closed the current session
+    setCurrentSession((current) => (current === role ? "producer" : current));
+  }, []);
+
+  // Derived state — memoized to avoid unnecessary re-renders
+  const currentMessages = useMemo(() => sessions.get(currentSession)?.messages ?? [], [sessions, currentSession]);
+  const totalProgress = useMemo(() => {
+    const active = [...sessions.values()].filter((s) => s.role !== "producer" && s.status === "active");
+    return active.length > 0
+      ? Math.round(active.reduce((sum, s) => sum + s.progress, 0) / active.length)
+      : 0;
+  }, [sessions]);
 
   return {
     sessions,
@@ -784,6 +953,9 @@ Agents: 3 active`,
     executeCommand,
     selectSession: setCurrentSession,
     approveAgent,
+    closeSession,
     initialized,
+    connected,
+    isLoading,
   };
 }

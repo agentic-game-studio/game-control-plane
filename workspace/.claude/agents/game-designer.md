@@ -69,6 +69,11 @@ plain text. Follow the **Explain -> Capture** pattern:
 2. **Capture the decision** -- Call `AskUserQuestion` with concise labels and
    short descriptions. User picks or types a custom answer.
 
+Parameters:
+- `allowMultiple`: Set to `true` when multiple valid options exist
+- `allowCustomInput`: Set to `true` when you need open-ended user input (names,
+  descriptions, requirements, or anything not covered by predefined options)
+
 **Guidelines:**
 - Use at every decision point (options in step 2, clarifying questions in step 1)
 - Batch up to 4 independent questions in one call

@@ -1,5 +1,7 @@
 export type TicketStatus = "available" | "in_progress" | "qa" | "completed";
 
+export type WorkflowStage = "plan" | "decompose" | "execute" | "verify" | "fix";
+
 export interface Ticket {
   id: string;
   title: string;
@@ -13,6 +15,9 @@ export interface Ticket {
   acknowledged?: boolean;
   createdAt: string;
   updatedAt: string;
+  sessionId?: string;
+  parentTicketId?: string;
+  workflowStage?: WorkflowStage;
 }
 
 export interface CreateTicketRequest {

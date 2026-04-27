@@ -252,10 +252,19 @@ export async function callZAI(request: LLMRequest): Promise<LLMResponse> {
   } as LLMResponse;
 }
 
+/** Progress callback for tool execution loop */
+export type ProgressCallback = (info: {
+  iteration: number;
+  totalTools: number;
+  currentTool?: string;
+  phase: "thinking" | "executing" | "responding";
+}) => void;
+
 /** Call LLM with tool execution loop */
 export async function callLLMWithTools(
   request: LLMRequest,
-  toolExecutor: (name: string, input: Record<string, unknown>) => Promise<string>
+  toolExecutor: (name: string, input: Record<string, unknown>) => Promise<string>,
+  onProgress?: ProgressCallback
 ): Promise<LLMResponse> {
   const config = loadConfig();
   const maxTools = config.MAX_TOOL_CALLS;
@@ -267,6 +276,7 @@ export async function callLLMWithTools(
   while (iteration < 200) {
     iteration++;
 
+    onProgress?.({ iteration, totalTools, phase: "thinking" });
     const response = await callZAI({ ...request, messages });
 
     if (!response.tool_calls || response.tool_calls.length === 0) {
@@ -287,6 +297,7 @@ export async function callLLMWithTools(
     // Execute tool calls
     const toolResults: string[] = [];
     for (const tc of response.tool_calls) {
+      onProgress?.({ iteration, totalTools, currentTool: tc.name, phase: "executing" });
       const result = await toolExecutor(tc.name, tc.input);
 
       // Special case: AskUserQuestion should stop the loop and return the question
@@ -446,8 +457,8 @@ export const GAME_STUDIO_TOOLS: LLMTool[] = [
             required: ["id", "label"],
           },
         },
-        allowMultiple: { type: "boolean", description: "Whether user can select multiple options" },
-        allowCustomInput: { type: "boolean", description: "Whether user can provide custom text input" },
+        allowMultiple: { type: "boolean", description: "Whether user can select multiple options (default: false for single-select)" },
+        allowCustomInput: { type: "boolean", description: "Set to true when you want the user to be able to type their own free-text answer in addition to selecting options. Use this when none of the predefined options fully capture the user's intent, or when you need open-ended input (e.g., 'What should we name this feature?', 'Describe your vision', 'Any other requirements?'). Default: false" },
       },
       required: ["questionId", "question", "options"],
     },
