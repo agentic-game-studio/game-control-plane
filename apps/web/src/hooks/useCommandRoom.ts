@@ -580,6 +580,16 @@ export function useCommandRoom() {
 
   const spawnAgent = useCallback(async (role: string, task?: string) => {
     const r = role.toLowerCase().trim();
+    const projectId = currentProjectId;
+
+    if (!projectId) {
+      addSessionMessage(producerSessionIdRef.current, {
+        type: "system",
+        sender: "SYSTEM",
+        content: "Cannot spawn agent: no project selected.",
+      });
+      return;
+    }
 
     // Create agent session locally
     setAllSessions((prev) => {
@@ -618,7 +628,7 @@ export function useCommandRoom() {
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ role: r, task: task ?? "What can you help me with?" }),
+          body: JSON.stringify({ role: r, task: task ?? "What can you help me with?", projectId }),
         }
       );
 
@@ -653,7 +663,7 @@ export function useCommandRoom() {
         content: `Failed to spawn ${r}: ${error instanceof Error ? error.message : "Unknown error"}`,
       });
     }
-  }, [addSessionMessage, threadTitle]);
+  }, [addSessionMessage, threadTitle, currentProjectId]);
 
   // Approve agent — send approval via API and wait for response
   const approveAgent = useCallback(async (role: string) => {
@@ -1036,5 +1046,6 @@ Agents: 3 active`,
     initialized,
     connected,
     isLoading,
+    producerSessionId,
   };
 }

@@ -30,13 +30,14 @@ function ChatPageInner() {
     initialized,
     connected,
     isLoading,
+    producerSessionId,
   } = useCommandRoom();
 
   const handleDecision = (action: string, sender: string) => {
     if (action === "approve") {
       approveAgent(sender);
     } else if (action === "navigate") {
-      selectSession(sender === "producer" ? "producer" : sender);
+      selectSession(sender === "producer" ? producerSessionId : sender);
     } else if (action === "close") {
       closeSession(sender);
     }
