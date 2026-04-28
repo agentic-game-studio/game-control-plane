@@ -1,6 +1,6 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
-import type { AgentRole, ChatSession, ChatMessage, CreateMessageRequest, CreateChatSessionRequest } from "@game-studio/types";
+import type { AgentRole, ChatSession, ChatMessage, CreateMessageRequest, CreateChatSessionRequest, DashboardData, Project } from "@game-studio/types";
 import type { LLMMessage } from "../llm/zai-client.js";
 import { broadcastEvent, readData, writeData } from "../services/data-store.js";
 import { invokeAgent, continueConversation } from "../services/llm-service.js";
@@ -168,6 +168,19 @@ async function saveChatState(): Promise<void> {
   await writeData(CHAT_STATE_FILE, chatStore);
 }
 
+async function getProjectById(projectId: string): Promise<Project | null> {
+  try {
+    const data = await readData<DashboardData>("dashboard.json");
+    return data.projects.find((p) => p.id === projectId) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function producerSessionId(projectId: string): string {
+  return `producer-${projectId}`;
+}
+
 interface ChatState {
   sessions: Record<string, ExtendedChatSession>;
   currentSessionId: string;
@@ -186,6 +199,76 @@ chatRouter.get("/sessions", (_req: Request, res: Response) => {
     spawnedAt: s.spawnedAt,
   }));
   res.json({ success: true, data: { sessions: sessionsData, currentSessionId: chatStore.currentSessionId } });
+});
+
+// GET /api/chat/sessions/producer/:projectId — Get-or-create producer session for a project
+chatRouter.get("/sessions/producer/:projectId", async (req: Request, res: Response) => {
+  const projectId = String(req.params.projectId);
+
+  if (!projectId) {
+    res.status(400).json({ success: false, error: "projectId is required" });
+    return;
+  }
+
+  const sessionId = producerSessionId(projectId);
+  const existing = chatStore.sessions[sessionId];
+  if (existing) {
+    res.json({ success: true, data: existing });
+    return;
+  }
+
+  const project = await getProjectById(projectId);
+  if (!project) {
+    res.status(404).json({ success: false, error: "Project not found" });
+    return;
+  }
+
+  const now = new Date().toISOString();
+  const newSession: ExtendedChatSession = {
+    id: sessionId,
+    role: "producer",
+    projectId,
+    messages: [
+      {
+        id: `msg-${crypto.randomUUID().slice(0, 8)}`,
+        type: "welcome",
+        sender: "Producer",
+        content: `Welcome to ${project.name}. I'm the Producer, orchestrating our studio's multi-agent game development pipeline for this project.`,
+        timestamp: now,
+        showActions: false,
+      },
+      {
+        id: `msg-${crypto.randomUUID().slice(0, 8)}`,
+        type: "system",
+        sender: "SYSTEM",
+        content: `Active project: ${project.name}${project.engine ? ` (${project.engine})` : ""}. Type a command to spawn an agent or request a task. Use /spawn <role> to bring in a specialist.`,
+        timestamp: now,
+        showActions: false,
+      },
+    ],
+    status: "active",
+    progress: 0,
+    spawnedAt: now,
+    conversationHistory: [],
+  };
+
+  chatStore.sessions[sessionId] = newSession;
+
+  broadcast({
+    type: "chat:session:created",
+    session: {
+      id: newSession.id,
+      role: newSession.role,
+      projectId: newSession.projectId,
+      messages: newSession.messages,
+      status: newSession.status,
+      progress: newSession.progress,
+      spawnedAt: newSession.spawnedAt,
+    },
+  } as WSEvent);
+
+  await saveChatState();
+  res.status(201).json({ success: true, data: newSession });
 });
 
 // GET /api/chat/sessions/:id — Get session by ID
@@ -243,6 +326,7 @@ chatRouter.post("/sessions", async (req: Request, res: Response) => {
     session: {
       id: newSession.id,
       role: newSession.role,
+      projectId: newSession.projectId,
       messages: newSession.messages,
       status: newSession.status,
       progress: newSession.progress,
@@ -258,8 +342,8 @@ chatRouter.post("/sessions", async (req: Request, res: Response) => {
 chatRouter.delete("/sessions/:id", async (req: Request, res: Response) => {
   const id = String(req.params.id);
 
-  // Prevent deleting producer
-  if (id === "producer") {
+  // Prevent deleting any producer session (legacy "producer" or per-project "producer-<id>")
+  if (id === "producer" || id.startsWith("producer-")) {
     res.status(400).json({ success: false, error: "Cannot delete producer session" });
     return;
   }
