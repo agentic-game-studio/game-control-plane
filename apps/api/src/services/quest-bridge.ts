@@ -87,11 +87,11 @@ const DEFAULT_BOARD: TicketsBoard = {
   ],
 };
 
-function getBoard(): TicketsBoard {
+async function getBoard(): Promise<TicketsBoard> {
   try {
-    return readData<TicketsBoard>(TICKETS_FILE);
+    return await readData<TicketsBoard>(TICKETS_FILE);
   } catch {
-    writeData(TICKETS_FILE, DEFAULT_BOARD);
+    await writeData(TICKETS_FILE, DEFAULT_BOARD);
     return DEFAULT_BOARD;
   }
 }
@@ -109,15 +109,15 @@ function findTicketInBoard(board: TicketsBoard, ticketId: string): { col: number
 
 // ─── Quest Bridge API ───
 
-export function createQuestTicket(
+export async function createQuestTicket(
   sessionId: string,
   title: string,
   agentRole: AgentRole,
   description: string,
   area: string,
   subarea: string,
-): Ticket {
-  const board = getBoard();
+): Promise<Ticket> {
+  const board = await getBoard();
   const now = new Date().toISOString();
   const ticket: Ticket = {
     id: `ticket-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -141,7 +141,7 @@ export function createQuestTicket(
     availableCol.tickets.push(ticket);
   }
 
-  writeData(TICKETS_FILE, board);
+  await writeData(TICKETS_FILE, board);
 
   broadcastEvent({ type: "ticket:created", ticket } as WSEvent);
 
@@ -161,8 +161,8 @@ export function createQuestTicket(
   return ticket;
 }
 
-export function moveQuestTicket(ticketId: string, status: TicketStatus, assignee?: string): void {
-  const board = getBoard();
+export async function moveQuestTicket(ticketId: string, status: TicketStatus, assignee?: string): Promise<void> {
+  const board = await getBoard();
   const found = findTicketInBoard(board, ticketId);
   if (!found) return;
 
@@ -181,7 +181,7 @@ export function moveQuestTicket(ticketId: string, status: TicketStatus, assignee
     // Add to target column
     targetCol.tickets.push(ticket);
 
-    writeData(TICKETS_FILE, board);
+    await writeData(TICKETS_FILE, board);
 
     broadcastEvent({
       type: "ticket:moved",
@@ -191,19 +191,19 @@ export function moveQuestTicket(ticketId: string, status: TicketStatus, assignee
     } as WSEvent);
   } else {
     // Same column, just update
-    writeData(TICKETS_FILE, board);
+    await writeData(TICKETS_FILE, board);
     broadcastEvent({ type: "ticket:updated", ticket } as WSEvent);
   }
 }
 
-export function createFixTicket(
+export async function createFixTicket(
   sessionId: string,
   parentTicketId: string,
   title: string,
   agentRole: AgentRole,
   description: string,
-): Ticket {
-  const ticket = createQuestTicket(sessionId, title, agentRole, description, "WORKFLOW", "fix");
+): Promise<Ticket> {
+  const ticket = await createQuestTicket(sessionId, title, agentRole, description, "WORKFLOW", "fix");
   ticket.parentTicketId = parentTicketId;
   return ticket;
 }

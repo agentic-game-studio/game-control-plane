@@ -112,7 +112,7 @@ async function runTeamWorkflow(
   // Create Quest tickets for each team member upfront
   const teamTickets: Map<string, string> = new Map(); // agentRole -> ticketId
   for (const member of teamMembers) {
-    const ticket = createQuestTicket(
+    const ticket = await createQuestTicket(
       sessionId,
       `${team.name.replace("team-", "")}: ${member.replace(/-/g, " ")} task`,
       member as AgentRole,

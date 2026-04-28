@@ -1,6 +1,6 @@
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { broadcast } from "./websocket.js";
 import type { WSEvent } from "@game-studio/types";
 
@@ -8,34 +8,29 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const DATA_DIR = path.join(__dirname, "../data");
 
-function ensureDataDir() {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  }
+async function ensureDataDir() {
+  await fs.mkdir(DATA_DIR, { recursive: true });
 }
 
-export function readData<T>(filename: string): T {
+export async function readData<T>(filename: string): Promise<T> {
   const filePath = path.join(DATA_DIR, filename);
-  if (!fs.existsSync(filePath)) {
-    throw new Error(`Data file not found: ${filename}`);
-  }
-  const content = fs.readFileSync(filePath, "utf-8");
+  const content = await fs.readFile(filePath, "utf-8");
   return JSON.parse(content) as T;
 }
 
-export function writeData<T>(filename: string, data: T): void {
-  ensureDataDir();
+export async function writeData<T>(filename: string, data: T): Promise<void> {
+  await ensureDataDir();
   const filePath = path.join(DATA_DIR, filename);
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
+  await fs.writeFile(filePath, JSON.stringify(data, null, 2), "utf-8");
 }
 
-export function updateData<T>(
+export async function updateData<T>(
   filename: string,
   updater: (data: T) => T
-): T {
-  const data = readData<T>(filename);
+): Promise<T> {
+  const data = await readData<T>(filename);
   const updated = updater(data);
-  writeData(filename, updated);
+  await writeData(filename, updated);
   return updated;
 }
 

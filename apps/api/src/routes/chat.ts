@@ -21,12 +21,6 @@ interface QuestionData {
   allowCustomInput: boolean;
 }
 
-function parseQuestionFromContent(content: string): QuestionData | null {
-  // Now the question data is in toolCalls, not content
-  // This function is kept for backwards compatibility but will rarely match
-  return null;
-}
-
 function parseQuestionFromToolResult(toolCalls?: { name: string; input: Record<string, unknown> }[]): QuestionData | null {
   if (!toolCalls) return null;
   for (const tc of toolCalls) {
@@ -116,9 +110,16 @@ interface ExtendedChatSession extends ChatSession {
 
 const CHAT_STATE_FILE = "chat-state.json";
 
-function loadChatState(): ChatState {
+async function loadChatState(): Promise<ChatState> {
   try {
-    return readData<ChatState>(CHAT_STATE_FILE);
+    const state = await readData<ChatState>(CHAT_STATE_FILE);
+    // R5: Filter out stale progress messages from crashed sessions
+    for (const session of Object.values(state.sessions)) {
+      (session as ExtendedChatSession).messages = (session as ExtendedChatSession).messages.filter(
+        (m) => m.type !== "progress"
+      );
+    }
+    return state;
   } catch {
     // File doesn't exist yet, return default with producer session
     return {
@@ -159,10 +160,11 @@ function loadChatState(): ChatState {
   }
 }
 
-const chatStore: ChatState = loadChatState();
+let chatStore: ChatState;
+loadChatState().then((state) => { chatStore = state; });
 
-function saveChatState(): void {
-  writeData(CHAT_STATE_FILE, chatStore);
+async function saveChatState(): Promise<void> {
+  await writeData(CHAT_STATE_FILE, chatStore);
 }
 
 interface ChatState {
@@ -200,7 +202,7 @@ chatRouter.get("/sessions/:id", (req: Request, res: Response) => {
 chatRouter.post("/sessions", async (req: Request, res: Response) => {
   const body = req.body as CreateChatSessionRequest;
 
-  const sessionId = `session-${Date.now()}`;
+  const sessionId = `session-${crypto.randomUUID().slice(0, 8)}`;
   const now = new Date().toISOString();
   const role = (body.role ?? "agent") as AgentRole;
 
@@ -218,7 +220,7 @@ chatRouter.post("/sessions", async (req: Request, res: Response) => {
     role,
     messages: [
       {
-        id: `msg-${Date.now()}-1`,
+        id: `msg-${crypto.randomUUID().slice(0, 8)}`,
         type: "system",
         sender: "SYSTEM",
         content: welcomeContent,
@@ -246,12 +248,12 @@ chatRouter.post("/sessions", async (req: Request, res: Response) => {
     },
   } as WSEvent);
 
-  saveChatState();
+  await saveChatState();
   res.status(201).json({ success: true, data: newSession });
 });
 
 // DELETE /api/chat/sessions/:id — Delete session
-chatRouter.delete("/sessions/:id", (req: Request, res: Response) => {
+chatRouter.delete("/sessions/:id", async (req: Request, res: Response) => {
   const id = String(req.params.id);
 
   // Prevent deleting producer
@@ -273,12 +275,12 @@ chatRouter.delete("/sessions/:id", (req: Request, res: Response) => {
     sessionId: id,
   } as WSEvent);
 
-  saveChatState();
+  await saveChatState();
   res.json({ success: true });
 });
 
 // POST /api/chat/sessions/:id/clear — Clear all messages in a session
-chatRouter.post("/sessions/:id/clear", (req: Request, res: Response) => {
+chatRouter.post("/sessions/:id/clear", async (req: Request, res: Response) => {
   const id = String(req.params.id);
 
   const session = chatStore.sessions[id];
@@ -295,7 +297,7 @@ chatRouter.post("/sessions/:id/clear", (req: Request, res: Response) => {
   if (id === "producer") {
     session.messages = [
       {
-        id: `msg-welcome-${Date.now()}`,
+        id: `msg-welcome-${crypto.randomUUID().slice(0, 8)}`,
         type: "welcome" as const,
         sender: "Producer",
         content:
@@ -304,7 +306,7 @@ chatRouter.post("/sessions/:id/clear", (req: Request, res: Response) => {
         showActions: false,
       },
       {
-        id: `msg-prompt-${Date.now()}`,
+        id: `msg-prompt-${crypto.randomUUID().slice(0, 8)}`,
         type: "system" as const,
         sender: "SYSTEM",
         content:
@@ -321,7 +323,7 @@ chatRouter.post("/sessions/:id/clear", (req: Request, res: Response) => {
     type: "chat:message",
     sessionId: id,
     message: {
-      id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      id: `msg-${crypto.randomUUID().slice(0, 8)}`,
       type: "system" as const,
       sender: "SYSTEM",
       content: "Session cleared.",
@@ -330,7 +332,7 @@ chatRouter.post("/sessions/:id/clear", (req: Request, res: Response) => {
     },
   } as WSEvent);
 
-  saveChatState();
+  await saveChatState();
   res.json({ success: true });
 });
 
@@ -350,7 +352,7 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
     return;
   }
 
-  const userMessageId = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const userMessageId = `msg-${crypto.randomUUID().slice(0, 8)}`;
   const userMessage: ChatMessage = {
     id: userMessageId,
     type: body.type ?? "user",
@@ -371,7 +373,7 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
     content: body.content,
   });
 
-  saveChatState();
+  await saveChatState();
 
   // Note: We do NOT broadcast the user message here because the frontend
   // already adds it optimistically. Broadcasting would create a duplicate.
@@ -391,7 +393,7 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
   const agentRole = session.role as AgentRole;
 
   // Add thinking/progress message
-  const progressMsgId = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const progressMsgId = `msg-${crypto.randomUUID().slice(0, 8)}`;
   const progressMessage: ChatMessage = {
     id: progressMsgId,
     type: "progress",
@@ -408,7 +410,10 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
     message: progressMessage,
   } as WSEvent);
 
-  saveChatState();
+  await saveChatState();
+
+  // R1: Declare heartbeat outside try so catch block can clear it
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
 
   try {
     // Set up progress callback for tool execution updates
@@ -416,7 +421,7 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
 
     // Heartbeat: broadcast periodic progress updates during long API waits
     let heartbeatCount = 0;
-    const heartbeat = setInterval(() => {
+    heartbeat = setInterval(() => {
       heartbeatCount++;
       const elapsed = heartbeatCount * 2;
       // Smooth progress: start at 10%, climb by 3% each tick, cap at 85%
@@ -480,7 +485,7 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
 
     // Create assistant message
     const assistantMessage: ChatMessage = {
-      id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      id: `msg-${crypto.randomUUID().slice(0, 8)}`,
       type: messageType,
       sender: agentRole,
       // For questions, use the question text as content (not the raw tool result)
@@ -512,10 +517,13 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
       message: assistantMessage,
     } as WSEvent);
 
-    saveChatState();
+    await saveChatState();
     res.status(201).json({ success: true, data: { userMessage, assistantMessage } });
   } catch (err: unknown) {
     const error = err as Error;
+
+    // R1: Clear heartbeat on error to prevent permanent timer leak
+    clearInterval(heartbeat);
 
     // Remove the progress placeholder before adding the error message
     const progressIndex = session.messages.findIndex((m) => m.id === progressMsgId);
@@ -524,7 +532,7 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
     }
 
     const errorMessage: ChatMessage = {
-      id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      id: `msg-${crypto.randomUUID().slice(0, 8)}`,
       type: "system",
       sender: "SYSTEM",
       content: `Error: ${error.message}`,
@@ -539,8 +547,8 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
       message: errorMessage,
     } as WSEvent);
 
-    saveChatState();
-    res.status(201).json({ success: true, data: { userMessage, errorMessage } });
+    await saveChatState();
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
@@ -553,10 +561,16 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
     return;
   }
 
-  const invocationId = `invoke-${Date.now()}`;
+  const invocationId = `invoke-${crypto.randomUUID().slice(0, 8)}`;
   const sessionId = role.toLowerCase().replace(/\s+/g, "-");
   const now = new Date().toISOString();
   const agentRole = role as AgentRole;
+
+  // R2: Return 409 if session ID already exists
+  if (chatStore.sessions[sessionId]) {
+    res.status(409).json({ success: false, error: `Session ${sessionId} already exists` });
+    return;
+  }
 
   // Create session for the spawned agent
   const newSession: ExtendedChatSession = {
@@ -564,7 +578,7 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
     role: agentRole,
     messages: [
       {
-        id: `msg-${Date.now()}-1`,
+        id: `msg-${crypto.randomUUID().slice(0, 8)}`,
         type: "system",
         sender: "SYSTEM",
         content: `${role.toUpperCase()} session initialized.`,
@@ -599,12 +613,12 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
     },
   } as WSEvent);
 
-  saveChatState();
+  await saveChatState();
 
   // If a task is provided, execute it immediately
   if (task) {
     // Create a progress message for this invocation
-    const progressMsgId = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const progressMsgId = `msg-${crypto.randomUUID().slice(0, 8)}`;
     newSession.messages.push({
       id: progressMsgId,
       type: "progress",
@@ -620,16 +634,16 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
       message: newSession.messages[newSession.messages.length - 1],
     } as WSEvent);
 
-    saveChatState();
+    await saveChatState();
 
     const onProgress = makeProgressCallback(sessionId, progressMsgId);
 
     // Quest Bridge: create ticket for spawned agent task
     let ticketId: string | undefined;
     if (task) {
-      const ticket = createQuestTicket(sessionId, task.slice(0, 80), agentRole, task, "AGENT", "spawn");
+      const ticket = await createQuestTicket(sessionId, task.slice(0, 80), agentRole, task, "AGENT", "spawn");
       ticketId = ticket.id;
-      moveQuestTicket(ticketId, "in_progress", agentRole);
+      await moveQuestTicket(ticketId, "in_progress", agentRole);
     }
 
     try {
@@ -641,7 +655,7 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
       if (idx !== -1) newSession.messages.splice(idx, 1);
 
       const responseMessage: ChatMessage = {
-        id: `msg-${Date.now()}`,
+        id: `msg-${crypto.randomUUID().slice(0, 8)}`,
         type: "agent",
         sender: role,
         content: result.content,
@@ -673,7 +687,7 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
 
       // Quest Bridge: move ticket to completed
       if (ticketId) {
-        moveQuestTicket(ticketId, "completed", agentRole);
+        await moveQuestTicket(ticketId, "completed", agentRole);
       }
     } catch (err: unknown) {
       const error = err as Error;
@@ -687,12 +701,12 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
 
       // Quest Bridge: move ticket back to available on failure
       if (ticketId) {
-        moveQuestTicket(ticketId, "available", agentRole);
+        await moveQuestTicket(ticketId, "available", agentRole);
       }
     }
   }
 
-  saveChatState();
+  await saveChatState();
   res.json({
     success: true,
     data: { invocationId, role, sessionId, status: task ? "completed" : "ready" },
@@ -715,7 +729,7 @@ chatRouter.post("/approve", (req: Request, res: Response) => {
 chatRouter.post("/diff", (req: Request, res: Response) => {
   const { sessionId, diffBlocks } = req.body as { sessionId?: string; diffBlocks?: unknown[] };
 
-  const diffId = `diff-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const diffId = `diff-${crypto.randomUUID().slice(0, 8)}`;
 
   broadcast({
     type: "chat:message",

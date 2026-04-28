@@ -49,22 +49,22 @@ function normalizeDashboardData(data: DashboardData): DashboardData {
 export const dashboardRouter: Router = Router();
 
 // GET /api/dashboard - Get all dashboard data
-dashboardRouter.get("/", (_req: Request, res: Response) => {
+dashboardRouter.get("/", async (_req: Request, res: Response) => {
   try {
-    const data = readData<DashboardData>("dashboard.json");
+    const data = await readData<DashboardData>("dashboard.json");
     const normalized = normalizeDashboardData(data);
     res.json({ success: true, data: normalized });
   } catch {
     // Initialize with default data if file doesn't exist
-    writeData("dashboard.json", DEFAULT_DATA);
+    await writeData("dashboard.json", DEFAULT_DATA);
     res.json({ success: true, data: DEFAULT_DATA });
   }
 });
 
 // GET /api/dashboard/projects - List all projects
-dashboardRouter.get("/projects", (_req: Request, res: Response) => {
+dashboardRouter.get("/projects", async (_req: Request, res: Response) => {
   try {
-    const data = readData<DashboardData>("dashboard.json");
+    const data = await readData<DashboardData>("dashboard.json");
     const normalized = normalizeDashboardData(data);
     res.json({ success: true, data: normalized.projects });
   } catch {
@@ -73,10 +73,10 @@ dashboardRouter.get("/projects", (_req: Request, res: Response) => {
 });
 
 // GET /api/dashboard/projects/:id - Get project by ID
-dashboardRouter.get("/projects/:id", (req: Request, res: Response) => {
+dashboardRouter.get("/projects/:id", async (req: Request, res: Response) => {
   const { id } = req.params;
   try {
-    const data = readData<DashboardData>("dashboard.json");
+    const data = await readData<DashboardData>("dashboard.json");
     const normalized = normalizeDashboardData(data);
     const project = normalized.projects.find((p) => p.id === id);
     if (!project) {
@@ -90,7 +90,7 @@ dashboardRouter.get("/projects/:id", (req: Request, res: Response) => {
 });
 
 // POST /api/dashboard/projects - Create new project
-dashboardRouter.post("/projects", (req: Request, res: Response) => {
+dashboardRouter.post("/projects", async (req: Request, res: Response) => {
   const body = req.body as CreateProjectRequest;
 
   if (!body.name) {
@@ -99,7 +99,7 @@ dashboardRouter.post("/projects", (req: Request, res: Response) => {
   }
 
   try {
-    const data = readData<DashboardData>("dashboard.json");
+    const data = await readData<DashboardData>("dashboard.json");
     const now = new Date().toISOString();
     const newProject = normalizeProject({
       id: `proj-${Date.now()}`,
@@ -115,7 +115,7 @@ dashboardRouter.post("/projects", (req: Request, res: Response) => {
     });
 
     data.projects.push(newProject);
-    writeData("dashboard.json", data);
+    await writeData("dashboard.json", data);
 
     // Broadcast event
     broadcastEvent({
@@ -130,12 +130,12 @@ dashboardRouter.post("/projects", (req: Request, res: Response) => {
 });
 
 // PATCH /api/dashboard/projects/:id - Update project
-dashboardRouter.patch("/projects/:id", (req: Request, res: Response) => {
+dashboardRouter.patch("/projects/:id", async (req: Request, res: Response) => {
   const { id } = req.params;
   const updates = req.body as UpdateProjectRequest;
 
   try {
-    const data = readData<DashboardData>("dashboard.json");
+    const data = await readData<DashboardData>("dashboard.json");
     const projectIndex = data.projects.findIndex((p) => p.id === id);
 
     if (projectIndex === -1) {
@@ -152,7 +152,7 @@ dashboardRouter.patch("/projects/:id", (req: Request, res: Response) => {
     });
 
     data.projects[projectIndex] = updatedProject;
-    writeData("dashboard.json", data);
+    await writeData("dashboard.json", data);
 
     // Broadcast event
     broadcastEvent({
@@ -167,11 +167,11 @@ dashboardRouter.patch("/projects/:id", (req: Request, res: Response) => {
 });
 
 // DELETE /api/dashboard/projects/:id - Delete project
-dashboardRouter.delete("/projects/:id", (req: Request, res: Response) => {
+dashboardRouter.delete("/projects/:id", async (req: Request, res: Response) => {
   const { id } = req.params;
 
   try {
-    const data = readData<DashboardData>("dashboard.json");
+    const data = await readData<DashboardData>("dashboard.json");
     const projectIndex = data.projects.findIndex((p) => p.id === id);
 
     if (projectIndex === -1) {
@@ -180,7 +180,7 @@ dashboardRouter.delete("/projects/:id", (req: Request, res: Response) => {
     }
 
     data.projects.splice(projectIndex, 1);
-    writeData("dashboard.json", data);
+    await writeData("dashboard.json", data);
 
     // Broadcast event
     broadcastEvent({

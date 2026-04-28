@@ -25,22 +25,22 @@ const DEFAULT_ASSETS: AssetsData = {
 export const assetsRouter: Router = Router();
 
 // GET /api/assets - Get all assets
-assetsRouter.get("/", (_req: Request, res: Response) => {
+assetsRouter.get("/", async (_req: Request, res: Response) => {
   try {
-    const data = readData<AssetsData>("assets.json");
+    const data = await readData<AssetsData>("assets.json");
     res.json({ success: true, data });
   } catch {
     // Initialize with default data if file doesn't exist
-    writeData("assets.json", DEFAULT_ASSETS);
+    await writeData("assets.json", DEFAULT_ASSETS);
     res.json({ success: true, data: DEFAULT_ASSETS });
   }
 });
 
 // GET /api/assets/:id - Get asset by ID
-assetsRouter.get("/:id", (req: Request, res: Response) => {
+assetsRouter.get("/:id", async (req: Request, res: Response) => {
   const { id } = req.params;
   try {
-    const data = readData<AssetsData>("assets.json");
+    const data = await readData<AssetsData>("assets.json");
     const asset = data.assets.find((a) => a.id === id);
     if (!asset) {
       res.status(404).json({ success: false, error: "Asset not found" });
@@ -53,7 +53,7 @@ assetsRouter.get("/:id", (req: Request, res: Response) => {
 });
 
 // POST /api/assets - Create new asset
-assetsRouter.post("/", (req: Request, res: Response) => {
+assetsRouter.post("/", async (req: Request, res: Response) => {
   const body = req.body as CreateAssetRequest;
 
   if (!body.filename || !body.type || !body.category) {
@@ -65,7 +65,7 @@ assetsRouter.post("/", (req: Request, res: Response) => {
   }
 
   try {
-    const data = readData<AssetsData>("assets.json");
+    const data = await readData<AssetsData>("assets.json");
     const now = new Date().toISOString();
 
     const newAsset: GameAsset = {
@@ -80,7 +80,7 @@ assetsRouter.post("/", (req: Request, res: Response) => {
     };
 
     data.assets.push(newAsset);
-    writeData("assets.json", data);
+    await writeData("assets.json", data);
 
     // Broadcast event
     broadcastEvent({
@@ -95,12 +95,12 @@ assetsRouter.post("/", (req: Request, res: Response) => {
 });
 
 // PATCH /api/assets/:id - Update asset
-assetsRouter.patch("/:id", (req: Request, res: Response) => {
+assetsRouter.patch("/:id", async (req: Request, res: Response) => {
   const { id } = req.params;
   const updates = req.body as UpdateAssetRequest;
 
   try {
-    const data = readData<AssetsData>("assets.json");
+    const data = await readData<AssetsData>("assets.json");
     const assetIndex = data.assets.findIndex((a) => a.id === id);
 
     if (assetIndex === -1) {
@@ -117,7 +117,7 @@ assetsRouter.patch("/:id", (req: Request, res: Response) => {
     };
 
     data.assets[assetIndex] = updatedAsset;
-    writeData("assets.json", data);
+    await writeData("assets.json", data);
 
     // Broadcast event
     broadcastEvent({
@@ -132,11 +132,11 @@ assetsRouter.patch("/:id", (req: Request, res: Response) => {
 });
 
 // DELETE /api/assets/:id - Delete asset
-assetsRouter.delete("/:id", (req: Request, res: Response) => {
+assetsRouter.delete("/:id", async (req: Request, res: Response) => {
   const { id } = req.params;
 
   try {
-    const data = readData<AssetsData>("assets.json");
+    const data = await readData<AssetsData>("assets.json");
     const assetIndex = data.assets.findIndex((a) => a.id === id);
 
     if (assetIndex === -1) {
@@ -145,7 +145,7 @@ assetsRouter.delete("/:id", (req: Request, res: Response) => {
     }
 
     data.assets.splice(assetIndex, 1);
-    writeData("assets.json", data);
+    await writeData("assets.json", data);
 
     // Broadcast event
     broadcastEvent({
@@ -160,18 +160,18 @@ assetsRouter.delete("/:id", (req: Request, res: Response) => {
 });
 
 // PATCH /api/assets/art-bible - Update art bible config
-assetsRouter.patch("/art-bible", (req: Request, res: Response) => {
+assetsRouter.patch("/art-bible", async (req: Request, res: Response) => {
   const updates = req.body as Partial<ArtBibleConfig>;
 
   try {
-    const data = readData<AssetsData>("assets.json");
+    const data = await readData<AssetsData>("assets.json");
     const updatedArtBible: ArtBibleConfig = {
       ...data.artBible,
       ...updates,
     };
 
     data.artBible = updatedArtBible;
-    writeData("assets.json", data);
+    await writeData("assets.json", data);
 
     res.json({ success: true, data: { artBible: updatedArtBible } });
   } catch (error) {

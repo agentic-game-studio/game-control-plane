@@ -4,6 +4,7 @@ import { useEffect, useRef, useMemo, memo, useCallback } from "react";
 import type { ChatMessage, AgentSession } from "@/hooks/useCommandRoom";
 import { getAgentIcon } from "@/lib/agent-icons";
 import { renderMarkdown } from "@/lib/markdown";
+import { formatTime } from "@/lib/format-time";
 import DiffView from "./DiffView";
 import QuestionMessage from "./QuestionMessage";
 import PlanMessage from "./PlanMessage";
@@ -20,19 +21,6 @@ interface ChatThreadProps {
   onNavigate?: (targetSession: string) => void;
   onAnswer?: (questionId: string, selected: string[], customInput?: string) => void;
   onPlanAction?: (phaseId: string, action: "execute" | "execute-all") => void;
-}
-
-function formatTime(ts: string): string {
-  try {
-    const d = new Date(ts);
-    const mo = String(d.getMonth() + 1).padStart(2, "0");
-    const day = String(d.getDate()).padStart(2, "0");
-    const hr = String(d.getHours()).padStart(2, "0");
-    const mn = String(d.getMinutes()).padStart(2, "0");
-    return `${mo}/${day} ${hr}:${mn}`;
-  } catch {
-    return ts;
-  }
 }
 
 const TOOL_ICONS: Record<string, string> = {

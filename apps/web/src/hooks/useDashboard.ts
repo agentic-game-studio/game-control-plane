@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "./useWebSocket";
 import {
@@ -16,6 +16,7 @@ export function useDashboard() {
   const [data, setData] = useState<DashboardData>(DEFAULT_DATA);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const fetchDashboard = useCallback(async () => {
     try {
@@ -42,13 +43,22 @@ export function useDashboard() {
         event.type === "project:updated" ||
         event.type === "project:deleted"
       ) {
-        fetchDashboard();
+        if (debounceRef.current) clearTimeout(debounceRef.current);
+        debounceRef.current = setTimeout(() => {
+          fetchDashboard();
+        }, 300);
       }
     },
     [fetchDashboard]
   );
 
   useWebSocket(onWSEvent);
+
+  useEffect(() => {
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, []);
 
   const createProject = useCallback(
     async (request: CreateProjectRequest) => {

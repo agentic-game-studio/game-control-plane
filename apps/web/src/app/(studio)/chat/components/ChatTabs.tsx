@@ -1,5 +1,6 @@
 "use client";
 
+import { useMemo } from "react";
 import { getAgentIcon } from "@/lib/agent-icons";
 import type { AgentSession } from "@/hooks/useCommandRoom";
 
@@ -11,7 +12,7 @@ interface ChatTabsProps {
 }
 
 export default function ChatTabs({ sessions, currentSession, onSelectSession, onCloseSession }: ChatTabsProps) {
-  const sessionList = [...sessions.values()];
+  const sessionList = useMemo(() => [...sessions.values()], [sessions]);
   const gdSession = sessionList.find((s) => s.role === "producer");
   const agentSessions = sessionList.filter((s) => s.role !== "producer");
 

@@ -2,24 +2,12 @@
 
 import type { ChatMessage } from "@/hooks/useCommandRoom";
 import { renderMarkdown } from "@/lib/markdown";
+import { formatTime } from "@/lib/format-time";
 
 interface PlanMessageProps {
   msg: ChatMessage;
   onPlanAction: (phaseId: string, action: "execute" | "execute-all") => void;
   sender?: string;
-}
-
-function formatTime(ts: string): string {
-  try {
-    const d = new Date(ts);
-    const mo = String(d.getMonth() + 1).padStart(2, "0");
-    const day = String(d.getDate()).padStart(2, "0");
-    const hr = String(d.getHours()).padStart(2, "0");
-    const mn = String(d.getMinutes()).padStart(2, "0");
-    return `${mo}/${day} ${hr}:${mn}`;
-  } catch {
-    return ts;
-  }
 }
 
 export default function PlanMessage({ msg, onPlanAction, sender }: PlanMessageProps) {

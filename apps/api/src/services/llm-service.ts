@@ -29,6 +29,16 @@ function logEntry(sessionId: string, level: string, message: string, agent?: Age
   } as WSEvent);
 }
 
+/** Validate that a resolved path stays within the workspace boundary (S1) */
+function safePath(inputPath: string, baseDir: string): string {
+  const resolved = path.resolve(inputPath);
+  const base = path.resolve(baseDir);
+  if (!resolved.startsWith(base + path.sep) && resolved !== base) {
+    throw new Error(`Path outside workspace is not allowed: ${inputPath}`);
+  }
+  return resolved;
+}
+
 export interface InvokeResult {
   content: string;
   toolCalls?: { name: string; input: Record<string, unknown> }[];
@@ -53,24 +63,30 @@ async function executeTool(
   name: string,
   input: Record<string, unknown>,
   sessionId: string,
-  agentRole: AgentRole
+  agentRole: AgentRole,
+  _depth = 0,
 ): Promise<string> {
   const workspaceDir = loadConfig().WORKSPACE_DIR;
 
   try {
     switch (name) {
       case "Read": {
-        const filePath = input.file_path as string;
-        if (!filePath) return "Error: file_path is required";
+        const rawPath = input.file_path as string;
+        if (!rawPath) return "Error: file_path is required";
+        const filePath = safePath(rawPath, workspaceDir);
+        // Q5: Reject files larger than 1MB
+        const stat = await fs.stat(filePath);
+        if (stat.size > 1_048_576) return `Error: File too large (${Math.round(stat.size / 1024)}KB). Maximum is 1MB.`;
         const content = await fs.readFile(filePath, "utf-8");
         logEntry(sessionId, "info", `[${agentRole}] Read: ${filePath}`, agentRole);
         return content;
       }
 
       case "Write": {
-        const filePath = input.file_path as string;
+        const rawPath = input.file_path as string;
         const content = input.content as string;
-        if (!filePath || content === undefined) return "Error: file_path and content are required";
+        if (!rawPath || content === undefined) return "Error: file_path and content are required";
+        const filePath = safePath(rawPath, workspaceDir);
         await fs.mkdir(path.dirname(filePath), { recursive: true });
         await fs.writeFile(filePath, content, "utf-8");
         logEntry(sessionId, "info", `[${agentRole}] Wrote: ${filePath}`, agentRole);
@@ -78,12 +94,13 @@ async function executeTool(
       }
 
       case "Edit": {
-        const filePath = input.file_path as string;
+        const rawPath = input.file_path as string;
         const oldString = input.old_string as string;
         const newString = input.new_string as string;
-        if (!filePath || !oldString || newString === undefined) {
+        if (!rawPath || !oldString || newString === undefined) {
           return "Error: file_path, old_string, and new_string are required";
         }
+        const filePath = safePath(rawPath, workspaceDir);
         const fileContent = await fs.readFile(filePath, "utf-8");
         if (!fileContent.includes(oldString)) {
           return `Error: old_string not found in file. File content preview:\n${fileContent.slice(0, 500)}`;
@@ -101,8 +118,10 @@ async function executeTool(
 
         // Simple glob implementation
         const results = await globFiles(searchPath, pattern);
-        return results.length > 0
-          ? `Found ${results.length} files:\n${results.join("\n")}`
+        // Q6: Cap results at 200
+        const capped = results.slice(0, 200);
+        return capped.length > 0
+          ? `Found ${results.length > 200 ? `${results.length} (showing first 200)` : results.length} files:\n${capped.join("\n")}`
           : "No files found";
       }
 
@@ -113,14 +132,31 @@ async function executeTool(
         const context = (input.context as number) ?? 0;
         if (!pattern) return "Error: pattern is required";
 
+        // S3: ReDoS prevention — cap pattern length, reject nested quantifiers
+        if (pattern.length > 200) return "Error: Pattern too long (max 200 characters)";
+        if (/\([^)]*[*+][^)]*\)[*+]/.test(pattern)) {
+          return "Error: Pattern contains nested quantifiers which may cause performance issues";
+        }
+
         const results = await grepFiles(searchPath, pattern, globFilter, context);
-        return results.length > 0 ? results.join("\n\n") : "No matches found";
+        // Q6: Cap results at 100 matches
+        const capped = results.slice(0, 100);
+        return capped.length > 0
+          ? (results.length > 100 ? `[Showing first 100 of ${results.length} matches]\n\n` : "") + capped.join("\n\n")
+          : "No matches found";
       }
 
       case "Bash": {
         const command = input.command as string;
-        const timeout = (input.timeout as number) ?? 60000;
         if (!command) return "Error: command is required";
+
+        // S2: Sandbox — reject command chaining/pipe patterns to prevent injection
+        if (/[|`]|&&|;|\$\(|\$\{|\n/.test(command)) {
+          return `Error: Command chaining/pipe not allowed (|, &&, ;, $(), backticks). Run commands individually.`;
+        }
+
+        // Cap timeout at server-side maximum (120s)
+        const timeout = Math.min((input.timeout as number) ?? 60000, 120_000);
 
         const { exec } = await import("node:child_process");
         const { promisify } = await import("node:util");
@@ -146,10 +182,13 @@ async function executeTool(
         const context = input.context as string | undefined;
         if (!agent || !task) return "Error: agent and task are required";
 
+        // R4: Limit subagent recursion depth
+        if (_depth >= 3) return "Error: Maximum subagent recursion depth (3) exceeded. Simplify the task hierarchy.";
+
         logEntry(sessionId, "info", `[${agentRole}] Spawning subagent: ${agent}`, agentRole);
 
         // Quest Bridge: always create a ticket for subagent tasks
-        const ticket = createQuestTicket(
+        const ticket = await createQuestTicket(
           sessionId,
           task.slice(0, 80),
           agent,
@@ -158,13 +197,13 @@ async function executeTool(
           agentRole,
         );
         const ticketId = ticket.id;
-        moveQuestTicket(ticketId, "in_progress", agent);
+        await moveQuestTicket(ticketId, "in_progress", agent);
 
         // Recursively invoke subagent (don't broadcast events — subagent runs inline within parent session)
-        const subResult = await invokeAgent(agent, task, sessionId, context, undefined, undefined, false);
+        const subResult = await invokeAgent(agent, task, sessionId, context, undefined, undefined, false, _depth + 1);
 
         // Quest Bridge: move ticket to QA
-        moveQuestTicket(ticketId, "qa", agent);
+        await moveQuestTicket(ticketId, "qa", agent);
 
         return `Subagent ${agent} output:\n${subResult.content}`;
       }
@@ -390,8 +429,9 @@ export async function invokeAgent(
   conversationHistory?: LLMMessage[],
   onProgress?: ProgressCallback,
   broadcastEvents = true,
+  _depth = 0,
 ): Promise<InvokeResult> {
-  const invocationId = `invoke-${Date.now()}`;
+  const invocationId = `invoke-${crypto.randomUUID().slice(0, 8)}`;
 
   if (broadcastEvents) {
     broadcast({
@@ -439,7 +479,7 @@ export async function invokeAgent(
         systemPrompt,
         model,
       },
-      (name, input) => executeTool(name, input, sessionId, agentRole),
+      (name, input) => executeTool(name, input, sessionId, agentRole, _depth),
       onProgress
     );
 
@@ -480,7 +520,8 @@ export async function continueConversation(
   agentRole: AgentRole,
   messages: LLMMessage[],
   sessionId: string,
-  onProgress?: ProgressCallback
+  onProgress?: ProgressCallback,
+  _depth = 0,
 ): Promise<InvokeResult> {
   try {
     // Load agent's system prompt and model tier from MD file
@@ -502,7 +543,7 @@ export async function continueConversation(
         systemPrompt,
         model,
       },
-      (name, input) => executeTool(name, input, sessionId, agentRole),
+      (name, input) => executeTool(name, input, sessionId, agentRole, _depth),
       onProgress
     );
 
