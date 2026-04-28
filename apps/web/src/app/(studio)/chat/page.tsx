@@ -106,9 +106,10 @@ function ChatPageInner() {
           onNavigate={handleNavigate}
           onAnswer={handleAnswer}
           onPlanAction={handlePlanAction}
+          onSamplePrompt={(prompt) => executeCommand(prompt)}
         />
       </div>
-      {currentSession === "producer" ? (
+      {currentSession === producerSessionId ? (
         <CommandInput onSend={executeCommand} isLoading={isLoading} />
       ) : (
         <AgentStatusBar session={sessions.get(currentSession)} onClose={() => closeSession(currentSession)} />
