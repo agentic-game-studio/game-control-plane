@@ -104,6 +104,7 @@ export interface CreateMessageRequest {
 export interface ChatSession {
   id: string;
   role: string;
+  projectId: string | null;
   messages: ChatMessage[];
   status: ChatSessionStatus;
   progress: number;
@@ -112,6 +113,7 @@ export interface ChatSession {
 
 export interface CreateChatSessionRequest {
   role?: string;
+  projectId?: string | null;
 }
 
 export interface ChatState {

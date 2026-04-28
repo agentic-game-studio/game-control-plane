@@ -127,6 +127,7 @@ async function loadChatState(): Promise<ChatState> {
         producer: {
           id: "producer",
           role: "producer",
+          projectId: null,
           messages: [
             {
               id: "msg-welcome",
@@ -218,6 +219,7 @@ chatRouter.post("/sessions", async (req: Request, res: Response) => {
   const newSession: ExtendedChatSession = {
     id: sessionId,
     role,
+    projectId: null,
     messages: [
       {
         id: `msg-${crypto.randomUUID().slice(0, 8)}`,
@@ -576,6 +578,7 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
   const newSession: ExtendedChatSession = {
     id: sessionId,
     role: agentRole,
+    projectId: null,
     messages: [
       {
         id: `msg-${crypto.randomUUID().slice(0, 8)}`,
