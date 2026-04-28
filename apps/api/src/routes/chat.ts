@@ -199,6 +199,24 @@ async function getProjectContextForSession(session: ExtendedChatSession): Promis
 }
 
 /**
+ * Append a message to a session in memory + persist + broadcast.
+ * No-op if the session doesn't exist. Used to record orchestration
+ * events (spawn, completion) on the producer session so they survive
+ * page navigation.
+ */
+async function appendMessage(sessionId: string, msg: ChatMessage): Promise<void> {
+  const session = chatStore.sessions[sessionId];
+  if (!session) return;
+  session.messages.push(msg);
+  await saveChatState();
+  broadcast({
+    type: "chat:message",
+    sessionId,
+    message: msg,
+  } as WSEvent);
+}
+
+/**
  * Orphan all chat sessions associated with the given project. Sets
  * projectId to null on each matching session and persists the chat
  * state. History is preserved but the sessions become hidden from the
@@ -781,6 +799,18 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
 
   await saveChatState();
 
+  // Record the spawn on the project's producer session so the entry
+  // survives page navigation (frontend was previously holding this
+  // message in local state only).
+  await appendMessage(producerSessionId(projectId), {
+    id: `msg-${crypto.randomUUID().slice(0, 8)}`,
+    type: "system",
+    sender: "SYSTEM",
+    content: `${agentRole.toUpperCase()} spawned at ${now} UTC`,
+    timestamp: now,
+    showActions: false,
+  });
+
   // If a task is provided, execute it immediately
   if (task) {
     // Create a progress message for this invocation
@@ -862,6 +892,16 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
         sessionId: sessionId,
       } as WSEvent);
 
+      // Persist completion notice on the producer session.
+      await appendMessage(producerSessionId(projectId), {
+        id: `msg-${crypto.randomUUID().slice(0, 8)}`,
+        type: "agent",
+        sender: "producer",
+        content: `${agentRole.replace(/-/g, " ")} reports task complete. Session awaiting closure.`,
+        timestamp: new Date().toISOString(),
+        showActions: true,
+      });
+
       // Quest Bridge: move ticket to completed
       if (ticketId) {
         await moveQuestTicket(ticketId, "completed", agentRole);
@@ -875,6 +915,16 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
         error: error.message,
         sessionId: sessionId,
       } as WSEvent);
+
+      // Persist failure notice on the producer session.
+      await appendMessage(producerSessionId(projectId), {
+        id: `msg-${crypto.randomUUID().slice(0, 8)}`,
+        type: "system",
+        sender: "SYSTEM",
+        content: `${agentRole.toUpperCase()} failed: ${error.message}`,
+        timestamp: new Date().toISOString(),
+        showActions: false,
+      });
 
       // Quest Bridge: move ticket back to available on failure
       if (ticketId) {

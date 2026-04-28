@@ -135,13 +135,8 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, prod
         spawnedAt: timestamp(),
         fileOps: [],
       });
-      if (producerSessionId) {
-        messages.push({ sessionRole: producerSessionId, msg: {
-          type: "system",
-          sender: "SYSTEM",
-          content: `${role.toUpperCase()} spawned via WebSocket at ${timestamp()} UTC`,
-        }});
-      }
+      // Producer "<role> spawned at ..." is appended by backend /spawn
+      // handler and arrives via chat:message — no local push here.
       return { sessions: next, messages };
     }
     case "agent:completed": {
@@ -175,14 +170,8 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, prod
           },
         ],
       });
-      if (producerSessionId) {
-        messages.push({ sessionRole: producerSessionId, msg: {
-          type: "agent",
-          sender: "producer",
-          content: `${role.replace(/-/g, " ")} reports task complete. Session awaiting closure.`,
-          showActions: true,
-        }});
-      }
+      // Producer "reports task complete" is appended by backend /spawn
+      // handler and arrives via chat:message — do not duplicate here.
       return { sessions: next, messages };
     }
     case "agent:failed": {
@@ -201,13 +190,8 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, prod
           timestamp: timestamp(),
         }],
       });
-      if (producerSessionId) {
-        messages.push({ sessionRole: producerSessionId, msg: {
-          type: "system",
-          sender: "SYSTEM",
-          content: `${role.toUpperCase()} failed: ${event.error}`,
-        }});
-      }
+      // Producer "<role> failed" is appended by backend and arrives
+      // via chat:message — do not duplicate here.
       return { sessions: next, messages };
     }
     case "chat:message": {
@@ -611,11 +595,10 @@ export function useCommandRoom() {
 
     lastSpawnedRef.current = r;
 
-    addSessionMessage(producerSessionIdRef.current, {
-      type: "system",
-      sender: "SYSTEM",
-      content: `${r.toUpperCase()} spawned at ${timestamp()} UTC`,
-    });
+    // Note: the "<role> spawned at ..." system message is appended to
+    // the producer session by the backend /api/chat/spawn handler and
+    // arrives over the WebSocket. We do NOT add it locally here, so it
+    // survives page navigation.
 
     if (threadTitle === "Board Room") {
       setThreadTitle(`Session: ${r.replace(/-/g, " ")}`);
