@@ -2,7 +2,7 @@ import { Router } from "express";
 import type { Request, Response } from "express";
 import type { AgentRole, ChatSession, ChatMessage, CreateMessageRequest, CreateChatSessionRequest } from "@game-studio/types";
 import type { LLMMessage } from "../llm/zai-client.js";
-import { broadcastEvent } from "../services/data-store.js";
+import { broadcastEvent, readData, writeData } from "../services/data-store.js";
 import { invokeAgent, continueConversation } from "../services/llm-service.js";
 import { makeProgressCallback } from "../services/llm-service.js";
 import { getAgentSystemPrompt } from "../prompts/agent-prompt-loader.js";
@@ -114,41 +114,56 @@ interface ExtendedChatSession extends ChatSession {
   conversationHistory: LLMMessage[];
 }
 
-const chatStore: ChatState = {
-  sessions: {
-    "producer": {
-      id: "producer",
-      role: "producer",
-      messages: [
-        {
-          id: "msg-welcome",
-          type: "welcome" as const,
-          sender: "Producer",
-          content:
-            "Welcome to the Board Room. I'm the Producer, orchestrating our studio's multi-agent game development pipeline.",
-          timestamp: new Date().toISOString(),
-          showActions: false,
+const CHAT_STATE_FILE = "chat-state.json";
+
+function loadChatState(): ChatState {
+  try {
+    return readData<ChatState>(CHAT_STATE_FILE);
+  } catch {
+    // File doesn't exist yet, return default with producer session
+    return {
+      sessions: {
+        producer: {
+          id: "producer",
+          role: "producer",
+          messages: [
+            {
+              id: "msg-welcome",
+              type: "welcome" as const,
+              sender: "Producer",
+              content:
+                "Welcome to the Board Room. I'm the Producer, orchestrating our studio's multi-agent game development pipeline.",
+              timestamp: new Date().toISOString(),
+              showActions: false,
+            },
+            {
+              id: "msg-prompt",
+              type: "system" as const,
+              sender: "SYSTEM",
+              content:
+                "Type a command to spawn an agent or request a task. Use /spawn <role> to bring in a specialist.",
+              timestamp: new Date().toISOString(),
+              showActions: false,
+            },
+          ],
+          status: "active" as const,
+          progress: 0,
+          spawnedAt: new Date().toISOString(),
+          conversationHistory: [],
         },
-        {
-          id: "msg-prompt",
-          type: "system" as const,
-          sender: "SYSTEM",
-          content:
-            "Type a command to spawn an agent or request a task. Use /spawn <role> to bring in a specialist.",
-          timestamp: new Date().toISOString(),
-          showActions: false,
-        },
-      ],
-      status: "active" as const,
-      progress: 0,
-      spawnedAt: new Date().toISOString(),
-      conversationHistory: [],
-    },
-  },
-  currentSessionId: "producer",
-  threadId: "thread-001",
-  threadTitle: "Producer Session",
-};
+      },
+      currentSessionId: "producer",
+      threadId: "thread-001",
+      threadTitle: "Producer Session",
+    };
+  }
+}
+
+const chatStore: ChatState = loadChatState();
+
+function saveChatState(): void {
+  writeData(CHAT_STATE_FILE, chatStore);
+}
 
 interface ChatState {
   sessions: Record<string, ExtendedChatSession>;
@@ -231,6 +246,7 @@ chatRouter.post("/sessions", async (req: Request, res: Response) => {
     },
   } as WSEvent);
 
+  saveChatState();
   res.status(201).json({ success: true, data: newSession });
 });
 
@@ -257,6 +273,7 @@ chatRouter.delete("/sessions/:id", (req: Request, res: Response) => {
     sessionId: id,
   } as WSEvent);
 
+  saveChatState();
   res.json({ success: true });
 });
 
@@ -313,6 +330,7 @@ chatRouter.post("/sessions/:id/clear", (req: Request, res: Response) => {
     },
   } as WSEvent);
 
+  saveChatState();
   res.json({ success: true });
 });
 
@@ -353,6 +371,8 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
     content: body.content,
   });
 
+  saveChatState();
+
   // Note: We do NOT broadcast the user message here because the frontend
   // already adds it optimistically. Broadcasting would create a duplicate.
 
@@ -387,6 +407,8 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
     sessionId: id,
     message: progressMessage,
   } as WSEvent);
+
+  saveChatState();
 
   try {
     // Set up progress callback for tool execution updates
@@ -490,6 +512,7 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
       message: assistantMessage,
     } as WSEvent);
 
+    saveChatState();
     res.status(201).json({ success: true, data: { userMessage, assistantMessage } });
   } catch (err: unknown) {
     const error = err as Error;
@@ -516,6 +539,7 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
       message: errorMessage,
     } as WSEvent);
 
+    saveChatState();
     res.status(201).json({ success: true, data: { userMessage, errorMessage } });
   }
 });
@@ -575,6 +599,8 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
     },
   } as WSEvent);
 
+  saveChatState();
+
   // If a task is provided, execute it immediately
   if (task) {
     // Create a progress message for this invocation
@@ -593,6 +619,8 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
       sessionId,
       message: newSession.messages[newSession.messages.length - 1],
     } as WSEvent);
+
+    saveChatState();
 
     const onProgress = makeProgressCallback(sessionId, progressMsgId);
 
@@ -664,6 +692,7 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
     }
   }
 
+  saveChatState();
   res.json({
     success: true,
     data: { invocationId, role, sessionId, status: task ? "completed" : "ready" },
