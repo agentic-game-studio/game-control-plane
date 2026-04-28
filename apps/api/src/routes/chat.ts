@@ -110,6 +110,32 @@ interface ExtendedChatSession extends ChatSession {
 
 const CHAT_STATE_FILE = "chat-state.json";
 
+/**
+ * Migrate the legacy singleton "producer" session to "producer-legacy".
+ * The platform now uses per-project producer sessions keyed by
+ * "producer-<projectId>", so the unscoped "producer" key is preserved
+ * (history is not lost) under a new id and hidden from the UI.
+ *
+ * Idempotent: running multiple times is a no-op once the rename has
+ * happened.
+ */
+function migrateLegacyProducer(state: ChatState): boolean {
+  const legacy = state.sessions["producer"];
+  if (!legacy) return false;
+
+  const renamed: ExtendedChatSession = {
+    ...(legacy as ExtendedChatSession),
+    id: "producer-legacy",
+    projectId: null,
+  };
+  delete state.sessions["producer"];
+  state.sessions["producer-legacy"] = renamed;
+  if (state.currentSessionId === "producer") {
+    state.currentSessionId = "producer-legacy";
+  }
+  return true;
+}
+
 async function loadChatState(): Promise<ChatState> {
   try {
     const state = await readData<ChatState>(CHAT_STATE_FILE);
@@ -119,42 +145,18 @@ async function loadChatState(): Promise<ChatState> {
         (m) => m.type !== "progress"
       );
     }
+    if (migrateLegacyProducer(state)) {
+      // Persist the migration so it doesn't run again on next boot.
+      await writeData(CHAT_STATE_FILE, state);
+    }
     return state;
   } catch {
-    // File doesn't exist yet, return default with producer session
+    // File doesn't exist yet — start with an empty session map.
+    // Per-project producer sessions are lazy-created via
+    // GET /api/chat/sessions/producer/:projectId on first chat visit.
     return {
-      sessions: {
-        producer: {
-          id: "producer",
-          role: "producer",
-          projectId: null,
-          messages: [
-            {
-              id: "msg-welcome",
-              type: "welcome" as const,
-              sender: "Producer",
-              content:
-                "Welcome to the Board Room. I'm the Producer, orchestrating our studio's multi-agent game development pipeline.",
-              timestamp: new Date().toISOString(),
-              showActions: false,
-            },
-            {
-              id: "msg-prompt",
-              type: "system" as const,
-              sender: "SYSTEM",
-              content:
-                "Type a command to spawn an agent or request a task. Use /spawn <role> to bring in a specialist.",
-              timestamp: new Date().toISOString(),
-              showActions: false,
-            },
-          ],
-          status: "active" as const,
-          progress: 0,
-          spawnedAt: new Date().toISOString(),
-          conversationHistory: [],
-        },
-      },
-      currentSessionId: "producer",
+      sessions: {},
+      currentSessionId: "",
       threadId: "thread-001",
       threadTitle: "Producer Session",
     };
