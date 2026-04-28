@@ -193,6 +193,7 @@ chatRouter.get("/sessions", (_req: Request, res: Response) => {
   const sessionsData = Object.values(chatStore.sessions).map((s) => ({
     id: s.id,
     role: s.role,
+    projectId: s.projectId,
     messages: s.messages,
     status: s.status,
     progress: s.progress,
@@ -282,13 +283,34 @@ chatRouter.get("/sessions/:id", (req: Request, res: Response) => {
   res.json({ success: true, data: session });
 });
 
-// POST /api/chat/sessions — Create new session
+// POST /api/chat/sessions — Create new specialist session
 chatRouter.post("/sessions", async (req: Request, res: Response) => {
   const body = req.body as CreateChatSessionRequest;
 
+  const role = (body.role ?? "agent") as AgentRole;
+
+  // Producer sessions go through GET /sessions/producer/:projectId, not this endpoint
+  if (role === "producer") {
+    res.status(400).json({
+      success: false,
+      error: "Use GET /api/chat/sessions/producer/:projectId to create a producer session",
+    });
+    return;
+  }
+
+  if (!body.projectId) {
+    res.status(400).json({ success: false, error: "projectId is required" });
+    return;
+  }
+
+  const project = await getProjectById(body.projectId);
+  if (!project) {
+    res.status(404).json({ success: false, error: "Project not found" });
+    return;
+  }
+
   const sessionId = `session-${crypto.randomUUID().slice(0, 8)}`;
   const now = new Date().toISOString();
-  const role = (body.role ?? "agent") as AgentRole;
 
   // Load the agent's system prompt for the welcome message
   let welcomeContent = `${role} session initialized.`;
@@ -302,7 +324,7 @@ chatRouter.post("/sessions", async (req: Request, res: Response) => {
   const newSession: ExtendedChatSession = {
     id: sessionId,
     role,
-    projectId: null,
+    projectId: body.projectId,
     messages: [
       {
         id: `msg-${crypto.randomUUID().slice(0, 8)}`,
@@ -640,10 +662,21 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
 
 // POST /api/chat/spawn — Spawn an agent with real ZAI API
 chatRouter.post("/spawn", async (req: Request, res: Response) => {
-  const { role, task } = req.body as { role?: string; task?: string };
+  const { role, task, projectId } = req.body as { role?: string; task?: string; projectId?: string };
 
   if (!role) {
     res.status(400).json({ success: false, error: "role is required" });
+    return;
+  }
+
+  if (!projectId) {
+    res.status(400).json({ success: false, error: "projectId is required" });
+    return;
+  }
+
+  const project = await getProjectById(projectId);
+  if (!project) {
+    res.status(404).json({ success: false, error: "Project not found" });
     return;
   }
 
@@ -662,7 +695,7 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
   const newSession: ExtendedChatSession = {
     id: sessionId,
     role: agentRole,
-    projectId: null,
+    projectId,
     messages: [
       {
         id: `msg-${crypto.randomUUID().slice(0, 8)}`,
@@ -693,6 +726,7 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
     session: {
       id: newSession.id,
       role: newSession.role,
+      projectId: newSession.projectId,
       messages: newSession.messages,
       status: newSession.status,
       progress: newSession.progress,
