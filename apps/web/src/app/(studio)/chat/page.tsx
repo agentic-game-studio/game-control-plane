@@ -5,8 +5,17 @@ import ChatTabs from "./components/ChatTabs";
 import ChatThread from "./components/ChatThread";
 import CommandInput from "./components/CommandInput";
 import { useCommandRoom } from "@/hooks/useCommandRoom";
+import { ProjectGuard } from "@/components/ProjectGuard";
 
 export default function ChatPage() {
+  return (
+    <ProjectGuard>
+      <ChatPageInner />
+    </ProjectGuard>
+  );
+}
+
+function ChatPageInner() {
   const {
     sessions,
     currentSession,

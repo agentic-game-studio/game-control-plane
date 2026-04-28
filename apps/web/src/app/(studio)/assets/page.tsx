@@ -4,6 +4,7 @@ import { useState, useMemo } from "react";
 import { useAssets } from "@/hooks/useAssets";
 import { useSettings } from "@/hooks/useSettings";
 import { DataLoader } from "@/components/DataLoader";
+import { ProjectGuard } from "@/components/ProjectGuard";
 import { AssetCard } from "./components/AssetCard";
 import { AssetFilters, type SortOption } from "./components/AssetFilters";
 import { NewAssetModal } from "./components/NewAssetModal";
@@ -12,6 +13,14 @@ import type { AssetType } from "@game-studio/types";
 const GRID_SLOTS = 10;
 
 export default function AssetsPage() {
+  return (
+    <ProjectGuard>
+      <AssetsPageInner />
+    </ProjectGuard>
+  );
+}
+
+function AssetsPageInner() {
   const {
     data,
     loading,
