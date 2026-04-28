@@ -3,6 +3,7 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "./useWebSocket";
+import { useProject } from "@/contexts/ProjectContext";
 import type { WSEvent } from "@game-studio/types";
 
 export interface DiffBlock {
@@ -112,7 +113,11 @@ interface WSHandlerResult {
   messages: Array<{ sessionRole: string; msg: Omit<ChatMessage, "id" | "timestamp"> }>;
 }
 
-function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, recentApiMessages?: Set<string>): WSHandlerResult {
+function isProducerSession(id: string): boolean {
+  return id === "producer" || id.startsWith("producer-");
+}
+
+function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, producerSessionId: string, recentApiMessages?: Set<string>): WSHandlerResult {
   const messages: WSHandlerResult["messages"] = [];
   switch (event.type) {
     case "agent:spawned": {
@@ -130,17 +135,19 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, rece
         spawnedAt: timestamp(),
         fileOps: [],
       });
-      messages.push({ sessionRole: "producer", msg: {
-        type: "system",
-        sender: "SYSTEM",
-        content: `${role.toUpperCase()} spawned via WebSocket at ${timestamp()} UTC`,
-      }});
+      if (producerSessionId) {
+        messages.push({ sessionRole: producerSessionId, msg: {
+          type: "system",
+          sender: "SYSTEM",
+          content: `${role.toUpperCase()} spawned via WebSocket at ${timestamp()} UTC`,
+        }});
+      }
       return { sessions: next, messages };
     }
     case "agent:completed": {
       const role = event.sessionId;
-      // Producer is the main orchestrator — never mark it as "completed" via agent events
-      if (role === "producer") return { sessions: null, messages };
+      // Producer sessions are orchestrators — never mark them as "completed" via agent events
+      if (isProducerSession(role)) return { sessions: null, messages };
       const session = sessions.get(role);
       if (!session) return { sessions: null, messages };
       const next = new Map(sessions);
@@ -164,16 +171,18 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, rece
             sender: "SYSTEM",
             content: "Back to Producer",
             timestamp: timestamp(),
-            navigate: { targetSession: "producer", label: "Back to Producer" },
+            navigate: { targetSession: producerSessionId, label: "Back to Producer" },
           },
         ],
       });
-      messages.push({ sessionRole: "producer", msg: {
-        type: "agent",
-        sender: "producer",
-        content: `${role.replace(/-/g, " ")} reports task complete. Session awaiting closure.`,
-        showActions: true,
-      }});
+      if (producerSessionId) {
+        messages.push({ sessionRole: producerSessionId, msg: {
+          type: "agent",
+          sender: "producer",
+          content: `${role.replace(/-/g, " ")} reports task complete. Session awaiting closure.`,
+          showActions: true,
+        }});
+      }
       return { sessions: next, messages };
     }
     case "agent:failed": {
@@ -192,11 +201,13 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, rece
           timestamp: timestamp(),
         }],
       });
-      messages.push({ sessionRole: "producer", msg: {
-        type: "system",
-        sender: "SYSTEM",
-        content: `${role.toUpperCase()} failed: ${event.error}`,
-      }});
+      if (producerSessionId) {
+        messages.push({ sessionRole: producerSessionId, msg: {
+          type: "system",
+          sender: "SYSTEM",
+          content: `${role.toUpperCase()} failed: ${event.error}`,
+        }});
+      }
       return { sessions: next, messages };
     }
     case "chat:message": {
@@ -287,12 +298,13 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, rece
       return { sessions: null, messages };
     }
     case "log:entry": {
-      // Prefer event.sessionId, fall back to agent role lookup
+      // Prefer event.sessionId, fall back to agent role lookup, then current producer
       const targetSession = sessions.has(event.sessionId)
         ? event.sessionId
         : event.agent && sessions.has(event.agent)
         ? event.agent
-        : "producer";
+        : producerSessionId;
+      if (!targetSession) return { sessions: null, messages };
       const session = sessions.get(targetSession);
       if (!session) return { sessions: null, messages };
 
@@ -404,9 +416,40 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, rece
   }
 }
 
+interface BackendSession {
+  id: string;
+  role: string;
+  projectId: string | null;
+  messages: ChatMessage[];
+  status: string;
+  progress: number;
+  spawnedAt: string;
+}
+
+function backendSessionToAgentSession(s: BackendSession): AgentSession {
+  return {
+    role: s.role,
+    messages: s.messages.map((m) => ({
+      ...m,
+      type: m.type === "progress" && m.progress === 100 ? ("agent" as const) : m.type,
+      toolCalls: normalizeToolCalls(m.toolCalls),
+    })),
+    status: s.status as "active" | "done",
+    progress: s.progress,
+    spawnedAt: s.spawnedAt,
+    fileOps: [],
+  };
+}
+
 export function useCommandRoom() {
-  const [sessions, setSessions] = useState<Map<string, AgentSession>>(new Map());
-  const [currentSession, setCurrentSession] = useState("producer");
+  const { currentProjectId } = useProject();
+  const producerSessionId = currentProjectId ? `producer-${currentProjectId}` : "";
+
+  // Stores ALL fetched sessions from backend (across projects) keyed by id.
+  // Sessions for other projects are filtered out at the consumer level.
+  const [allSessions, setAllSessions] = useState<Map<string, AgentSession>>(new Map());
+  const [allSessionProjectIds, setAllSessionProjectIds] = useState<Map<string, string | null>>(new Map());
+  const [currentSession, setCurrentSession] = useState("");
   const [threadId, setThreadId] = useState("");
   const [threadTitle, setThreadTitle] = useState("Board Room");
   const [initialized, setInitialized] = useState(false);
@@ -418,68 +461,76 @@ export function useCommandRoom() {
   // F2: Ref for currentSession to avoid stale closures in async callbacks
   const currentSessionRef = useRef(currentSession);
   currentSessionRef.current = currentSession;
+  const producerSessionIdRef = useRef(producerSessionId);
+  producerSessionIdRef.current = producerSessionId;
 
-  // Initialize on client by fetching from API
+  // Filter sessions visible for the active project. The producer session
+  // for the current project plus any specialist sessions tagged with
+  // currentProjectId. Legacy "producer-legacy" and other projects'
+  // sessions are hidden.
+  const sessions = useMemo(() => {
+    if (!currentProjectId) return new Map<string, AgentSession>();
+    const out = new Map<string, AgentSession>();
+    for (const [id, sess] of allSessions) {
+      if (id === producerSessionId) {
+        out.set(id, sess);
+        continue;
+      }
+      if (id === "producer" || id === "producer-legacy" || id.startsWith("producer-")) continue;
+      if (allSessionProjectIds.get(id) === currentProjectId) {
+        out.set(id, sess);
+      }
+    }
+    return out;
+  }, [allSessions, allSessionProjectIds, currentProjectId, producerSessionId]);
+
+  // Fetch all sessions and ensure the producer session for the current
+  // project exists (lazy-create via the dedicated endpoint).
   useEffect(() => {
+    if (!currentProjectId) {
+      setInitialized(true);
+      return;
+    }
+    let cancelled = false;
     const init = async () => {
       try {
-        const response = await apiFetch<{
-          sessions: Array<{ id: string; role: string; messages: ChatMessage[]; status: string; progress: number; spawnedAt: string }>;
-          currentSessionId: string;
-        }>("/api/chat/sessions");
+        const [allResp, producerSession] = await Promise.all([
+          apiFetch<{ sessions: BackendSession[]; currentSessionId: string }>("/api/chat/sessions"),
+          apiFetch<BackendSession>(`/api/chat/sessions/producer/${currentProjectId}`),
+        ]);
+        if (cancelled) return;
 
-        // Convert backend sessions array to frontend Map format
-        const sessionsMap = new Map<string, AgentSession>();
-        response.sessions.forEach((s) => {
-          sessionsMap.set(s.id, {
-            role: s.role,
-            messages: s.messages.map((m) => ({
-              ...m,
-              // Normalize progress messages that have progress 100
-              type: m.type === "progress" && m.progress === 100 ? "agent" as const : m.type,
-              // Normalize tool calls from backend format (tool) to frontend format (name)
-              toolCalls: normalizeToolCalls(m.toolCalls),
-            })),
-            status: s.status as "active" | "done",
-            progress: s.progress,
-            spawnedAt: s.spawnedAt,
-            fileOps: [],
-          });
-        });
+        const sessionMap = new Map<string, AgentSession>();
+        const projectIdMap = new Map<string, string | null>();
+        for (const s of allResp.sessions) {
+          sessionMap.set(s.id, backendSessionToAgentSession(s));
+          projectIdMap.set(s.id, s.projectId ?? null);
+        }
+        // Ensure the lazy-created producer session is included.
+        sessionMap.set(producerSession.id, backendSessionToAgentSession(producerSession));
+        projectIdMap.set(producerSession.id, producerSession.projectId ?? null);
 
-        setSessions(sessionsMap);
-        setCurrentSession(response.currentSessionId);
+        setAllSessions(sessionMap);
+        setAllSessionProjectIds(projectIdMap);
+        setCurrentSession(producerSession.id);
         setThreadId(`#${Math.floor(Math.random() * 9000 + 1000)}`);
         setThreadTitle("BOARD_ROOM");
       } catch (error) {
+        if (cancelled) return;
         console.error("Failed to fetch chat sessions:", error);
-        // Fallback to local initialization
-        const gd: AgentSession = {
-          role: "producer",
-          messages: [{
-            id: uid(),
-            type: "welcome",
-            sender: "PRODUCER",
-            content: "BOARD_ROOM initialized. Producer online.",
-            timestamp: timestamp(),
-          }],
-          status: "active",
-          progress: 0,
-          spawnedAt: timestamp(),
-          fileOps: [],
-        };
-        setSessions(new Map([["producer", gd]]));
-        setThreadId(`#${Math.floor(Math.random() * 9000 + 1000)}`);
       } finally {
-        setInitialized(true);
+        if (!cancelled) setInitialized(true);
       }
     };
 
     init();
-  }, []);
+    return () => {
+      cancelled = true;
+    };
+  }, [currentProjectId]);
 
   const addSessionMessage = useCallback((sessionRole: string, msg: Omit<ChatMessage, "id" | "timestamp">) => {
-    setSessions((prev) => {
+    setAllSessions((prev) => {
       const session = prev.get(sessionRole);
       if (!session) return prev;
 
@@ -507,8 +558,8 @@ export function useCommandRoom() {
 
   // WebSocket integration — use functional update to avoid stale closure
   const onWSEvent = useCallback((event: WSEvent) => {
-    setSessions((prevSessions) => {
-      const updated = handleWSEvent(event, prevSessions, recentApiMessagesRef.current);
+    setAllSessions((prevSessions) => {
+      const updated = handleWSEvent(event, prevSessions, producerSessionIdRef.current, recentApiMessagesRef.current);
       // Process any messages that were generated by the handler
       updated.messages.forEach(({ sessionRole, msg }) => {
         const session = prevSessions.get(sessionRole);
@@ -531,7 +582,7 @@ export function useCommandRoom() {
     const r = role.toLowerCase().trim();
 
     // Create agent session locally
-    setSessions((prev) => {
+    setAllSessions((prev) => {
       if (prev.has(r)) return prev;
       const next = new Map(prev);
       next.set(r, {
@@ -550,7 +601,7 @@ export function useCommandRoom() {
 
     lastSpawnedRef.current = r;
 
-    addSessionMessage("producer", {
+    addSessionMessage(producerSessionIdRef.current, {
       type: "system",
       sender: "SYSTEM",
       content: `${r.toUpperCase()} spawned at ${timestamp()} UTC`,
@@ -572,7 +623,7 @@ export function useCommandRoom() {
       );
 
       // Update session with initial greeting
-      setSessions((prev) => {
+      setAllSessions((prev) => {
         const session = prev.get(r);
         if (!session) return prev;
         const next = new Map(prev);
@@ -588,7 +639,7 @@ export function useCommandRoom() {
 
       // The real response will come via WebSocket or we need to fetch it
       // For now, add a message that the agent is processing
-      addSessionMessage("producer", {
+      addSessionMessage(producerSessionIdRef.current, {
         type: "agent",
         sender: "producer",
         content: `${r.replace(/-/g, " ")} is online and processing your request...`,
@@ -596,7 +647,7 @@ export function useCommandRoom() {
       });
     } catch (error) {
       console.error("Failed to spawn agent via API:", error);
-      addSessionMessage("producer", {
+      addSessionMessage(producerSessionIdRef.current, {
         type: "system",
         sender: "SYSTEM",
         content: `Failed to spawn ${r}: ${error instanceof Error ? error.message : "Unknown error"}`,
@@ -609,7 +660,7 @@ export function useCommandRoom() {
     const progressMsgId = uid();
     activityLogRef.current = [];
 
-    setSessions((prev) => {
+    setAllSessions((prev) => {
       const next = new Map(prev);
       const session = next.get(role);
       if (!session || session.status !== "active") return prev;
@@ -654,7 +705,7 @@ export function useCommandRoom() {
 
       if (result.assistantMessage) {
         // Update session with real response
-        setSessions((prev) => {
+        setAllSessions((prev) => {
           const session = prev.get(role);
           if (!session) return prev;
           const next = new Map(prev);
@@ -692,14 +743,14 @@ export function useCommandRoom() {
                 sender: "SYSTEM",
                 content: "Back to Producer",
                 timestamp: timestamp(),
-                navigate: { targetSession: "producer", label: "Back to Producer" },
+                navigate: { targetSession: producerSessionIdRef.current, label: "Back to Producer" },
               },
             ],
           });
           return next;
         });
 
-        addSessionMessage("producer", {
+        addSessionMessage(producerSessionIdRef.current, {
           type: "agent",
           sender: "producer",
           content: `${role.replace(/-/g, " ")} completed the task.`,
@@ -708,7 +759,7 @@ export function useCommandRoom() {
       }
     } catch (error) {
       console.error("Failed to continue agent task:", error);
-      setSessions((prev) => {
+      setAllSessions((prev) => {
         const session = prev.get(role);
         if (!session) return prev;
         const next = new Map(prev);
@@ -739,7 +790,7 @@ export function useCommandRoom() {
 
     // Slash commands — always route through producer
     if (lower.startsWith("/")) {
-      setCurrentSession("producer");
+      setCurrentSession(producerSessionIdRef.current);
       const parts = lower.slice(1).split(" ");
       const cmd = parts[0];
       const args = parts.slice(1).join(" ");
@@ -753,7 +804,7 @@ export function useCommandRoom() {
             headers: { "Content-Type": "application/json" },
           }).catch((err) => console.error("Failed to clear session:", err));
 
-          setSessions((prev) => {
+          setAllSessions((prev) => {
             const next = new Map(prev);
             const session = next.get(targetSession);
             if (session) {
@@ -765,8 +816,8 @@ export function useCommandRoom() {
           return;
         }
         case "help": {
-          addSessionMessage("producer", { type: "user", sender: "DIRECTOR", content: trimmed });
-          addSessionMessage("producer", {
+          addSessionMessage(producerSessionIdRef.current, { type: "user", sender: "DIRECTOR", content: trimmed });
+          addSessionMessage(producerSessionIdRef.current, {
             type: "agent",
             sender: "producer",
             content: `Available commands:
@@ -782,16 +833,16 @@ You can also use: spawn <agent>, approve, done <agent>`,
         }
         case "spawn": {
           if (!args) {
-            addSessionMessage("producer", { type: "system", sender: "SYSTEM", content: "Usage: /spawn <agent-role>" });
+            addSessionMessage(producerSessionIdRef.current, { type: "system", sender: "SYSTEM", content: "Usage: /spawn <agent-role>" });
             return;
           }
-          addSessionMessage("producer", { type: "user", sender: "DIRECTOR", content: trimmed });
+          addSessionMessage(producerSessionIdRef.current, { type: "user", sender: "DIRECTOR", content: trimmed });
           spawnAgent(args);
           return;
         }
         case "cost": {
-          addSessionMessage("producer", { type: "user", sender: "DIRECTOR", content: trimmed });
-          addSessionMessage("producer", {
+          addSessionMessage(producerSessionIdRef.current, { type: "user", sender: "DIRECTOR", content: trimmed });
+          addSessionMessage(producerSessionIdRef.current, {
             type: "agent",
             sender: "producer",
             content: `Token Usage Estimates:
@@ -807,8 +858,8 @@ Agents: 3 active`,
           return;
         }
         case "diff": {
-          addSessionMessage("producer", { type: "user", sender: "DIRECTOR", content: trimmed });
-          addSessionMessage("producer", {
+          addSessionMessage(producerSessionIdRef.current, { type: "user", sender: "DIRECTOR", content: trimmed });
+          addSessionMessage(producerSessionIdRef.current, {
             type: "diff",
             sender: "producer",
             content: "Recent changes",
@@ -821,7 +872,7 @@ Agents: 3 active`,
           return;
         }
         default: {
-          addSessionMessage("producer", { type: "system", sender: "SYSTEM", content: `Unknown command: /${cmd}. Type /help for available commands.` });
+          addSessionMessage(producerSessionIdRef.current, { type: "system", sender: "SYSTEM", content: `Unknown command: /${cmd}. Type /help for available commands.` });
           return;
         }
       }
@@ -829,37 +880,37 @@ Agents: 3 active`,
 
     // spawn <agent> — orchestration command
     if (lower.startsWith("spawn ")) {
-      setCurrentSession("producer");
+      setCurrentSession(producerSessionIdRef.current);
       const role = lower.slice(6).trim();
       if (!role) {
-        addSessionMessage("producer", { type: "system", sender: "SYSTEM", content: "Usage: spawn <agent-role>" });
+        addSessionMessage(producerSessionIdRef.current, { type: "system", sender: "SYSTEM", content: "Usage: spawn <agent-role>" });
         return;
       }
-      addSessionMessage("producer", { type: "user", sender: "DIRECTOR", content: trimmed });
+      addSessionMessage(producerSessionIdRef.current, { type: "user", sender: "DIRECTOR", content: trimmed });
       spawnAgent(role);
       return;
     }
 
     // approve — orchestration command
     if (lower === "approve") {
-      setCurrentSession("producer");
+      setCurrentSession(producerSessionIdRef.current);
       const role = lastSpawnedRef.current;
       if (!role) {
-        addSessionMessage("producer", { type: "system", sender: "SYSTEM", content: "No agent to approve." });
+        addSessionMessage(producerSessionIdRef.current, { type: "system", sender: "SYSTEM", content: "No agent to approve." });
         return;
       }
-      addSessionMessage("producer", { type: "user", sender: "DIRECTOR", content: "Approved. Proceed with the task." });
+      addSessionMessage(producerSessionIdRef.current, { type: "user", sender: "DIRECTOR", content: "Approved. Proceed with the task." });
       approveAgent(role);
       return;
     }
 
     // done <agent> — orchestration command
     if (lower.startsWith("done ")) {
-      setCurrentSession("producer");
+      setCurrentSession(producerSessionIdRef.current);
       const role = lower.slice(5).trim();
-      addSessionMessage("producer", { type: "user", sender: "DIRECTOR", content: trimmed });
+      addSessionMessage(producerSessionIdRef.current, { type: "user", sender: "DIRECTOR", content: trimmed });
 
-      setSessions((prev) => {
+      setAllSessions((prev) => {
         const session = prev.get(role);
         if (!session) return prev;
         const next = new Map(prev);
@@ -877,7 +928,7 @@ Agents: 3 active`,
         return next;
       });
 
-      addSessionMessage("producer", {
+      addSessionMessage(producerSessionIdRef.current, {
         type: "system",
         sender: "SYSTEM",
         content: `${role.toUpperCase()} completed task and despawned.`,
@@ -953,13 +1004,13 @@ Agents: 3 active`,
     apiFetch(`/api/chat/sessions/${role}`, { method: "DELETE" }).catch((err) =>
       console.error("Failed to delete session:", err)
     );
-    setSessions((prev) => {
+    setAllSessions((prev) => {
       const next = new Map(prev);
       next.delete(role);
       return next;
     });
     // Switch back to producer if we closed the current session
-    setCurrentSession((current) => (current === role ? "producer" : current));
+    setCurrentSession((current) => (current === role ? producerSessionIdRef.current : current));
   }, []);
 
   // Derived state — memoized to avoid unnecessary re-renders
