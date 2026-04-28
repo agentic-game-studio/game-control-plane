@@ -15,6 +15,23 @@ import { callLLMWithTools, GAME_STUDIO_TOOLS, type LLMMessage, type ProgressCall
 import { broadcast } from "./websocket.js";
 import { getZaiModel } from "../config/model-mapping.js";
 import type { WSEvent, AgentRole } from "@game-studio/types";
+
+export interface ProjectContext {
+  name: string;
+  description: string;
+  engine: string | null;
+  workspacePath: string | null;
+}
+
+function appendProjectContext(systemPrompt: string, project: ProjectContext): string {
+  return `${systemPrompt}
+
+# Active Project Context
+- Name: ${project.name}
+- Description: ${project.description || "(no description)"}
+- Engine: ${project.engine ?? "TBD"}
+- Workspace: ${project.workspacePath ?? "default"}`;
+}
 import { getWorkflow, createQuestTicket, moveQuestTicket } from "./quest-bridge.js";
 
 /** Helper to broadcast log entries with timestamp */
@@ -430,6 +447,7 @@ export async function invokeAgent(
   onProgress?: ProgressCallback,
   broadcastEvents = true,
   _depth = 0,
+  projectContext?: ProjectContext,
 ): Promise<InvokeResult> {
   const invocationId = `invoke-${crypto.randomUUID().slice(0, 8)}`;
 
@@ -444,10 +462,14 @@ export async function invokeAgent(
 
   try {
     // Load agent's system prompt and model tier from MD file
-    const [systemPrompt, prompts] = await Promise.all([
+    const [rawSystemPrompt, prompts] = await Promise.all([
       getAgentSystemPrompt(agentRole),
       loadAgentPrompts(),
     ]);
+
+    const systemPrompt = projectContext
+      ? appendProjectContext(rawSystemPrompt, projectContext)
+      : rawSystemPrompt;
 
     // Get model tier and map to Z.ai model
     const agentPrompt = prompts.get(agentRole);
@@ -522,13 +544,18 @@ export async function continueConversation(
   sessionId: string,
   onProgress?: ProgressCallback,
   _depth = 0,
+  projectContext?: ProjectContext,
 ): Promise<InvokeResult> {
   try {
     // Load agent's system prompt and model tier from MD file
-    const [systemPrompt, prompts] = await Promise.all([
+    const [rawSystemPrompt, prompts] = await Promise.all([
       getAgentSystemPrompt(agentRole),
       loadAgentPrompts(),
     ]);
+
+    const systemPrompt = projectContext
+      ? appendProjectContext(rawSystemPrompt, projectContext)
+      : rawSystemPrompt;
 
     // Get model tier and map to Z.ai model
     const agentPrompt = prompts.get(agentRole);

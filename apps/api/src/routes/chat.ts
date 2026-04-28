@@ -3,7 +3,7 @@ import type { Request, Response } from "express";
 import type { AgentRole, ChatSession, ChatMessage, CreateMessageRequest, CreateChatSessionRequest, DashboardData, Project } from "@game-studio/types";
 import type { LLMMessage } from "../llm/zai-client.js";
 import { broadcastEvent, readData, writeData } from "../services/data-store.js";
-import { invokeAgent, continueConversation } from "../services/llm-service.js";
+import { invokeAgent, continueConversation, type ProjectContext } from "../services/llm-service.js";
 import { makeProgressCallback } from "../services/llm-service.js";
 import { getAgentSystemPrompt } from "../prompts/agent-prompt-loader.js";
 import type { WSEvent } from "@game-studio/types";
@@ -181,6 +181,41 @@ async function getProjectById(projectId: string): Promise<Project | null> {
 
 function producerSessionId(projectId: string): string {
   return `producer-${projectId}`;
+}
+
+function toProjectContext(project: Project): ProjectContext {
+  return {
+    name: project.name,
+    description: project.description,
+    engine: project.engine,
+    workspacePath: project.workspacePath,
+  };
+}
+
+async function getProjectContextForSession(session: ExtendedChatSession): Promise<ProjectContext | undefined> {
+  if (!session.projectId) return undefined;
+  const project = await getProjectById(session.projectId);
+  return project ? toProjectContext(project) : undefined;
+}
+
+/**
+ * Orphan all chat sessions associated with the given project. Sets
+ * projectId to null on each matching session and persists the chat
+ * state. History is preserved but the sessions become hidden from the
+ * project-scoped UI.
+ */
+export async function orphanProjectSessions(projectId: string): Promise<number> {
+  let orphaned = 0;
+  for (const session of Object.values(chatStore.sessions)) {
+    if (session.projectId === projectId) {
+      session.projectId = null;
+      orphaned++;
+    }
+  }
+  if (orphaned > 0) {
+    await saveChatState();
+  }
+  return orphaned;
 }
 
 interface ChatState {
@@ -546,7 +581,15 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
     }, 2000);
 
     // Call the LLM with progress callback
-    const result = await continueConversation(agentRole, session.conversationHistory, id, onProgress);
+    const projectContext = await getProjectContextForSession(session);
+    const result = await continueConversation(
+      agentRole,
+      session.conversationHistory,
+      id,
+      onProgress,
+      0,
+      projectContext,
+    );
 
     // Stop heartbeat
     clearInterval(heartbeat);
@@ -771,7 +814,18 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
 
     try {
       // Don't broadcast agent events from invokeAgent — we handle them ourselves here
-      const result = await invokeAgent(agentRole, task, sessionId, undefined, [], onProgress, false);
+      const projectContext = toProjectContext(project);
+      const result = await invokeAgent(
+        agentRole,
+        task,
+        sessionId,
+        undefined,
+        [],
+        onProgress,
+        false,
+        0,
+        projectContext,
+      );
 
       // Remove progress placeholder
       const idx = newSession.messages.findIndex((m) => m.id === progressMsgId);
