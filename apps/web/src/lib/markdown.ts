@@ -81,8 +81,12 @@ export function renderMarkdown(md: string): string {
   // Strikethrough
   html = html.replace(/~~(.+?)~~/g, '<del class="opacity-60 line-through">$1</del>');
 
-  // Links [text](url)
-  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" class="text-[#0055FF] underline hover:bg-[#0055FF] hover:text-white px-0.5 transition-colors">$1</a>');
+  // Links [text](url) — filter dangerous URI schemes (S6)
+  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, text, url) => {
+    const safe = /^[a-z][a-z0-9+.-]*:/i.test(url) && !/^(\s*)(javascript|data|vbscript)\s*:/i.test(url);
+    if (!safe) return `[${text}](${url})`;
+    return `<a href="${url}" target="_blank" rel="noopener noreferrer" class="text-[#0055FF] underline hover:bg-[#0055FF] hover:text-white px-0.5 transition-colors">${text}</a>`;
+  });
 
   // Paragraphs: double newline splits
   html = html.replace(/\n\n/g, '</p><p class="my-2">');

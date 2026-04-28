@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { AGENT_TREE, getAgentIcon } from "@/lib/agent-icons";
 import type { AgentTreeNode } from "@/lib/agent-icons";
 import type { AgentSession } from "@/hooks/useCommandRoom";
@@ -177,12 +177,16 @@ function BackgroundTaskCard({ session, onSelect, onClose }: { session: AgentSess
 
 export default function AgentTree({ sessions, currentSession, totalProgress, onSelectSession, onCloseSession }: AgentTreeProps) {
   const [showHierarchy, setShowHierarchy] = useState(false);
-  const activeRoles = [...sessions.values()]
-    .filter((s) => s.role !== "producer" && s.status === "active")
-    .map((s) => s.role);
+  const activeRoles = useMemo(() =>
+    [...sessions.values()]
+      .filter((s) => s.role !== "producer" && s.status === "active")
+      .map((s) => s.role),
+    [sessions]);
 
   // Background tasks (all non-GD sessions)
-  const backgroundTasks = [...sessions.values()].filter((s) => s.role !== "producer");
+  const backgroundTasks = useMemo(() =>
+    [...sessions.values()].filter((s) => s.role !== "producer"),
+    [sessions]);
 
   const treeData = showHierarchy ? AGENT_TREE : [];
 

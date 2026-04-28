@@ -20,6 +20,29 @@ import { errorHandler } from "./middleware/error-handler.js";
 import { authMiddleware } from "./middleware/auth.js";
 import { broadcast, wss, sseClients } from "./services/websocket.js";
 
+// Q2: Simple in-memory rate limiter (per-IP, sliding window)
+const rateBuckets = new Map<string, { count: number; resetAt: number }>();
+const RATE_LIMIT = 10; // requests per window
+const RATE_WINDOW_MS = 60_000; // 1 minute
+
+function rateLimiter(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const ip = req.ip ?? req.socket.remoteAddress ?? "unknown";
+  const now = Date.now();
+  const bucket = rateBuckets.get(ip);
+
+  if (!bucket || now >= bucket.resetAt) {
+    rateBuckets.set(ip, { count: 1, resetAt: now + RATE_WINDOW_MS });
+    return next();
+  }
+
+  bucket.count++;
+  if (bucket.count > RATE_LIMIT) {
+    res.status(429).json({ success: false, error: "Rate limit exceeded — try again in a minute" });
+    return;
+  }
+  next();
+}
+
 const config = loadConfig();
 
 const app = express();
@@ -27,7 +50,17 @@ const server = createServer(app);
 
 // WebSocket server — attach wss from websocket.ts to the HTTP server
 server.on("upgrade", (request, socket, head) => {
-  const { pathname } = new URL(request.url ?? "/", "http://localhost");
+  const { pathname, searchParams } = new URL(request.url ?? "/", "http://localhost");
+
+  // S5: Validate API key on WebSocket upgrade
+  const wsKey = request.headers["x-api-key"] as string | undefined
+    ?? searchParams.get("apiKey");
+  if (!wsKey || wsKey !== config.API_SECRET) {
+    socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+    socket.destroy();
+    return;
+  }
+
   if (pathname === "/ws") {
     wss.handleUpgrade(request, socket, head, (ws) => {
       wss.emit("connection", ws, request);
@@ -42,7 +75,7 @@ wss.on("connection", (socket) => {
 });
 
 // Middleware
-app.use(cors({ origin: "*" }));
+app.use(cors({ origin: config.CORS_ORIGIN }));
 app.use(express.json({ limit: "50mb" }));
 app.use(authMiddleware);
 
@@ -56,6 +89,10 @@ app.use("/api/design", designRouter);
 app.use("/api/prompts", promptsRouter);
 app.use("/api/documents", documentsRouter);
 app.use("/api/dashboard", dashboardRouter);
+// Q2: Rate limit LLM-heavy endpoints (must be before route handlers)
+app.use("/api/chat/sessions/:sessionId/messages", rateLimiter);
+app.use("/api/chat/spawn", rateLimiter);
+
 app.use("/api/chat", chatRouter);
 app.use("/api/tickets", ticketsRouter);
 app.use("/api/assets", assetsRouter);
@@ -78,7 +115,13 @@ app.get("/api/sessions/:sessionId/stream", (req, res) => {
   const client = { id: clientId, sessionId, send: (data: string) => { res.write(`data: ${data}\n\n`); } };
   sseClients.add(client);
 
+  // R8: Send heartbeat comment every 15 seconds to keep connection alive
+  const heartbeat = setInterval(() => {
+    res.write(": heartbeat\n\n");
+  }, 15_000);
+
   req.on("close", () => {
+    clearInterval(heartbeat);
     sseClients.delete(client);
   });
 });
@@ -92,3 +135,19 @@ server.listen(PORT, () => {
   console.log(`[API] WebSocket endpoint: ws://localhost:${PORT}/ws`);
   console.log(`[API] Workspace: ${config.WORKSPACE_DIR}`);
 });
+
+// R7: Graceful shutdown
+function gracefulShutdown(signal: string) {
+  console.log(`[API] ${signal} received — shutting down gracefully...`);
+  wss.close(() => {
+    server.close(() => {
+      console.log("[API] Server closed");
+      process.exit(0);
+    });
+  });
+  // Force exit after 10s if connections don't close
+  setTimeout(() => process.exit(1), 10_000);
+}
+
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));

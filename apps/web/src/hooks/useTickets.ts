@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "./useWebSocket";
 import type {
@@ -25,6 +25,7 @@ export function useTickets() {
   const [data, setData] = useState<TicketsBoard>(DEFAULT_BOARD);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const fetchTickets = useCallback(async () => {
     try {
@@ -52,13 +53,22 @@ export function useTickets() {
         event.type === "ticket:moved" ||
         event.type === "ticket:deleted"
       ) {
-        fetchTickets();
+        if (debounceRef.current) clearTimeout(debounceRef.current);
+        debounceRef.current = setTimeout(() => {
+          fetchTickets();
+        }, 300);
       }
     },
     [fetchTickets]
   );
 
   useWebSocket(onWSEvent);
+
+  useEffect(() => {
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, []);
 
   const acknowledgeTicket = useCallback(
     async (id: string) => {

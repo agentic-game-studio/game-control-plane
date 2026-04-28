@@ -123,25 +123,28 @@ function pruneMessages(messages: LLMMessage[]): LLMMessage[] {
     }
   }
 
-  // Keep initial messages
-  const initial = messages.filter((m) => m.role !== "system").slice(0, 10);
-  for (const msg of initial) {
-    if (typeof msg.content === "string" && usedChars + msg.content.length <= MAX_CONTEXT_CHARS * 0.4) {
-      result.push(msg);
-      usedChars += msg.content.length;
-    }
+  // R3: Keep recent messages as atomic groups (assistant+tool pairs must not be split)
+  const nonSystem = messages.filter((m) => m.role !== "system");
+
+  const recentCount = 30;
+  let recent = nonSystem.slice(-recentCount);
+
+  // If the slice starts with a tool result (meaning its assistant was cut off), skip it
+  if (recent.length > 0 && recent[0].role === "tool") {
+    recent = recent.slice(1);
   }
 
-  // Keep recent messages
-  const recent = messages.filter((m) => m.role !== "system").slice(-30);
-  for (const msg of recent) {
-    if (typeof msg.content === "string" && usedChars + msg.content.length <= MAX_CONTEXT_CHARS) {
+  for (let i = 0; i < recent.length; i++) {
+    const msg = recent[i];
+    const charCount = typeof msg.content === "string" ? msg.content.length : 0;
+
+    if (usedChars + charCount <= MAX_CONTEXT_CHARS) {
       result.push(msg);
-      usedChars += msg.content.length;
-    } else if (typeof msg.content === "string") {
+      usedChars += charCount;
+    } else {
       const remaining = MAX_CONTEXT_CHARS - usedChars;
       if (remaining > 100) {
-        result.push({ ...msg, content: truncate(msg.content, remaining) });
+        result.push({ ...msg, content: truncate(typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content), remaining) });
       }
       break;
     }
@@ -236,7 +239,7 @@ export async function callZAI(request: LLMRequest): Promise<LLMResponse> {
         content += c.text;
       } else if (c.type === "tool_use" && c.name && c.input) {
         toolCalls.push({
-          id: c.id ?? `tool-${Date.now()}`,
+          id: c.id ?? `tool-${crypto.randomUUID().slice(0, 8)}`,
           name: c.name,
           input: c.input,
         });
@@ -307,7 +310,7 @@ export async function callLLMWithTools(
         return {
           content: questionData.question,
           tool_calls: [{
-            id: tc.id ?? `call_${Date.now()}`,
+            id: tc.id ?? `call_${crypto.randomUUID().slice(0, 8)}`,
             name: tc.name,
             input: questionData,
           }],
@@ -322,7 +325,7 @@ export async function callLLMWithTools(
         return {
           content: planData.title,
           tool_calls: [{
-            id: tc.id ?? `call_${Date.now()}`,
+            id: tc.id ?? `call_${crypto.randomUUID().slice(0, 8)}`,
             name: tc.name,
             input: planData,
           }],

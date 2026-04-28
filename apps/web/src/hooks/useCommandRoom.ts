@@ -107,11 +107,17 @@ function uid(): string {
   return Math.random().toString(36).slice(2, 8);
 }
 
-function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, addSessionMessage: (role: string, msg: Omit<ChatMessage, "id" | "timestamp">) => void, recentApiMessages?: Set<string>): Map<string, AgentSession> | null {
+interface WSHandlerResult {
+  sessions: Map<string, AgentSession> | null;
+  messages: Array<{ sessionRole: string; msg: Omit<ChatMessage, "id" | "timestamp"> }>;
+}
+
+function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, recentApiMessages?: Set<string>): WSHandlerResult {
+  const messages: WSHandlerResult["messages"] = [];
   switch (event.type) {
     case "agent:spawned": {
       const role = event.agent;
-      if (sessions.has(role)) return null;
+      if (sessions.has(role)) return { sessions: null, messages };
       const next = new Map(sessions);
       next.set(role, {
         role,
@@ -124,19 +130,19 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, addS
         spawnedAt: timestamp(),
         fileOps: [],
       });
-      addSessionMessage("producer", {
+      messages.push({ sessionRole: "producer", msg: {
         type: "system",
         sender: "SYSTEM",
         content: `${role.toUpperCase()} spawned via WebSocket at ${timestamp()} UTC`,
-      });
-      return next;
+      }});
+      return { sessions: next, messages };
     }
     case "agent:completed": {
       const role = event.sessionId;
       // Producer is the main orchestrator — never mark it as "completed" via agent events
-      if (role === "producer") return null;
+      if (role === "producer") return { sessions: null, messages };
       const session = sessions.get(role);
-      if (!session) return null;
+      if (!session) return { sessions: null, messages };
       const next = new Map(sessions);
       next.set(role, {
         ...session,
@@ -162,18 +168,18 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, addS
           },
         ],
       });
-      addSessionMessage("producer", {
+      messages.push({ sessionRole: "producer", msg: {
         type: "agent",
         sender: "producer",
         content: `${role.replace(/-/g, " ")} reports task complete. Session awaiting closure.`,
         showActions: true,
-      });
-      return next;
+      }});
+      return { sessions: next, messages };
     }
     case "agent:failed": {
       const role = event.sessionId;
       const session = sessions.get(role);
-      if (!session) return null;
+      if (!session) return { sessions: null, messages };
       const next = new Map(sessions);
       next.set(role, {
         ...session,
@@ -186,34 +192,34 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, addS
           timestamp: timestamp(),
         }],
       });
-      addSessionMessage("producer", {
+      messages.push({ sessionRole: "producer", msg: {
         type: "system",
         sender: "SYSTEM",
         content: `${role.toUpperCase()} failed: ${event.error}`,
-      });
-      return next;
+      }});
+      return { sessions: next, messages };
     }
     case "chat:message": {
       const sessionId = event.sessionId;
       const message = event.message;
-      if (!message) return null;
+      if (!message) return { sessions: null, messages };
       const session = sessions.get(sessionId);
-      if (!session) return null;
+      if (!session) return { sessions: null, messages };
       // Deduplicate: skip if message ID already exists
       if (message.id && session.messages.some((m) => m.id === message.id)) {
-        return null;
+        return { sessions: null, messages };
       }
       // Deduplicate: skip if this message was already added via API response (ref-based, race-condition proof)
       const msgContent = (message.content ?? "").trim();
       const msgSig = `${message.type}:${message.sender}:${msgContent}`;
       if (recentApiMessages?.has(msgSig)) {
         recentApiMessages.delete(msgSig);
-        return null;
+        return { sessions: null, messages };
       }
       // Deduplicate: skip if last message in session already matches (catches WS-before-API race)
       const lastMsg = session.messages[session.messages.length - 1];
       if (lastMsg && lastMsg.type === message.type && lastMsg.sender === message.sender && (lastMsg.content ?? "").trim() === msgContent) {
-        return null;
+        return { sessions: null, messages };
       }
       const next = new Map(sessions);
 
@@ -242,13 +248,13 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, addS
         progress: message.progress ?? session.progress,
         status: message.type === "agent" || message.type === "question" || message.type === "plan" ? "done" : session.status,
       });
-      return next;
+      return { sessions: next, messages };
     }
     case "chat:progress": {
       // Update existing progress message in place, or remove if complete
       const sessionId = event.sessionId;
       const session = sessions.get(sessionId);
-      if (!session) return null;
+      if (!session) return { sessions: null, messages };
       const next = new Map(sessions);
 
       // If progress is 100, remove the progress message
@@ -258,7 +264,7 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, addS
           messages: session.messages.filter((m) => m.id !== event.progressMsgId),
           progress: 100,
         });
-        return next;
+        return { sessions: next, messages };
       }
 
       next.set(sessionId, {
@@ -270,15 +276,15 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, addS
         ),
         progress: event.progress,
       });
-      return next;
+      return { sessions: next, messages };
     }
     case "skill:phase:complete": {
-      addSessionMessage("producer", {
+      messages.push({ sessionRole: "producer", msg: {
         type: "system",
         sender: "SYSTEM",
         content: `Skill phase ${event.phase}: ${(event.output as string)?.slice(0, 100) ?? "complete"}...`,
-      });
-      return null;
+      }});
+      return { sessions: null, messages };
     }
     case "log:entry": {
       // Prefer event.sessionId, fall back to agent role lookup
@@ -288,7 +294,7 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, addS
         ? event.agent
         : "producer";
       const session = sessions.get(targetSession);
-      if (!session) return null;
+      if (!session) return { sessions: null, messages };
 
       // Parse tool call from log message, e.g. "[producer] Read: /path/to/file"
       const toolMatch = event.message.match(/^\[([^\]]+)\]\s+(\w+):\s*(.+)$/);
@@ -322,7 +328,7 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, addS
                   : m
               ),
             });
-            return next;
+            return { sessions: next, messages };
           }
         }
       }
@@ -332,20 +338,20 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, addS
       const logContent = `[${event.level.toUpperCase()}] ${event.message}`;
       const recentMessages = session.messages.slice(-10);
       if (!recentMessages.some((m) => m.type === "system" && m.content === logContent)) {
-        addSessionMessage(targetSession, {
+        messages.push({ sessionRole: targetSession, msg: {
           type: "system",
           sender: "SYSTEM",
           content: logContent,
-        });
+        }});
       }
-      return null;
+      return { sessions: null, messages };
     }
     case "chat:session:deleted": {
       const sid = event.sessionId;
-      if (!sessions.has(sid)) return null;
+      if (!sessions.has(sid)) return { sessions: null, messages };
       const next = new Map(sessions);
       next.delete(sid);
-      return next;
+      return { sessions: next, messages };
     }
     case "workflow:stage": {
       const { sessionId, workflowId, stage, ticketId, agentRole } = event;
@@ -365,7 +371,7 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, addS
           ? "completed" as const
           : s.stage === stage ? "active" as const : "pending" as const,
       }));
-      addSessionMessage(sessionId, {
+      messages.push({ sessionRole: sessionId, msg: {
         type: "workflow",
         sender: "SYSTEM",
         content: `Pipeline: ${stage.toUpperCase()}`,
@@ -374,27 +380,27 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, addS
           steps,
           currentStage: stage as "plan" | "decompose" | "execute" | "verify" | "fix",
         },
-      });
-      return null;
+      }});
+      return { sessions: null, messages };
     }
     case "quest:linked": {
-      addSessionMessage(event.sessionId, {
+      messages.push({ sessionRole: event.sessionId, msg: {
         type: "system",
         sender: "SYSTEM",
         content: `Quest ${event.ticketId.replace("ticket-", "#")} assigned to ${event.agentRole.replace(/-/g, " ")}`,
-      });
-      return null;
+      }});
+      return { sessions: null, messages };
     }
     case "workflow:complete": {
-      addSessionMessage(event.sessionId, {
+      messages.push({ sessionRole: event.sessionId, msg: {
         type: "system",
         sender: "SYSTEM",
         content: `Workflow ${event.success ? "completed successfully" : "failed"}`,
-      });
-      return null;
+      }});
+      return { sessions: null, messages };
     }
     default:
-      return null;
+      return { sessions: null, messages };
   }
 }
 
@@ -409,6 +415,9 @@ export function useCommandRoom() {
   const activityLogRef = useRef<string[]>([]);
   const addSessionMessageRef = useRef<(role: string, msg: Omit<ChatMessage, "id" | "timestamp">) => void | undefined>(undefined);
   const recentApiMessagesRef = useRef<Set<string>>(new Set());
+  // F2: Ref for currentSession to avoid stale closures in async callbacks
+  const currentSessionRef = useRef(currentSession);
+  currentSessionRef.current = currentSession;
 
   // Initialize on client by fetching from API
   useEffect(() => {
@@ -499,8 +508,20 @@ export function useCommandRoom() {
   // WebSocket integration — use functional update to avoid stale closure
   const onWSEvent = useCallback((event: WSEvent) => {
     setSessions((prevSessions) => {
-      const updated = handleWSEvent(event, prevSessions, addSessionMessageRef.current!, recentApiMessagesRef.current);
-      return updated ?? prevSessions;
+      const updated = handleWSEvent(event, prevSessions, recentApiMessagesRef.current);
+      // Process any messages that were generated by the handler
+      updated.messages.forEach(({ sessionRole, msg }) => {
+        const session = prevSessions.get(sessionRole);
+        if (session) {
+          const next = new Map(prevSessions);
+          next.set(sessionRole, {
+            ...session,
+            messages: [...session.messages, { ...msg, id: uid(), timestamp: timestamp() }],
+          });
+          prevSessions = next;
+        }
+      });
+      return updated.sessions ?? prevSessions;
     });
   }, []);
 
@@ -865,13 +886,15 @@ Agents: 3 active`,
     }
 
     // Default: normal message routed to current session
-    addSessionMessage(currentSession, { type: "user", sender: "DIRECTOR", content: trimmed, images });
+    // F2: Capture ref value for async callbacks
+    const session = currentSessionRef.current;
+    addSessionMessage(session, { type: "user", sender: "DIRECTOR", content: trimmed, images });
 
     setIsLoading(true);
 
     // Call real API for current session
     apiFetch<{ userMessage: ChatMessage; assistantMessage?: ChatMessage; errorMessage?: ChatMessage }>(
-      `/api/chat/sessions/${currentSession}/messages`,
+      `/api/chat/sessions/${session}/messages`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -891,7 +914,12 @@ Agents: 3 active`,
           const msgContent = result.assistantMessage.content;
           // Track signature for WebSocket deduplication
           recentApiMessagesRef.current.add(`${msgType}:${msgSender}:${msgContent.trim()}`);
-          addSessionMessage(currentSession, {
+          // F3: Cap at 100 entries, trim to 50 when exceeded
+          if (recentApiMessagesRef.current.size > 100) {
+            const entries = [...recentApiMessagesRef.current];
+            recentApiMessagesRef.current = new Set(entries.slice(-50));
+          }
+          addSessionMessage(session, {
             type: msgType,
             sender: msgSender,
             content: msgContent,
@@ -902,7 +930,7 @@ Agents: 3 active`,
             planPhases: result.assistantMessage.planPhases as ChatMessage["planPhases"],
           });
         } else if (result.errorMessage) {
-          addSessionMessage(currentSession, {
+          addSessionMessage(session, {
             type: "system",
             sender: "SYSTEM",
             content: result.errorMessage.content,
@@ -912,7 +940,7 @@ Agents: 3 active`,
       .catch((error) => {
         setIsLoading(false);
         console.error("Failed to send message:", error);
-        addSessionMessage(currentSession, {
+        addSessionMessage(session, {
           type: "system",
           sender: "SYSTEM",
           content: `Error: ${error instanceof Error ? error.message : "Failed to get response"}`,

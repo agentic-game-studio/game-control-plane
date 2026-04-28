@@ -3,6 +3,7 @@
 import { useState, useCallback, useRef, useMemo } from "react";
 import type { ChatMessage } from "@/hooks/useCommandRoom";
 import { renderMarkdown } from "@/lib/markdown";
+import { formatTime } from "@/lib/format-time";
 
 interface QuestionMessageProps {
   msg: ChatMessage;
@@ -10,19 +11,6 @@ interface QuestionMessageProps {
   sender?: string;
   isAnswered?: boolean;
   answerContent?: string;
-}
-
-function formatTime(ts: string): string {
-  try {
-    const d = new Date(ts);
-    const mo = String(d.getMonth() + 1).padStart(2, "0");
-    const day = String(d.getDate()).padStart(2, "0");
-    const hr = String(d.getHours()).padStart(2, "0");
-    const mn = String(d.getMinutes()).padStart(2, "0");
-    return `${mo}/${day} ${hr}:${mn}`;
-  } catch {
-    return ts;
-  }
 }
 
 const OPTION_LETTERS = ["A", "B", "C", "D", "E", "F", "G", "H"];

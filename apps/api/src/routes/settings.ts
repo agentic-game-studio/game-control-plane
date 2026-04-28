@@ -39,30 +39,30 @@ function checkWeeklyReset(data: SettingsConfig): SettingsConfig {
 export const settingsRouter: Router = Router();
 
 // GET /api/settings - Get settings (with auto weekly reset check)
-settingsRouter.get("/", (_req: Request, res: Response) => {
+settingsRouter.get("/", async (_req: Request, res: Response) => {
   try {
-    let data = readData<SettingsConfig>("settings.json");
+    let data = await readData<SettingsConfig>("settings.json");
     data = checkWeeklyReset(data);
     // Only write back if reset actually happened
-    const originalResetAt = readData<SettingsConfig>("settings.json").credits.subscription.resetAt;
+    const originalResetAt = (await readData<SettingsConfig>("settings.json")).credits.subscription.resetAt;
     if (data.credits.subscription.resetAt !== originalResetAt) {
-      writeData("settings.json", data);
+      await writeData("settings.json", data);
       broadcastEvent({ type: "settings:updated", settings: data } as WSEvent);
     }
     res.json({ success: true, data });
   } catch {
     const fresh = DEFAULT_SETTINGS;
-    writeData("settings.json", fresh);
+    await writeData("settings.json", fresh);
     res.json({ success: true, data: fresh });
   }
 });
 
 // PATCH /api/settings - Update settings
-settingsRouter.patch("/", (req: Request, res: Response) => {
+settingsRouter.patch("/", async (req: Request, res: Response) => {
   const updates = req.body as Partial<SettingsConfig>;
 
   try {
-    const data = readData<SettingsConfig>("settings.json");
+    const data = await readData<SettingsConfig>("settings.json");
     const updatedSettings: SettingsConfig = {
       ...data,
       ...updates,
@@ -81,7 +81,7 @@ settingsRouter.patch("/", (req: Request, res: Response) => {
       return;
     }
 
-    writeData("settings.json", updatedSettings);
+    await writeData("settings.json", updatedSettings);
     broadcastEvent({ type: "settings:updated", settings: updatedSettings } as WSEvent);
 
     res.json({ success: true, data: updatedSettings });
@@ -91,10 +91,10 @@ settingsRouter.patch("/", (req: Request, res: Response) => {
 });
 
 // POST /api/settings/reset - Reset settings to defaults
-settingsRouter.post("/reset", (_req: Request, res: Response) => {
+settingsRouter.post("/reset", async (_req: Request, res: Response) => {
   try {
     const fresh = DEFAULT_SETTINGS;
-    writeData("settings.json", fresh);
+    await writeData("settings.json", fresh);
     broadcastEvent({ type: "settings:updated", settings: fresh } as WSEvent);
     res.json({ success: true, data: fresh });
   } catch (error) {
@@ -103,7 +103,7 @@ settingsRouter.post("/reset", (_req: Request, res: Response) => {
 });
 
 // POST /api/settings/topup - Add on-top credits
-settingsRouter.post("/topup", (req: Request, res: Response) => {
+settingsRouter.post("/topup", async (req: Request, res: Response) => {
   const { amount } = req.body as { amount?: number };
 
   if (!amount || amount <= 0 || !Number.isFinite(amount)) {
@@ -112,7 +112,7 @@ settingsRouter.post("/topup", (req: Request, res: Response) => {
   }
 
   try {
-    const updated = updateData<SettingsConfig>("settings.json", (data) => ({
+    const updated = await updateData<SettingsConfig>("settings.json", (data) => ({
       ...data,
       credits: {
         ...data.credits,
@@ -139,7 +139,7 @@ settingsRouter.post("/topup", (req: Request, res: Response) => {
 });
 
 // POST /api/settings/upgrade - Upgrade subscription tier
-settingsRouter.post("/upgrade", (req: Request, res: Response) => {
+settingsRouter.post("/upgrade", async (req: Request, res: Response) => {
   const { tier } = req.body as { tier?: SubscriptionTier };
 
   if (!tier || !TIER_DEFINITIONS.some((t) => t.id === tier)) {
@@ -149,7 +149,7 @@ settingsRouter.post("/upgrade", (req: Request, res: Response) => {
 
   try {
     const tierDef = TIER_DEFINITIONS.find((t) => t.id === tier)!;
-    const updated = updateData<SettingsConfig>("settings.json", (data) => ({
+    const updated = await updateData<SettingsConfig>("settings.json", (data) => ({
       ...data,
       tier,
       credits: {
@@ -170,7 +170,7 @@ settingsRouter.post("/upgrade", (req: Request, res: Response) => {
 });
 
 // POST /api/settings/consume - Consume credits for a task
-settingsRouter.post("/consume", (req: Request, res: Response) => {
+settingsRouter.post("/consume", async (req: Request, res: Response) => {
   const { taskName, creditsUsed } = req.body as { taskName?: string; creditsUsed?: number };
 
   if (!taskName || !creditsUsed || creditsUsed <= 0 || !Number.isFinite(creditsUsed)) {
@@ -179,7 +179,7 @@ settingsRouter.post("/consume", (req: Request, res: Response) => {
   }
 
   try {
-    const updated = updateData<SettingsConfig>("settings.json", (data) => {
+    const updated = await updateData<SettingsConfig>("settings.json", (data) => {
       let remaining = creditsUsed;
       let onTopCurrent = data.credits.onTop.current;
       let subCurrent = data.credits.subscription.current;

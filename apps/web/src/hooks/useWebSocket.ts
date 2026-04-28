@@ -12,9 +12,10 @@ export function useWebSocket(onEvent: (event: WSEvent) => void) {
 
   const connect = useCallback(() => {
     const wsUrl = process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:3001";
+    const apiKey = process.env.NEXT_PUBLIC_API_KEY ?? "";
 
     try {
-      const ws = new WebSocket(`${wsUrl}/ws`);
+      const ws = new WebSocket(`${wsUrl}/ws${apiKey ? `?apiKey=${encodeURIComponent(apiKey)}` : ""}`);
 
       ws.onopen = () => {
         console.log("[WS] Connected");
