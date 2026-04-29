@@ -15,22 +15,73 @@ import { callLLMWithTools, GAME_STUDIO_TOOLS, type LLMMessage, type ProgressCall
 import { broadcast } from "./websocket.js";
 import { getZaiModel } from "../config/model-mapping.js";
 import type { WSEvent, AgentRole } from "@game-studio/types";
+import {
+  GodotMCPService,
+  getGodotMCPService,
+  getOrCreateGodotMCPService,
+  removeGodotMCPService,
+  isGodotMCPTool,
+  getGodotMCPToolDefinitions,
+  type GodotMCPServiceOptions,
+} from "./godot-mcp-service.js";
 
 export interface ProjectContext {
   name: string;
   description: string;
   engine: string | null;
   workspacePath: string | null;
+  projectId?: string;
 }
 
 function appendProjectContext(systemPrompt: string, project: ProjectContext): string {
-  return `${systemPrompt}
+  const base = `${systemPrompt}
 
 # Active Project Context
 - Name: ${project.name}
 - Description: ${project.description || "(no description)"}
 - Engine: ${project.engine ?? "TBD"}
 - Workspace: ${project.workspacePath ?? "default"}`;
+
+  // Inject Godot MCP instructions for godot projects
+  if (project.engine === "godot") {
+    const godotInstructionsPath = path.join(
+      process.cwd(),
+      "godot-mcp-pro-v1.11.0",
+      "instructions",
+      "CLAUDE.md"
+    );
+    try {
+      // Load synchronously since this is a hot path
+      const godotInstructions = require("fs").readFileSync(godotInstructionsPath, "utf-8");
+      return `${base}
+
+# Godot MCP Pro — Use These Tools Instead of File I/O
+
+For Godot projects, you have access to 169 MCP tools that control the Godot editor directly.
+When interacting with a Godot project:
+
+- **NEVER** use Read/Write/Edit on .gd, .tscn, .tres, or project.godot files directly
+- **ALWAYS** use Godot MCP tools instead:
+  - Scripts: use create_script, read_script, edit_script, attach_script
+  - Scenes: use create_scene, open_scene, save_scene, get_scene_tree, add_node, batch_add_nodes
+  - Properties: use update_property, get_node_properties (inspector-driven, not code)
+  - Testing: use play_scene, simulate_key, capture_frames, assert_node_state, run_stress_test
+  - Audio: use add_audio_player, set_audio_bus, add_audio_bus_effect
+  - Animation: use create_animation, add_animation_track, set_animation_keyframe
+  - Tilemap: use tilemap_set_cell, tilemap_fill_rect, tilemap_get_info
+  - Physics: use setup_physics_body, setup_collision, set_physics_layers
+  - Navigation: use setup_navigation_region, setup_navigation_agent, bake_navigation_mesh
+  - Shaders: use create_shader, edit_shader, assign_shader_material, set_shader_param
+
+**Important**: Godot MCP Pro connects to the Godot editor via WebSocket. The editor must be running with the Godot MCP Pro plugin enabled for runtime tools (play_scene, simulate_key, capture_frames, etc.) to work.
+
+${godotInstructions}`;
+    } catch {
+      // Godot MCP instructions not found — skip injection
+    }
+  }
+
+  return base;
 }
 import { getWorkflow, createQuestTicket, moveQuestTicket } from "./quest-bridge.js";
 
@@ -81,9 +132,13 @@ async function executeTool(
   input: Record<string, unknown>,
   sessionId: string,
   agentRole: AgentRole,
+  projectContext?: ProjectContext,
   _depth = 0,
 ): Promise<string> {
-  const workspaceDir = loadConfig().WORKSPACE_DIR;
+  // Use project's workspacePath if available, otherwise fall back to global config
+  const workspaceDir = projectContext?.workspacePath
+    ? path.resolve(loadConfig().WORKSPACE_DIR, projectContext.workspacePath)
+    : loadConfig().WORKSPACE_DIR;
 
   try {
     switch (name) {
@@ -276,6 +331,20 @@ async function executeTool(
       }
 
       default:
+        // Check if this is a Godot MCP tool and route to the MCP service
+        if (isGodotMCPTool(name)) {
+          // Use projectId from ProjectContext to lookup the service (shared across sessions)
+          const projectId = projectContext?.projectId;
+          const godotService = projectId ? getGodotMCPService(projectId) : null;
+          if (godotService?.running()) {
+            logEntry(sessionId, "info", `[${agentRole}] Godot MCP: ${name}`, agentRole);
+            const result = await godotService.executeTool(name, input);
+            return result;
+          } else {
+            return `Error: Godot MCP tool '${name}' called but Godot MCP service is not running for this project. ` +
+              `Ensure project engine is "godot" and the Godot editor is running with the MCP plugin enabled.`;
+          }
+        }
         return `Unknown tool: ${name}`;
     }
   } catch (err: unknown) {
@@ -492,16 +561,22 @@ export async function invokeAgent(
 
     messages.push({ role: "user", content: userMessage });
 
+    // Build tool list — inject Godot MCP tools for godot projects
+    const godotTools = projectContext?.engine === "godot"
+      ? getGodotMCPToolDefinitions()
+      : [];
+    const allTools = [...GAME_STUDIO_TOOLS, ...godotTools];
+
     // Call ZAI API with tools
     const response = await callLLMWithTools(
       {
         agentRole,
         messages,
-        tools: GAME_STUDIO_TOOLS,
+        tools: allTools,
         systemPrompt,
         model,
       },
-      (name, input) => executeTool(name, input, sessionId, agentRole, _depth),
+      (name, input) => executeTool(name, input, sessionId, agentRole, projectContext, _depth),
       onProgress
     );
 
@@ -562,15 +637,21 @@ export async function continueConversation(
     const modelTier = agentPrompt?.model ?? "sonnet";
     const model = getZaiModel(modelTier);
 
+    // Build tool list — inject Godot MCP tools for godot projects
+    const godotTools = projectContext?.engine === "godot"
+      ? getGodotMCPToolDefinitions()
+      : [];
+    const allTools = [...GAME_STUDIO_TOOLS, ...godotTools];
+
     const response = await callLLMWithTools(
       {
         agentRole,
         messages,
-        tools: GAME_STUDIO_TOOLS,
+        tools: allTools,
         systemPrompt,
         model,
       },
-      (name, input) => executeTool(name, input, sessionId, agentRole, _depth),
+      (name, input) => executeTool(name, input, sessionId, agentRole, projectContext, _depth),
       onProgress
     );
 

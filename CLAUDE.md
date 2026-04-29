@@ -302,6 +302,7 @@ pnpm test:e2e          # Playwright E2E test suite (apps/web/e2e/)
 - `apps/api/src/middleware/request-logger.ts` — HTTP request/response logging middleware
 - `apps/api/src/middleware/auth.ts` — Timing-safe authentication middleware
 - `apps/api/src/services/websocket.ts` — WebSocket broadcast + SSE client tracking
+- `apps/api/src/services/godot-mcp-service.ts` — Godot MCP Pro server lifecycle, stdio JSON-RPC client, 169 tool definitions
 - `apps/api/src/services/document-store.ts` — Workspace file scanning, wikilink extraction, backlink computation, fs.watch for real-time updates
 - `apps/api/src/services/data-store.ts` — Async file-based JSON persistence for dashboard, tickets, assets, settings with rate limiting
 - `apps/api/src/services/quest-bridge.ts` — Intercepts Task tool calls to auto-create and track Quest tickets (Available → Processing → Verify → Completed)
@@ -350,6 +351,7 @@ Agent tool call (e.g. create_scene)
 ### Key Design Decisions
 
 - **Project-keyed** — Service is keyed by `projectId`, shared across all sessions (producer + spawned agents)
+- **Project workspace isolation** — `executeTool()` uses `projectContext.workspacePath` (resolved relative to `WORKSPACE_DIR`) for file operations. Each project has its own directory, preventing cross-project contamination.
 - **Graceful degradation** — Clear error message if Godot not running or MCP plugin not enabled
 - **LITE mode** — Uses `--lite` flag (81 tools) to reduce context overhead. Use `--minimal` (35 tools) or `--full` (169 tools) via `GodotMCPServiceOptions.mode`
 
