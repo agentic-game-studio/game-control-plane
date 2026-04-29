@@ -28,16 +28,14 @@ const transport = pino.transport({
       level: "info",
       target: "pino-file-transport",
       options: {
-        destination: LOG_FILE,
-        mkdir: true,
+        path: LOG_FILE,
       },
     },
     {
       level: "error",
       target: "pino-file-transport",
       options: {
-        destination: join(LOG_DIR, "error.log"),
-        mkdir: true,
+        path: join(LOG_DIR, "error.log"),
       },
     },
   ],

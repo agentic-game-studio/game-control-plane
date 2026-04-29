@@ -35,7 +35,8 @@ export type WSEvent =
   | { type: "team:started"; teamId: string; sessionId: string }
   | { type: "team:completed"; teamId: string; sessionId: string; output: string }
   | { type: "chat:message"; sessionId: string; message: ChatMessage }
-  | { type: "chat:progress"; sessionId: string; progressMsgId: string; progress: number; content: string }
+  | { type: "chat:progress"; sessionId: string; progressMsgId: string; progress: number; content: string; thinking?: string }
+  | { type: "agent:loop:detected"; sessionId: string; toolName: string; iterations: number; message: string }
   | { type: "chat:session:created"; session: ChatSession }
   | { type: "chat:session:deleted"; sessionId: string }
   | { type: "workflow:stage"; sessionId: string; workflowId: string; stage: WorkflowStage; ticketId?: string; agentRole?: string }

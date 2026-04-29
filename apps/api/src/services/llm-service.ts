@@ -113,14 +113,23 @@ export interface InvokeResult {
   usage?: { input_tokens: number; output_tokens: number };
 }
 
-/** Create a progress callback that broadcasts chat:progress events */
+/** Create a progress callback that broadcasts chat:progress events with thinking content */
 export function makeProgressCallback(sessionId: string, progressMsgId: string): ProgressCallback {
   return (info) => {
-    // Progress updates are now handled by the heartbeat in chat.ts
-    // This callback is kept for future use (e.g., updating thinking text)
-    void info;
-    void sessionId;
-    void progressMsgId;
+    if (info.phase === "executing" && info.currentTool) {
+      logEntry(sessionId, "info", `[TOOL] ${info.currentTool} (iteration ${info.iteration})`);
+    }
+    // Broadcast thinking content updates with special progress value -1
+    if (info.thinking) {
+      broadcast({
+        type: "chat:progress",
+        sessionId,
+        progressMsgId,
+        progress: -1, // Special value to indicate thinking update
+        content: info.thinking.slice(0, 100),
+        thinking: info.thinking.slice(0, 2000),
+      } as WSEvent);
+    }
   };
 }
 
@@ -349,7 +358,8 @@ async function executeTool(
     }
   } catch (err: unknown) {
     const error = err as Error;
-    return `Tool execution error: ${error.message}`;
+    logEntry(sessionId, "error", `[TOOL ERROR: ${name}] ${error.message}`, agentRole);
+    return `[TOOL ERROR: ${name}] ${error.message}`;
   }
 }
 
@@ -577,7 +587,8 @@ export async function invokeAgent(
         model,
       },
       (name, input) => executeTool(name, input, sessionId, agentRole, projectContext, _depth),
-      onProgress
+      onProgress,
+      sessionId
     );
 
     if (broadcastEvents) {
@@ -652,7 +663,8 @@ export async function continueConversation(
         model,
       },
       (name, input) => executeTool(name, input, sessionId, agentRole, projectContext, _depth),
-      onProgress
+      onProgress,
+      sessionId
     );
 
     return {

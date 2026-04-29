@@ -11,6 +11,7 @@
 import { loadConfig } from "../config.js";
 import { getAgentSystemPrompt, loadAgentPrompts } from "../prompts/agent-prompt-loader.js";
 import { logger } from "../utils/logger.js";
+import { broadcast } from "../services/websocket.js";
 
 export interface LLMMessage {
   role: "system" | "user" | "assistant" | "tool";
@@ -74,6 +75,8 @@ const TOOL_IMPORTANCE: Record<string, number> = {
 const DEFAULT_TOOL_IMPORTANCE = 40;
 const MAX_CONTEXT_CHARS = 500_000;
 const MAX_TOOL_RESULT_BYTES = 15_000;
+const SUMMARIZE_THRESHOLD = 400_000;  // Trigger summary when context exceeds this
+const KEEP_RECENT_MESSAGES = 10;       // Never prune last N messages
 
 async function fetchWithRetry(url: string, options: RequestInit, retries = MAX_RETRIES): Promise<Response> {
   let lastError: Error | null = null;
@@ -104,6 +107,119 @@ async function fetchWithRetry(url: string, options: RequestInit, retries = MAX_R
 function truncate(content: string, maxChars: number): string {
   if (content.length <= maxChars) return content;
   return content.slice(0, maxChars) + `\n\n[... TRUNCATED ${content.length - maxChars} chars ...]`;
+}
+
+const MAX_CONSECUTIVE_SAME_TOOL_CALLS = 4;
+const MAX_REPETITION_WINDOW = 6;
+
+function hashToolInput(input: Record<string, unknown>): string {
+  try {
+    return JSON.stringify(input, Object.keys(input).sort());
+  } catch {
+    return String(input);
+  }
+}
+
+function detectRepetitiveLoop(recentCalls: Array<{ name: string; inputHash: string }>): { detected: boolean; message?: string } {
+  if (recentCalls.length < MAX_CONSECUTIVE_SAME_TOOL_CALLS) return { detected: false };
+
+  const lastN = recentCalls.slice(-MAX_CONSECUTIVE_SAME_TOOL_CALLS);
+  const allSame = lastN.every(
+    (call) => call.name === lastN[0].name && call.inputHash === lastN[0].inputHash
+  );
+
+  if (allSame) {
+    return {
+      detected: true,
+      message: `Same tool call "${lastN[0].name}" repeated ${MAX_CONSECUTIVE_SAME_TOOL_CALLS} times with identical arguments. Consider a different approach.`,
+    };
+  }
+
+  // Check for same tool name 4+ times
+  const toolCounts = new Map<string, number>();
+  for (const call of recentCalls) {
+    toolCounts.set(call.name, (toolCounts.get(call.name) || 0) + 1);
+  }
+  const maxCount = Math.max(...toolCounts.values());
+  if (maxCount >= MAX_CONSECUTIVE_SAME_TOOL_CALLS) {
+    const mostFrequent = [...toolCounts.entries()].find(([, c]) => c === maxCount)?.[0] ?? "";
+    return {
+      detected: true,
+      message: `Tool "${mostFrequent}" called ${maxCount} times in last ${recentCalls.length} iterations. Progress may be stalled.`,
+    };
+  }
+
+  return { detected: false };
+}
+
+/** Count total characters in messages */
+function countMessageChars(messages: LLMMessage[]): number {
+  return messages.reduce(
+    (sum, m) => sum + (typeof m.content === "string" ? m.content.length : 0),
+    0
+  );
+}
+
+/** Summarize old messages when context exceeds threshold */
+async function summarizeOldMessages(messages: LLMMessage[]): Promise<string | null> {
+  const totalChars = countMessageChars(messages);
+  if (totalChars <= SUMMARIZE_THRESHOLD) return null;
+
+  // Separate system, recent, and old messages
+  const systemMsgs = messages.filter(m => m.role === "system");
+  const nonSystem = messages.filter(m => m.role !== "system");
+  const recentMsgs = nonSystem.slice(-KEEP_RECENT_MESSAGES);
+  const oldMsgs = nonSystem.slice(0, -KEEP_RECENT_MESSAGES);
+
+  if (oldMsgs.length === 0) return null;
+
+  // Build summary prompt
+  const conversationText = oldMsgs
+    .map(m => `${m.role}: ${typeof m.content === "string" ? m.content.slice(0, 2000) : "[tool content]"}`)
+    .join("\n");
+
+  const summaryPrompt = `Summarize this conversation history concisely.
+Keep: key decisions, important facts, active tasks, code snippets.
+Remove: greetings, small talk, redundant explanations.
+
+Conversation to summarize (${oldMsgs.length} messages):
+${conversationText}
+
+Respond ONLY with the summary, nothing else. Max 2000 characters.`;
+
+  // Use a lightweight model for summarization (haiku)
+  const config = loadConfig();
+  try {
+    const summaryResponse = await fetchWithRetry(
+      `${config.ZAI_BASE_URL}/v1/messages`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": config.ZAI_API_KEY,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: "glm-4.7-flash",
+          max_tokens: 1024,
+          messages: [{ role: "user", content: summaryPrompt }],
+        }),
+      }
+    );
+
+    if (summaryResponse.ok) {
+      const data = await summaryResponse.json() as {
+        content?: Array<{ type: string; text?: string }>;
+      };
+      const summaryText = data.content?.find(c => c.type === "text")?.text ?? "";
+      return summaryText.slice(0, 2000);
+    }
+  } catch {
+    // Summarization failed — continue without it
+    logger.warn({ event: "summarization_failed" }, "Failed to summarize old messages");
+  }
+
+  return null;
 }
 
 function pruneMessages(messages: LLMMessage[]): LLMMessage[] {
@@ -262,13 +378,15 @@ export type ProgressCallback = (info: {
   totalTools: number;
   currentTool?: string;
   phase: "thinking" | "executing" | "responding";
+  thinking?: string;
 }) => void;
 
 /** Call LLM with tool execution loop */
 export async function callLLMWithTools(
   request: LLMRequest,
   toolExecutor: (name: string, input: Record<string, unknown>) => Promise<string>,
-  onProgress?: ProgressCallback
+  onProgress?: ProgressCallback,
+  sessionId?: string
 ): Promise<LLMResponse> {
   const config = loadConfig();
   const maxTools = config.MAX_TOOL_CALLS;
@@ -276,14 +394,37 @@ export async function callLLMWithTools(
   let iteration = 0;
   let totalTools = 0;
   let messages = [...request.messages];
+  let recentToolCalls: Array<{ name: string; inputHash: string }> = [];
+  let summarizedThisContext = false;
 
   while (iteration < 200) {
     iteration++;
 
-    onProgress?.({ iteration, totalTools, phase: "thinking" });
+    // Check if we need to summarize old messages to stay within context
+    if (!summarizedThisContext && countMessageChars(messages) > SUMMARIZE_THRESHOLD) {
+      const summary = await summarizeOldMessages(messages);
+      if (summary) {
+        // Get system messages to preserve
+        const systemMsgs = messages.filter(m => m.role === "system");
+        const nonSystem = messages.filter(m => m.role !== "system");
+        const recentMsgs = nonSystem.slice(-KEEP_RECENT_MESSAGES);
+
+        // Replace messages with: system + summary + recent
+        messages = [
+          ...systemMsgs,
+          { role: "user", content: `[Previous Context Summary — Do not repeat this information verbatim, but use it for continuity]\n${summary}` },
+          ...recentMsgs,
+        ];
+        summarizedThisContext = true;
+        logger.info({ event: "context_summarized", originalChars: countMessageChars(messages), summaryChars: summary.length }, "Context summarized");
+      }
+    }
+
     const response = await callZAI({ ...request, messages });
+    onProgress?.({ iteration, totalTools, phase: "thinking", thinking: response.content.slice(0, 500) });
 
     if (!response.tool_calls || response.tool_calls.length === 0) {
+      onProgress?.({ iteration, totalTools, phase: "responding", thinking: response.content.slice(0, 500) });
       return response;
     }
 
@@ -335,6 +476,38 @@ export async function callLLMWithTools(
       }
 
       toolResults.push(`[Tool: ${tc.name}]\n${truncate(result, MAX_TOOL_RESULT_BYTES)}`);
+
+      // Track tool calls for loop detection
+      recentToolCalls.push({ name: tc.name, inputHash: hashToolInput(tc.input) });
+      if (recentToolCalls.length > MAX_REPETITION_WINDOW) {
+        recentToolCalls.shift();
+      }
+
+      // Check for repetitive loop
+      const loopCheck = detectRepetitiveLoop(recentToolCalls);
+      if (loopCheck.detected && loopCheck.message) {
+        // Broadcast loop detection to frontend
+        broadcast({
+          type: "agent:loop:detected",
+          sessionId: sessionId ?? "",
+          toolName: tc.name,
+          iterations: iteration,
+          message: loopCheck.message,
+        } as any);
+
+        // Inject warning into context
+        messages.push({ role: "assistant", content: response.content, tool_calls: response.tool_calls });
+        messages.push({
+          role: "user",
+          content: `[SYSTEM WARNING] ${loopCheck.message}\n\nTry a different approach or use AskUserQuestion to consult the user.`,
+        });
+
+        // Force stop after 15 iterations if still looping
+        if (iteration > 15) {
+          const final = await callZAI({ ...request, messages });
+          return { ...final, tool_calls: undefined };
+        }
+      }
     }
 
     messages.push({ role: "assistant", content: response.content, tool_calls: response.tool_calls });

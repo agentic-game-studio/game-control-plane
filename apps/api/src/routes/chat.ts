@@ -138,6 +138,28 @@ function migrateLegacyProducer(state: ChatState): boolean {
   return true;
 }
 
+/** Prune conversation history to stay within context limits */
+const MAX_CONTEXT_CHARS = 500_000;
+
+function pruneConversationHistory(history: LLMMessage[]): LLMMessage[] {
+  const totalChars = history.reduce(
+    (sum, m) => sum + (typeof m.content === "string" ? m.content.length : 0),
+    0
+  );
+  if (totalChars <= MAX_CONTEXT_CHARS) return history;
+
+  // Keep recent messages as atomic groups (assistant+tool pairs must not be split)
+  const recentCount = 30;
+  let recent = history.slice(-recentCount);
+
+  // If slice starts with tool result, skip it (incomplete pair)
+  if (recent.length > 0 && recent[0].role === "tool") {
+    recent = recent.slice(1);
+  }
+
+  return recent;
+}
+
 async function loadChatState(): Promise<ChatState> {
   try {
     const state = await readData<ChatState>(CHAT_STATE_FILE);
@@ -651,6 +673,9 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
       content: result.content,
     });
 
+    // Prune conversation history to stay within context limits
+    session.conversationHistory = pruneConversationHistory(session.conversationHistory);
+
     // Check if LLM asked a question via AskUserQuestion tool
     const questionData = parseQuestionFromToolResult(result.toolCalls);
 
@@ -896,6 +921,7 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
 
       newSession.messages.push(responseMessage);
       newSession.conversationHistory.push({ role: "assistant", content: result.content });
+      newSession.conversationHistory = pruneConversationHistory(newSession.conversationHistory);
 
       broadcast({
         type: "chat:message",

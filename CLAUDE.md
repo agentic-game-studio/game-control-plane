@@ -141,6 +141,55 @@ Express server on port 3001 with:
 
 The `callLLMWithTools()` function sends a request to ZAI API with game studio tools (Read, Write, Edit, Glob, Grep, Bash, Task). Tool calls are executed on the backend and results returned to the LLM. Loop continues until no more tool calls or max tools reached (100).
 
+### Context Management (Long Sessions)
+
+For long-running sessions, the platform employs smart context management:
+
+| Threshold | Mechanism | Behavior |
+|-----------|-----------|----------|
+| > 400k chars | Summarization | LLM summarizes old messages, injects as `[Previous Context Summary]` |
+| > 500k chars | Pruning | Keeps last 30 messages as atomic groups |
+| > 80 messages | Pruning | Triggers pruning in tool execution loop |
+
+**Summarization flow:**
+1. When context exceeds 400k chars, `summarizeOldMessages()` is called
+2. Uses lightweight model (glm-4.7-flash) to summarize old messages
+3. Preserves: key decisions, important facts, active tasks, code snippets
+4. Keeps: system messages + summary + last 10 messages
+5. `summarizedThisContext` flag prevents repeated summarization in same turn
+
+**Conversation history pruning:**
+- `pruneConversationHistory()` in `chat.ts` keeps last 30 messages
+- Skips incomplete tool pairs (assistant+tool must stay together)
+- Triggers after each LLM response
+
+### Loop Detection
+
+The tool execution loop detects repetitive patterns to prevent infinite loops:
+
+| Detection | Threshold | Action |
+|-----------|-----------|--------|
+| Same tool + args | 4 times | Inject warning, continue |
+| Same tool name | 4+ times in 6 iterations | Inject warning |
+| Continued loop | After 15 iterations | Force stop, return response |
+
+Loop detection events (`agent:loop:detected`) are broadcast via WebSocket and displayed as system messages in the UI.
+
+### Tool Error Visibility
+
+Tool execution errors are prefixed with `[TOOL ERROR: ${name}]` for visibility in logs and LLM context. This helps:
+- Distinguish tool errors from content in logs
+- Prevent LLM from retrying same failed operation
+- Surface errors early in the tool execution loop
+
+### Thinking Content
+
+Agent thinking/reasoning content is captured and displayed in the UI:
+
+- **Progress callback**: `makeProgressCallback()` broadcasts thinking text via `chat:progress` events
+- **Frontend display**: Thinking panel shows content during agent work (`progress === -1` indicates thinking update)
+- **Tool execution logs**: Each tool call logged with iteration number for activity tracking
+
 ### Environment Variables
 
 ```bash

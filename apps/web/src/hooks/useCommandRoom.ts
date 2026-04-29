@@ -143,7 +143,11 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, prod
       const role = event.sessionId;
       // Producer sessions are orchestrators — never mark them as "completed" via agent events
       if (isProducerSession(role)) return { sessions: null, messages };
-      const session = sessions.get(role);
+      let session = sessions.get(role);
+      // Fallback: try agentId field if session not found by sessionId
+      if (!session && event.agentId) {
+        session = sessions.get(event.agentId);
+      }
       if (!session) return { sessions: null, messages };
       const next = new Map(sessions);
       next.set(role, {
@@ -250,6 +254,24 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, prod
       const sessionId = event.sessionId;
       const session = sessions.get(sessionId);
       if (!session) return { sessions: null, messages };
+
+      // If progress is -1, this is a thinking content update
+      if (event.progress === -1 && event.thinking) {
+        const next = new Map(sessions);
+        const progressIndex = session.messages.findIndex((m) => m.type === "progress");
+        if (progressIndex !== -1) {
+          next.set(sessionId, {
+            ...session,
+            messages: session.messages.map((m, idx) =>
+              idx === progressIndex
+                ? { ...m, thinking: event.thinking }
+                : m
+            ),
+          });
+        }
+        return { sessions: next, messages };
+      }
+
       const next = new Map(sessions);
 
       // If progress is 100, remove the progress message
@@ -393,6 +415,17 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, prod
         sender: "SYSTEM",
         content: `Workflow ${event.success ? "completed successfully" : "failed"}`,
       }});
+      return { sessions: null, messages };
+    }
+    case "agent:loop:detected": {
+      messages.push({
+        sessionRole: event.sessionId,
+        msg: {
+          type: "system",
+          sender: "SYSTEM",
+          content: `[LOOP DETECTED] ${event.message}`,
+        },
+      });
       return { sessions: null, messages };
     }
     default:
