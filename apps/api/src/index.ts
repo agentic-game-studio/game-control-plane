@@ -19,6 +19,10 @@ import { settingsRouter } from "./routes/settings.js";
 import { errorHandler } from "./middleware/error-handler.js";
 import { authMiddleware } from "./middleware/auth.js";
 import { broadcast, wss, sseClients } from "./services/websocket.js";
+import { logger, logStartup, logShutdown } from "./utils/logger.js";
+import { requestLogger } from "./middleware/request-logger.js";
+
+const START_TIME = Date.now();
 
 // Q2: Simple in-memory rate limiter (per-IP, sliding window)
 const rateBuckets = new Map<string, { count: number; resetAt: number }>();
@@ -78,6 +82,7 @@ wss.on("connection", (socket) => {
 app.use(cors({ origin: config.CORS_ORIGIN }));
 app.use(express.json({ limit: "50mb" }));
 app.use(authMiddleware);
+app.use(requestLogger());
 
 // Routes
 app.use("/api/sessions", sessionsRouter);
@@ -131,17 +136,33 @@ app.use(errorHandler);
 
 const PORT = config.API_PORT;
 server.listen(PORT, () => {
-  console.log(`[API] Server running on http://localhost:${PORT}`);
-  console.log(`[API] WebSocket endpoint: ws://localhost:${PORT}/ws`);
-  console.log(`[API] Workspace: ${config.WORKSPACE_DIR}`);
+  const uptimeSeconds = Math.round((Date.now() - START_TIME) / 1000);
+  logStartup({
+    pid: process.pid,
+    uptimeSeconds,
+    nodeVersion: process.version,
+    platform: process.platform,
+    arch: process.arch,
+    service: "game-control-plane",
+    port: PORT,
+    workspaceDir: config.WORKSPACE_DIR,
+    cORSOrigin: config.CORS_ORIGIN,
+    env: process.env.NODE_ENV ?? "development",
+  });
 });
 
 // R7: Graceful shutdown
 function gracefulShutdown(signal: string) {
-  console.log(`[API] ${signal} received — shutting down gracefully...`);
+  const uptimeSeconds = Math.round((Date.now() - START_TIME) / 1000);
+  logShutdown({
+    pid: process.pid,
+    uptimeSeconds,
+    signal,
+    graceful: true,
+  });
   wss.close(() => {
     server.close(() => {
-      console.log("[API] Server closed");
+      logger.info({ pid: process.pid, uptimeSeconds }, "Server closed");
       process.exit(0);
     });
   });

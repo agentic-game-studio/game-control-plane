@@ -106,6 +106,12 @@ Express server on port 3001 with:
 - **LLM**: ZAI API client (`src/llm/zai-client.ts`) with tool execution loop, retry, message pruning
 - **Document Store**: `src/services/document-store.ts` — scans workspace dirs, parses YAML frontmatter, extracts `[[wikilink]]` connections, computes backlinks, serves via `/api/documents`, watches files with `fs.watch` for real-time updates
 - **DataStore**: `src/services/data-store.ts` — File-based JSON persistence for dashboard, tickets, assets, settings
+- **Structured Logger**: `src/utils/logger.ts` — Pino-based logging with console + file transport
+  - `apps/api/logs/api.log` — Combined info logs (rotated)
+  - `apps/api/logs/error.log` — Error-only logs
+  - Request IDs, correlation IDs, duration tracking
+  - `src/middleware/request-logger.ts` — HTTP request/response logging middleware
+  - `src/middleware/error-handler.ts` — Error logging with request context
 
 ### LLM Tool Execution
 
@@ -268,6 +274,8 @@ pnpm test:e2e          # Playwright E2E test suite (apps/web/e2e/)
 - `apps/api/src/routes/assets.ts` — Asset inventory + art bible CRUD
 - `apps/api/src/routes/settings.ts` — Config CRUD
 - `apps/api/src/routes/chat.ts` — Session management + diff API
+- `apps/api/src/utils/logger.ts` — Pino logger with console + file transport (pino, pino-pretty, pino-file-transport)
+- `apps/api/src/middleware/request-logger.ts` — HTTP request/response logging middleware
 - `apps/api/src/middleware/auth.ts` — Timing-safe authentication middleware
 - `apps/api/src/services/websocket.ts` — WebSocket broadcast + SSE client tracking
 - `apps/api/src/services/document-store.ts` — Workspace file scanning, wikilink extraction, backlink computation, fs.watch for real-time updates
@@ -281,3 +289,55 @@ pnpm test:e2e          # Playwright E2E test suite (apps/web/e2e/)
 - `packages/types/src/document.ts` — DocumentEntry, DocumentDetail, GraphData types
 - `packages/types/src/chat.ts` — ChatMessage, ToolCall, DiffBlock types
 - `packages/state/src/session-store.ts` — File-based session persistence
+
+## Godot MCP Pro Integration
+
+For Godot engine projects, the platform integrates with **Godot MCP Pro** to enable AI agents to control the Godot editor directly — building scenes, writing scripts, running games, simulating input, and asserting game state programmatically.
+
+### Architecture
+
+```
+Agent tool call (e.g. create_scene)
+  → GodotMCPService.executeTool()
+    → JSON-RPC over stdin/stdout
+      → godot-mcp-pro server (child process)
+        → WebSocket (ports 6505-6514)
+          → Godot MCP Pro plugin in editor
+            → Godot editor responds
+```
+
+### Components
+
+| File | Purpose |
+|------|---------|
+| `services/godot-mcp-service.ts` | MCP server lifecycle, stdio JSON-RPC client, 169 tool definitions |
+| `services/llm-service.ts` | Injects Godot MCP tools when `project.engine === "godot"`, routes calls to MCP service |
+| `routes/chat.ts` | Starts MCP service on producer session create (project-keyed) |
+| `routes/dashboard.ts` | Stops MCP service when project deleted |
+
+### How It Works
+
+1. **Session creation** — When a producer session is created for a project with `engine: "godot"`, the Godot MCP service is started (non-blocking)
+2. **Tool injection** — The LLM receives 169 Godot MCP tools alongside game-studio tools (Read, Write, Edit, etc.)
+3. **Tool routing** — `executeTool()` checks if the tool is a Godot MCP tool (`isGodotMCPTool()`) and routes to `GodotMCPService`
+4. **MCP server** — Spawns `godot-mcp-pro-v1.11.0/server/build/index.js --lite` as a child process with stdio transport
+5. **Godot connection** — The MCP server internally bridges to the Godot editor via WebSocket (ports 6505-6514). The Godot editor must be running with the Godot MCP Pro plugin enabled.
+
+### Key Design Decisions
+
+- **Project-keyed** — Service is keyed by `projectId`, shared across all sessions (producer + spawned agents)
+- **Graceful degradation** — Clear error message if Godot not running or MCP plugin not enabled
+- **LITE mode** — Uses `--lite` flag (81 tools) to reduce context overhead. Use `--minimal` (35 tools) or `--full` (169 tools) via `GodotMCPServiceOptions.mode`
+
+### Testing
+
+1. Start Godot with a project, enable **Project → Project Settings → Plugins → Godot MCP Pro → Enable**
+2. Create a project in the dashboard with **engine: "godot"**
+3. Open the chat and send: "Create a 2D player scene with CharacterBody2D"
+4. Watch the Godot editor respond in real-time
+
+### Environment Variables
+
+```bash
+GODOT_MCP_SERVER_PATH=...  # Optional: path to godot-mcp-pro/server/build/index.js (auto-detected)
+```
