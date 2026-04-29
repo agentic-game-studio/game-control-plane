@@ -9,6 +9,8 @@ import { getAgentSystemPrompt } from "../prompts/agent-prompt-loader.js";
 import type { WSEvent } from "@game-studio/types";
 import { broadcast } from "../services/websocket.js";
 import { startWorkflow, advanceStage, completeWorkflow, cleanupWorkflow, getWorkflow, createQuestTicket, moveQuestTicket } from "../services/quest-bridge.js";
+import { getOrCreateGodotMCPService, removeGodotMCPService, type GodotMCPServiceOptions } from "../services/godot-mcp-service.js";
+import { logger } from "../utils/logger.js";
 
 export const chatRouter: Router = Router();
 
@@ -136,6 +138,28 @@ function migrateLegacyProducer(state: ChatState): boolean {
   return true;
 }
 
+/** Prune conversation history to stay within context limits */
+const MAX_CONTEXT_CHARS = 500_000;
+
+function pruneConversationHistory(history: LLMMessage[]): LLMMessage[] {
+  const totalChars = history.reduce(
+    (sum, m) => sum + (typeof m.content === "string" ? m.content.length : 0),
+    0
+  );
+  if (totalChars <= MAX_CONTEXT_CHARS) return history;
+
+  // Keep recent messages as atomic groups (assistant+tool pairs must not be split)
+  const recentCount = 30;
+  let recent = history.slice(-recentCount);
+
+  // If slice starts with tool result, skip it (incomplete pair)
+  if (recent.length > 0 && recent[0].role === "tool") {
+    recent = recent.slice(1);
+  }
+
+  return recent;
+}
+
 async function loadChatState(): Promise<ChatState> {
   try {
     const state = await readData<ChatState>(CHAT_STATE_FILE);
@@ -189,6 +213,7 @@ function toProjectContext(project: Project): ProjectContext {
     description: project.description,
     engine: project.engine,
     workspacePath: project.workspacePath,
+    projectId: project.id,
   };
 }
 
@@ -309,6 +334,18 @@ chatRouter.get("/sessions/producer/:projectId", async (req: Request, res: Respon
   };
 
   chatStore.sessions[sessionId] = newSession;
+
+  // Start Godot MCP service for godot projects (keyed by projectId)
+  if (project.engine === "godot") {
+    const mcpOptions: GodotMCPServiceOptions = {
+      projectPath: project.workspacePath ?? undefined,
+      mode: "lite",
+    };
+    // Non-blocking — service starts in background
+    getOrCreateGodotMCPService(projectId, mcpOptions).catch((err) => {
+      logger.error({ projectId, error: err.message, event: "godot_mcp_start_error" }, "Failed to start Godot MCP service");
+    });
+  }
 
   broadcast({
     type: "chat:session:created",
@@ -432,6 +469,9 @@ chatRouter.delete("/sessions/:id", async (req: Request, res: Response) => {
 
   delete chatStore.sessions[id];
   cleanupWorkflow(id);
+  // Note: Godot MCP service is keyed by projectId, not sessionId.
+  // It will be cleaned up when the project is deleted or session ends.
+  // We don't stop it here because other sessions (producer) may still need it.
 
   broadcast({
     type: "chat:session:deleted",
@@ -632,6 +672,9 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
       role: "assistant",
       content: result.content,
     });
+
+    // Prune conversation history to stay within context limits
+    session.conversationHistory = pruneConversationHistory(session.conversationHistory);
 
     // Check if LLM asked a question via AskUserQuestion tool
     const questionData = parseQuestionFromToolResult(result.toolCalls);
@@ -878,6 +921,7 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
 
       newSession.messages.push(responseMessage);
       newSession.conversationHistory.push({ role: "assistant", content: result.content });
+      newSession.conversationHistory = pruneConversationHistory(newSession.conversationHistory);
 
       broadcast({
         type: "chat:message",

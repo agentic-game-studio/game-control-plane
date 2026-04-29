@@ -9,6 +9,7 @@ import type {
 } from "@game-studio/types";
 import type { WSEvent } from "@game-studio/types";
 import { orphanProjectSessions } from "./chat.js";
+import { removeGodotMCPService } from "../services/godot-mcp-service.js";
 
 const DEFAULT_DATA: DashboardData = {
   summary: {
@@ -186,6 +187,9 @@ dashboardRouter.delete("/projects/:id", async (req: Request, res: Response) => {
     // Orphan any chat sessions tied to this project (history is preserved
     // but the sessions become hidden from the project-scoped UI).
     await orphanProjectSessions(String(id));
+
+    // Stop Godot MCP service if running for this project
+    await removeGodotMCPService(String(id)).catch(() => {});
 
     // Broadcast event
     broadcastEvent({

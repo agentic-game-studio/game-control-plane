@@ -2,6 +2,7 @@ import { Router } from "express";
 import type { Request, Response } from "express";
 import { executeGate, getSupportedGates, getGateInfo } from "../services/gate-service.js";
 import { broadcast } from "../services/websocket.js";
+import { logger } from "../utils/logger.js";
 import type { WSEvent } from "@game-studio/types";
 
 export const gatesRouter: Router = Router();
@@ -94,7 +95,7 @@ gatesRouter.post("/:gateId/run", async (req: Request, res: Response) => {
       sessionId: effectiveSessionId,
     } as WSEvent);
   } catch (error) {
-    console.error(`Gate ${gateId} execution failed:`, error);
+    logger.error({ gateId, error: error instanceof Error ? error.message : String(error), event: "gate_error" }, "Gate execution failed");
   }
 });
 

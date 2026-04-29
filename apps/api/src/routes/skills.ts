@@ -5,6 +5,7 @@ import { invokeAgent } from "../services/llm-service.js";
 import { SessionStore } from "@game-studio/state";
 import { loadConfig } from "../config.js";
 import { broadcast } from "../services/websocket.js";
+import { logger } from "../utils/logger.js";
 import type { WSEvent } from "@game-studio/types";
 
 export const skillsRouter: Router = Router();
@@ -138,7 +139,7 @@ Execute this phase of the skill workflow.`;
 
     // Start running phases in background
     runPhases().catch((err) => {
-      console.error(`Skill ${skillId} failed:`, err);
+      logger.error({ skillId, error: String(err), event: "skill_error" }, `${skillId} failed`);
       store.addLog(sessionId, {
         level: "error",
         message: `Skill failed: ${String(err)}`,

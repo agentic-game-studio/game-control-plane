@@ -1,6 +1,6 @@
 # Game Studio Control Plane
 
-Multi-agent game development orchestration platform. Runs AI agents (game director, lead programmer, artists, etc.) to build games collaboratively, with a web UI for monitoring and control.
+Multi-agent game development orchestration platform. Producer acts as the Board Room orchestrator, spawning specialized agents to build games collaboratively. Per-project producer sessions with LLM context injection. Quest Bridge auto-tracks agent tasks on the Kanban board. Web UI provides real-time monitoring, interactive Q&A, and workflow pipeline visualization.
 
 ## Quick Start
 
@@ -30,7 +30,7 @@ game-control-plane/
 │   └── web/              # Frontend: Next.js 15 (App Router)
 ├── packages/
 │   ├── types/            # Shared TypeScript interfaces (source of truth)
-│   ├── agents/           # 49 agent definitions (3-tier hierarchy)
+│   ├── agents/           # 50 agent definitions (3-tier hierarchy)
 │   ├── skills/           # 67 skill definitions (9 team skills)
 │   ├── config/           # Zod schemas + GDD/ADR templates
 │   └── state/            # File-based session store
@@ -43,11 +43,11 @@ game-control-plane/
 
 ## Architecture
 
-### Agent Hierarchy (48 agents)
+### Agent Hierarchy (50 agents)
 
 - **Tier 1 (Opus → glm-5.1)**: producer (standalone, owns orchestration), creative-director, technical-director
 - **Tier 2 (Sonnet → glm-4.7)**: game-designer, lead-programmer, art-director, audio-director, narrative-director, qa-lead, release-manager, localization-lead
-- **Tier 3 (Sonnet/Haiku → glm-4.7/glm-4.7-flash)**: 37 specialists — systems-designer, gameplay-programmer, godot-specialist, unreal-specialist, unity-specialist, etc.
+- **Tier 3 (Sonnet/Haiku → glm-4.7/glm-4.7-flash)**: 38 specialists — systems-designer, gameplay-programmer, godot-specialist, unreal-specialist, unity-specialist, code-reviewer, etc.
 
 ### Model Tier Mapping
 
@@ -87,27 +87,108 @@ Each gate invokes the appropriate director agent with a specific review prompt. 
 
 Review modes: `solo` (AI-only), `lean` (key checkpoints, default), `full` (all gates enforced)
 
+### Code Review Sub-Agent
+
+The `code-reviewer` agent provides critical feedback on code changes. Coding agents (gameplay-programmer, engine-programmer, ai-programmer, network-programmer, ui-programmer, godot-specialist, etc.) are instructed to spawn it after completing significant work:
+
+- **Tier 3, Sonnet model**
+- **Tools**: Read, Write, Glob, Grep (read-only context, no direct changes)
+- **Delegation**: All coding agents can spawn code-reviewer via Task tool
+
+Review focuses on:
+1. Requirements from user request are addressed
+2. Minimal, focused changes
+3. Code reuse over duplication
+4. No dead code or missing imports
+5. Style consistency with existing codebase
+6. No unnecessary try/catch blocks
+
+```typescript
+// Spawn via Task tool
+Task: {
+  agent: "code-reviewer",
+  task: "Review my recent implementation..."
+}
+```
+
 ## Backend (apps/api)
 
 Express server on port 3001 with:
 
 - **Express body limit**: 50mb for image payloads (clipboard paste base64)
+- **Security**: Path traversal protection, Bash sandboxing, ReDoS prevention, timing-safe auth, WebSocket auth via apiKey query param, XSS filtering, configurable CORS
+- **Reliability**: Heartbeat cleanup, 409 spawn collision handling, atomic pruneMessages, recursion depth limit, graceful shutdown, SSE keepalive
 - **Routes**:
   - `/api/sessions`, `/api/agents`, `/api/skills`, `/api/teams`, `/api/gates`, `/api/design`, `/api/documents` — Core orchestration
   - `/api/dashboard` — Projects CRUD (`GET`, `POST/DELETE /projects`)
   - `/api/tickets` — Kanban board CRUD (`GET`, `POST/PATCH/DELETE`, `PATCH /:id/move`)
   - `/api/assets` — Asset inventory CRUD + art bible (`GET`, `POST/PATCH/DELETE`, `PATCH /art-bible`)
   - `/api/settings` — Config CRUD (`GET`, `PATCH`, `POST /reset`)
-  - `/api/chat` — Session management (`GET/POST /sessions`, `DELETE /sessions/:id`, `POST /sessions/:id/messages`)
+  - `/api/chat` — Session management (`GET/POST /sessions`, `DELETE /sessions/:id`, `POST /sessions/:id/messages`, `GET /sessions/producer/:projectId` get-or-create)
 - **WebSocket**: Real-time events (agent:spawned, checkpoint:saved, gate:verdict, log:entry)
 - **SSE**: Log streaming at `/api/sessions/:sessionId/stream`
 - **LLM**: ZAI API client (`src/llm/zai-client.ts`) with tool execution loop, retry, message pruning
 - **Document Store**: `src/services/document-store.ts` — scans workspace dirs, parses YAML frontmatter, extracts `[[wikilink]]` connections, computes backlinks, serves via `/api/documents`, watches files with `fs.watch` for real-time updates
 - **DataStore**: `src/services/data-store.ts` — File-based JSON persistence for dashboard, tickets, assets, settings
+- **Structured Logger**: `src/utils/logger.ts` — Pino-based logging with console + file transport
+  - `apps/api/logs/api.log` — Combined info logs (rotated)
+  - `apps/api/logs/error.log` — Error-only logs
+  - Request IDs, correlation IDs, duration tracking
+  - `src/middleware/request-logger.ts` — HTTP request/response logging middleware
+  - `src/middleware/error-handler.ts` — Error logging with request context
 
 ### LLM Tool Execution
 
 The `callLLMWithTools()` function sends a request to ZAI API with game studio tools (Read, Write, Edit, Glob, Grep, Bash, Task). Tool calls are executed on the backend and results returned to the LLM. Loop continues until no more tool calls or max tools reached (100).
+
+### Context Management (Long Sessions)
+
+For long-running sessions, the platform employs smart context management:
+
+| Threshold | Mechanism | Behavior |
+|-----------|-----------|----------|
+| > 400k chars | Summarization | LLM summarizes old messages, injects as `[Previous Context Summary]` |
+| > 500k chars | Pruning | Keeps last 30 messages as atomic groups |
+| > 80 messages | Pruning | Triggers pruning in tool execution loop |
+
+**Summarization flow:**
+1. When context exceeds 400k chars, `summarizeOldMessages()` is called
+2. Uses lightweight model (glm-4.7-flash) to summarize old messages
+3. Preserves: key decisions, important facts, active tasks, code snippets
+4. Keeps: system messages + summary + last 10 messages
+5. `summarizedThisContext` flag prevents repeated summarization in same turn
+
+**Conversation history pruning:**
+- `pruneConversationHistory()` in `chat.ts` keeps last 30 messages
+- Skips incomplete tool pairs (assistant+tool must stay together)
+- Triggers after each LLM response
+
+### Loop Detection
+
+The tool execution loop detects repetitive patterns to prevent infinite loops:
+
+| Detection | Threshold | Action |
+|-----------|-----------|--------|
+| Same tool + args | 4 times | Inject warning, continue |
+| Same tool name | 4+ times in 6 iterations | Inject warning |
+| Continued loop | After 15 iterations | Force stop, return response |
+
+Loop detection events (`agent:loop:detected`) are broadcast via WebSocket and displayed as system messages in the UI.
+
+### Tool Error Visibility
+
+Tool execution errors are prefixed with `[TOOL ERROR: ${name}]` for visibility in logs and LLM context. This helps:
+- Distinguish tool errors from content in logs
+- Prevent LLM from retrying same failed operation
+- Surface errors early in the tool execution loop
+
+### Thinking Content
+
+Agent thinking/reasoning content is captured and displayed in the UI:
+
+- **Progress callback**: `makeProgressCallback()` broadcasts thinking text via `chat:progress` events
+- **Frontend display**: Thinking panel shows content during agent work (`progress === -1` indicates thinking update)
+- **Tool execution logs**: Each tool call logged with iteration number for activity tracking
 
 ### Environment Variables
 
@@ -145,15 +226,16 @@ Next.js 15 App Router, Tailwind CSS v4, no UI framework. All pages are client co
 | Route | Description |
 |-------|-------------|
 | `/dashboard` | Project management with create/delete modals, activity log, credit summary |
-| `/tickets` | Kanban board with 4 columns (Available, Processing, Verify, Archived), create/delete quests |
-| `/assets` | Asset inventory grid with create/delete, Art Bible sidebar with constraints |
+| `/tickets` | Kanban board (project-scoped), 4 columns (Available, Processing, Verify, Archived), create/delete quests |
+| `/assets` | Asset inventory grid (project-scoped), create/delete, Art Bible sidebar with constraints |
+| `/chat` | Board room command page — per-project producer session, sample prompt buttons on empty state |
 | `/settings` | Ledger & config — credit/tier pools, subscription, top-up history, usage log, engine selection, model dropdown, API key, webhook, reset |
 | `/agents` | Agent registry page with searchable list + tier filter |
 | `/skills` | Skills library with filterable categories |
 | `/teams` | Team workflows with workflow timeline + run dialog |
 | `/gates` | Director gates matrix with category filter + run functionality |
 
-**Shared Components**: `components/Modal.tsx` (reusable modal), `components/DataLoader.tsx` (loading/error states)
+**Shared Components**: `components/Modal.tsx` (reusable modal), `components/DataLoader.tsx` (loading/error states), `components/ProjectGuard.tsx` (project-required page overlay), `contexts/ProjectContext.tsx` (project provider + useProject hook)
 
 ### Chat UI Components (apps/web/src/app/(studio)/chat/components/)
 
@@ -164,21 +246,34 @@ Next.js 15 App Router, Tailwind CSS v4, no UI framework. All pages are client co
 | `DiffView.tsx` | Line-by-line diff rendering with syntax highlighting |
 | `AgentTree.tsx` | Sidebar with agent sessions and hierarchy tree |
 | `QuestionMessage.tsx` | Interactive Q&A with radio/checkbox options |
+| `WorkflowMessage.tsx` | OMC 5-stage pipeline stepper visualization |
+| `PlanMessage.tsx` | Structured plan phases with per-phase execution |
+| `ChatTabs.tsx` | Tabbed navigation between board room and agent sessions |
+| `TopAppBar.tsx` | Top bar with project pill + switcher dropdown |
 
 ### Chat Features
 
 - **Slash commands**: `/spawn`, `/approve`, `/done`, `/clear`, `/help`, `/cost`, `/diff`
-- **6-step approve workflow**: Progress bars with tool calls (Read, Grep, Edit, Write)
+- **OMC 5-stage workflow pipeline**: Plan → Decompose → Execute → Verify → Fix with progress stepper
+- **Activity log**: Real-time tool call activity (Read, Bash, Edit, etc.) under progress bar
+- **Real-time progress bar**: Smooth percentage updates (+3% every 2s) during agent work
 - **Thinking panel**: Shows agent reasoning during progress
 - **Navigate messages**: "Back to Producer" button after task completion
-- **Message types**: `system`, `agent`, `user`, `progress`, `welcome`, `diff`, `navigate`, `question`, `plan`
+- **Message types**: `system`, `agent`, `user`, `progress`, `welcome`, `diff`, `navigate`, `question`, `plan`, `workflow`
 - **Markdown rendering**: Messages render markdown with code blocks, lists, links
 - **Image paste**: Base64 inline images via clipboard paste (50mb body limit)
 - **Typing indicator**: Immediate visual feedback when agent is responding
-- **Message deduplication**: Prevents duplicate messages on re-renders
+- **Message deduplication**: Bidirectional dedup prevents duplicate messages from WS + API race conditions
 - **showActions**: Approve/Override/Pause buttons only appear when explicitly requested by the agent
 - **Interactive Q&A**: Agents can ask questions with selectable options (radio/checkbox), custom input, keyboard navigation via `AskUserQuestion` tool
 - **Plan phases**: Agents can propose structured plans with phases via `ProposePlan` tool — users can execute individual phases or all at once
+- **Per-project sessions**: Each project has its own Producer chat (`producer-<projectId>`), lazy-created on first visit
+- **Project context injection**: LLM system prompt includes active project context (name, description, engine, workspace)
+- **ProjectGuard**: `/chat`, `/tickets`, `/assets` require active project — yellow overlay with link to dashboard otherwise
+- **Sample prompts**: Empty producer chat shows "Design a combat system", "Write opening cutscene", "Plan sprint 1" buttons
+- **Animation fixes**: Restored `animate-spin` / `animate-pulse` keyframes for loading spinners
+- **Session persistence**: Chat sessions saved to `chat-state.json`, survive page refreshes and server restarts; spawn/completion messages persist on producer session
+- **Legacy migration**: On startup, legacy `producer` session renamed to `producer-legacy`
 
 ## Data Flow
 
@@ -195,6 +290,10 @@ Next.js 15 App Router, Tailwind CSS v4, no UI framework. All pages are client co
 Session state lives in `workspace/production/session-state/` as JSON files:
 - `*.json` — Full session state (checkpoints, logs, agent invocations)
 - `{sessionId}/*.json` — Individual checkpoint snapshots
+
+Chat sessions persisted to `chat-state.json` survive page refreshes and server restarts.
+
+Quest tickets auto-created via Quest Bridge when agents spawn (Available → Processing → Verify → Completed).
 
 Design documents in `workspace/design/gdd/` and `workspace/docs/architecture/` as Markdown.
 
@@ -228,6 +327,7 @@ pnpm build             # Turbo build pipeline
 pnpm generate:agents    # Validate 49 agent definitions
 pnpm generate:skills   # Validate 67 skill definitions
 pnpm generate          # Both validations
+pnpm test:e2e          # Playwright E2E test suite (apps/web/e2e/)
 ```
 
 ## Key Files
@@ -247,12 +347,72 @@ pnpm generate          # Both validations
 - `apps/api/src/routes/assets.ts` — Asset inventory + art bible CRUD
 - `apps/api/src/routes/settings.ts` — Config CRUD
 - `apps/api/src/routes/chat.ts` — Session management + diff API
+- `apps/api/src/utils/logger.ts` — Pino logger with console + file transport (pino, pino-pretty, pino-file-transport)
+- `apps/api/src/middleware/request-logger.ts` — HTTP request/response logging middleware
+- `apps/api/src/middleware/auth.ts` — Timing-safe authentication middleware
 - `apps/api/src/services/websocket.ts` — WebSocket broadcast + SSE client tracking
+- `apps/api/src/services/godot-mcp-service.ts` — Godot MCP Pro server lifecycle, stdio JSON-RPC client, 169 tool definitions
 - `apps/api/src/services/document-store.ts` — Workspace file scanning, wikilink extraction, backlink computation, fs.watch for real-time updates
-- `apps/api/src/services/data-store.ts` — File-based JSON persistence for studio data
+- `apps/api/src/services/data-store.ts` — Async file-based JSON persistence for dashboard, tickets, assets, settings with rate limiting
+- `apps/api/src/services/quest-bridge.ts` — Intercepts Task tool calls to auto-create and track Quest tickets (Available → Processing → Verify → Completed)
 - `apps/web/src/hooks/useCommandRoom.ts` — Chat state management with tool calls, diff, navigate
 - `apps/web/src/app/(studio)/chat/components/DiffView.tsx` — Diff rendering component
+- `apps/web/src/lib/api.ts` — WebSocket API client with apiKey auth, debounced reconnect
+- `apps/web/src/lib/format-time.ts` — Shared time formatting utilities
 - `packages/types/src/api.ts` — WSEvent union type (all real-time event types)
 - `packages/types/src/document.ts` — DocumentEntry, DocumentDetail, GraphData types
 - `packages/types/src/chat.ts` — ChatMessage, ToolCall, DiffBlock types
 - `packages/state/src/session-store.ts` — File-based session persistence
+
+## Godot MCP Pro Integration
+
+For Godot engine projects, the platform integrates with **Godot MCP Pro** to enable AI agents to control the Godot editor directly — building scenes, writing scripts, running games, simulating input, and asserting game state programmatically.
+
+### Architecture
+
+```
+Agent tool call (e.g. create_scene)
+  → GodotMCPService.executeTool()
+    → JSON-RPC over stdin/stdout
+      → godot-mcp-pro server (child process)
+        → WebSocket (ports 6505-6514)
+          → Godot MCP Pro plugin in editor
+            → Godot editor responds
+```
+
+### Components
+
+| File | Purpose |
+|------|---------|
+| `services/godot-mcp-service.ts` | MCP server lifecycle, stdio JSON-RPC client, 169 tool definitions |
+| `services/llm-service.ts` | Injects Godot MCP tools when `project.engine === "godot"`, routes calls to MCP service |
+| `routes/chat.ts` | Starts MCP service on producer session create (project-keyed) |
+| `routes/dashboard.ts` | Stops MCP service when project deleted |
+
+### How It Works
+
+1. **Session creation** — When a producer session is created for a project with `engine: "godot"`, the Godot MCP service is started (non-blocking)
+2. **Tool injection** — The LLM receives 169 Godot MCP tools alongside game-studio tools (Read, Write, Edit, etc.)
+3. **Tool routing** — `executeTool()` checks if the tool is a Godot MCP tool (`isGodotMCPTool()`) and routes to `GodotMCPService`
+4. **MCP server** — Spawns `godot-mcp-pro-v1.11.0/server/build/index.js --lite` as a child process with stdio transport
+5. **Godot connection** — The MCP server internally bridges to the Godot editor via WebSocket (ports 6505-6514). The Godot editor must be running with the Godot MCP Pro plugin enabled.
+
+### Key Design Decisions
+
+- **Project-keyed** — Service is keyed by `projectId`, shared across all sessions (producer + spawned agents)
+- **Project workspace isolation** — `executeTool()` uses `projectContext.workspacePath` (resolved relative to `WORKSPACE_DIR`) for file operations. Each project has its own directory, preventing cross-project contamination.
+- **Graceful degradation** — Clear error message if Godot not running or MCP plugin not enabled
+- **LITE mode** — Uses `--lite` flag (81 tools) to reduce context overhead. Use `--minimal` (35 tools) or `--full` (169 tools) via `GodotMCPServiceOptions.mode`
+
+### Testing
+
+1. Start Godot with a project, enable **Project → Project Settings → Plugins → Godot MCP Pro → Enable**
+2. Create a project in the dashboard with **engine: "godot"**
+3. Open the chat and send: "Create a 2D player scene with CharacterBody2D"
+4. Watch the Godot editor respond in real-time
+
+### Environment Variables
+
+```bash
+GODOT_MCP_SERVER_PATH=...  # Optional: path to godot-mcp-pro/server/build/index.js (auto-detected)
+```

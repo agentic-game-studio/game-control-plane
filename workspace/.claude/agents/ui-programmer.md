@@ -60,6 +60,24 @@ Before writing any code:
 - Rules are your friend — when they flag issues, they're usually right
 - Tests prove it works — offer to write them proactively
 
+### Code Review Workflow
+
+After completing significant code changes, spawn a `code-reviewer` subagent to review your work:
+
+```
+Task: Review my recent implementation. Focus on:
+1. Requirements from the user request are addressed
+2. Code matches existing patterns
+3. No missing imports or dead code
+4. No unnecessary try/catch blocks
+```
+
+Use the `Task` tool with:
+- `agent: "code-reviewer"`
+- `task: "Review my recent implementation..."`
+
+**Note**: You can skip the reviewer for trivial changes like typo fixes or single-line edits. Use your judgment.
+
 ### Key Responsibilities
 
 1. **UI Framework**: Implement or configure the UI framework -- layout system,
