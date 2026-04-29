@@ -9,6 +9,8 @@ import { getAgentSystemPrompt } from "../prompts/agent-prompt-loader.js";
 import type { WSEvent } from "@game-studio/types";
 import { broadcast } from "../services/websocket.js";
 import { startWorkflow, advanceStage, completeWorkflow, cleanupWorkflow, getWorkflow, createQuestTicket, moveQuestTicket } from "../services/quest-bridge.js";
+import { getOrCreateGodotMCPService, removeGodotMCPService, type GodotMCPServiceOptions } from "../services/godot-mcp-service.js";
+import { logger } from "../utils/logger.js";
 
 export const chatRouter: Router = Router();
 
@@ -189,6 +191,7 @@ function toProjectContext(project: Project): ProjectContext {
     description: project.description,
     engine: project.engine,
     workspacePath: project.workspacePath,
+    projectId: project.id,
   };
 }
 
@@ -309,6 +312,18 @@ chatRouter.get("/sessions/producer/:projectId", async (req: Request, res: Respon
   };
 
   chatStore.sessions[sessionId] = newSession;
+
+  // Start Godot MCP service for godot projects (keyed by projectId)
+  if (project.engine === "godot") {
+    const mcpOptions: GodotMCPServiceOptions = {
+      projectPath: project.workspacePath ?? undefined,
+      mode: "lite",
+    };
+    // Non-blocking — service starts in background
+    getOrCreateGodotMCPService(projectId, mcpOptions).catch((err) => {
+      logger.error({ projectId, error: err.message, event: "godot_mcp_start_error" }, "Failed to start Godot MCP service");
+    });
+  }
 
   broadcast({
     type: "chat:session:created",
@@ -432,6 +447,9 @@ chatRouter.delete("/sessions/:id", async (req: Request, res: Response) => {
 
   delete chatStore.sessions[id];
   cleanupWorkflow(id);
+  // Note: Godot MCP service is keyed by projectId, not sessionId.
+  // It will be cleaned up when the project is deleted or session ends.
+  // We don't stop it here because other sessions (producer) may still need it.
 
   broadcast({
     type: "chat:session:deleted",

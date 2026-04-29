@@ -75,7 +75,7 @@ server.on("upgrade", (request, socket, head) => {
 });
 
 wss.on("connection", (socket) => {
-  socket.on("error", (err) => console.error("WS error:", err));
+  socket.on("error", (err) => logger.error({ error: err.message, event: "ws_error" }, "WebSocket error"));
 });
 
 // Middleware

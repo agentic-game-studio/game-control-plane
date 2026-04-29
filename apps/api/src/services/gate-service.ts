@@ -9,6 +9,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { loadConfig } from "../config.js";
 import { invokeAgent } from "./llm-service.js";
+import { logger } from "../utils/logger.js";
 import type { AgentRole } from "@game-studio/types";
 
 export interface GateResult {
@@ -221,13 +222,13 @@ No specific context provided. If you can perform a general review based on avail
 
   try {
     // Invoke the agent to perform the review
-    console.log(`[Gate] Executing ${gateId} with agent ${gateConfig.agent}`);
+    logger.info({ gateId, agent: gateConfig.agent, event: "gate_start" }, `Executing ${gateId}`);
     const result = await invokeAgent(gateConfig.agent, task, sessionId);
-    console.log(`[Gate] ${gateId} completed, content length: ${result.content.length}`);
+    logger.info({ gateId, contentLength: result.content.length, event: "gate_complete" }, `${gateId} completed`);
 
     // Parse verdict from response
     const verdict = parseVerdict(result.content, gatePrompt.verdictOptions);
-    console.log(`[Gate] ${gateId} parsed verdict: ${verdict.parsed}`);
+    logger.info({ gateId, verdict: verdict.parsed, event: "gate_verdict" }, `${gateId} verdict: ${verdict.parsed}`);
 
     return {
       gateId,
@@ -238,7 +239,7 @@ No specific context provided. If you can perform a general review based on avail
     };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : "Unknown error";
-    console.error(`[Gate] ${gateId} failed:`, errorMessage);
+    logger.error({ gateId, error: errorMessage, event: "gate_error" }, `${gateId} failed`);
     return {
       gateId,
       verdict: "ERROR",

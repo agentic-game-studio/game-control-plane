@@ -3,6 +3,7 @@ import type { Request, Response } from "express";
 import { teamSkills } from "@game-studio/skills";
 import { invokeAgent } from "../services/llm-service.js";
 import { broadcast } from "../services/websocket.js";
+import { logger } from "../utils/logger.js";
 import type { WSEvent, AgentRole } from "@game-studio/types";
 import type { LLMMessage } from "../llm/zai-client.js";
 import type { SkillDefinition } from "@game-studio/types";
@@ -81,7 +82,7 @@ teamsRouter.post("/:team/run", async (req: Request, res: Response) => {
 
   // Run the workflow asynchronously
   runTeamWorkflow(team, effectiveSessionId, input, teamSession).catch((error) => {
-    console.error(`Team workflow ${team.name} failed:`, error);
+    logger.error({ team: team.name, error: error instanceof Error ? error.message : String(error), event: "team_error" }, "Workflow failed");
     teamSession.messages.push({
       role: "assistant",
       content: `Team workflow failed: ${error instanceof Error ? error.message : "Unknown error"}`,

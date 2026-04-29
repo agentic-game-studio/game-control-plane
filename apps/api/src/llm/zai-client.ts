@@ -10,6 +10,7 @@
 
 import { loadConfig } from "../config.js";
 import { getAgentSystemPrompt, loadAgentPrompts } from "../prompts/agent-prompt-loader.js";
+import { logger } from "../utils/logger.js";
 
 export interface LLMMessage {
   role: "system" | "user" | "assistant" | "tool";
@@ -495,4 +496,4 @@ export const GAME_STUDIO_TOOLS: LLMTool[] = [
 ];
 
 /** Pre-load agent prompts on module init */
-loadAgentPrompts().catch(console.error);
+loadAgentPrompts().catch((err) => logger.error({ error: err?.message ?? String(err), event: "prompt_load_error" }, "Failed to load agent prompts"));
