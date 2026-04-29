@@ -30,7 +30,7 @@ game-control-plane/
 │   └── web/              # Frontend: Next.js 15 (App Router)
 ├── packages/
 │   ├── types/            # Shared TypeScript interfaces (source of truth)
-│   ├── agents/           # 49 agent definitions (3-tier hierarchy)
+│   ├── agents/           # 50 agent definitions (3-tier hierarchy)
 │   ├── skills/           # 67 skill definitions (9 team skills)
 │   ├── config/           # Zod schemas + GDD/ADR templates
 │   └── state/            # File-based session store
@@ -43,11 +43,11 @@ game-control-plane/
 
 ## Architecture
 
-### Agent Hierarchy (48 agents)
+### Agent Hierarchy (50 agents)
 
 - **Tier 1 (Opus → glm-5.1)**: producer (standalone, owns orchestration), creative-director, technical-director
 - **Tier 2 (Sonnet → glm-4.7)**: game-designer, lead-programmer, art-director, audio-director, narrative-director, qa-lead, release-manager, localization-lead
-- **Tier 3 (Sonnet/Haiku → glm-4.7/glm-4.7-flash)**: 37 specialists — systems-designer, gameplay-programmer, godot-specialist, unreal-specialist, unity-specialist, etc.
+- **Tier 3 (Sonnet/Haiku → glm-4.7/glm-4.7-flash)**: 38 specialists — systems-designer, gameplay-programmer, godot-specialist, unreal-specialist, unity-specialist, code-reviewer, etc.
 
 ### Model Tier Mapping
 
@@ -86,6 +86,30 @@ Workflows are orchestrated by the creative-director agent using real LLM calls t
 Each gate invokes the appropriate director agent with a specific review prompt. Verdict is parsed from the first line of LLM response.
 
 Review modes: `solo` (AI-only), `lean` (key checkpoints, default), `full` (all gates enforced)
+
+### Code Review Sub-Agent
+
+The `code-reviewer` agent provides critical feedback on code changes. Coding agents (gameplay-programmer, engine-programmer, ai-programmer, network-programmer, ui-programmer, godot-specialist, etc.) are instructed to spawn it after completing significant work:
+
+- **Tier 3, Sonnet model**
+- **Tools**: Read, Write, Glob, Grep (read-only context, no direct changes)
+- **Delegation**: All coding agents can spawn code-reviewer via Task tool
+
+Review focuses on:
+1. Requirements from user request are addressed
+2. Minimal, focused changes
+3. Code reuse over duplication
+4. No dead code or missing imports
+5. Style consistency with existing codebase
+6. No unnecessary try/catch blocks
+
+```typescript
+// Spawn via Task tool
+Task: {
+  agent: "code-reviewer",
+  task: "Review my recent implementation..."
+}
+```
 
 ## Backend (apps/api)
 

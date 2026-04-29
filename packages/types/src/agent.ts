@@ -61,7 +61,9 @@ export type AgentRole =
   | "ue-gas-specialist"
   | "ue-blueprint-specialist"
   | "ue-replication-specialist"
-  | "ue-umg-specialist";
+  | "ue-umg-specialist"
+  // Code review
+  | "code-reviewer";
 
 export type AgentTool =
   | "Read"

@@ -5,6 +5,7 @@ import { specialistAgents } from "./specialists.js";
 import { godotAgents } from "./engine-godot.js";
 import { unityAgents } from "./engine-unity.js";
 import { unrealAgents } from "./engine-unreal.js";
+import { codeReviewerAgents } from "./code-reviewer.js";
 import { delegationMap } from "./delegation-map.js";
 import { agentTiers } from "./tiers.js";
 
@@ -16,6 +17,7 @@ export const agents: Partial<Record<AgentRole, AgentDefinition>> = {
   ...godotAgents,
   ...unityAgents,
   ...unrealAgents,
+  ...codeReviewerAgents,
 };
 
 export const allAgentRoles: AgentRole[] = Object.keys(agents) as AgentRole[];
