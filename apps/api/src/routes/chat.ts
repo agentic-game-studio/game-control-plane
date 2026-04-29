@@ -1,9 +1,9 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
-import type { AgentRole, ChatSession, ChatMessage, CreateMessageRequest, CreateChatSessionRequest } from "@game-studio/types";
+import type { AgentRole, ChatSession, ChatMessage, CreateMessageRequest, CreateChatSessionRequest, DashboardData, Project } from "@game-studio/types";
 import type { LLMMessage } from "../llm/zai-client.js";
 import { broadcastEvent, readData, writeData } from "../services/data-store.js";
-import { invokeAgent, continueConversation } from "../services/llm-service.js";
+import { invokeAgent, continueConversation, type ProjectContext } from "../services/llm-service.js";
 import { makeProgressCallback } from "../services/llm-service.js";
 import { getAgentSystemPrompt } from "../prompts/agent-prompt-loader.js";
 import type { WSEvent } from "@game-studio/types";
@@ -110,6 +110,32 @@ interface ExtendedChatSession extends ChatSession {
 
 const CHAT_STATE_FILE = "chat-state.json";
 
+/**
+ * Migrate the legacy singleton "producer" session to "producer-legacy".
+ * The platform now uses per-project producer sessions keyed by
+ * "producer-<projectId>", so the unscoped "producer" key is preserved
+ * (history is not lost) under a new id and hidden from the UI.
+ *
+ * Idempotent: running multiple times is a no-op once the rename has
+ * happened.
+ */
+function migrateLegacyProducer(state: ChatState): boolean {
+  const legacy = state.sessions["producer"];
+  if (!legacy) return false;
+
+  const renamed: ExtendedChatSession = {
+    ...(legacy as ExtendedChatSession),
+    id: "producer-legacy",
+    projectId: null,
+  };
+  delete state.sessions["producer"];
+  state.sessions["producer-legacy"] = renamed;
+  if (state.currentSessionId === "producer") {
+    state.currentSessionId = "producer-legacy";
+  }
+  return true;
+}
+
 async function loadChatState(): Promise<ChatState> {
   try {
     const state = await readData<ChatState>(CHAT_STATE_FILE);
@@ -119,41 +145,18 @@ async function loadChatState(): Promise<ChatState> {
         (m) => m.type !== "progress"
       );
     }
+    if (migrateLegacyProducer(state)) {
+      // Persist the migration so it doesn't run again on next boot.
+      await writeData(CHAT_STATE_FILE, state);
+    }
     return state;
   } catch {
-    // File doesn't exist yet, return default with producer session
+    // File doesn't exist yet — start with an empty session map.
+    // Per-project producer sessions are lazy-created via
+    // GET /api/chat/sessions/producer/:projectId on first chat visit.
     return {
-      sessions: {
-        producer: {
-          id: "producer",
-          role: "producer",
-          messages: [
-            {
-              id: "msg-welcome",
-              type: "welcome" as const,
-              sender: "Producer",
-              content:
-                "Welcome to the Board Room. I'm the Producer, orchestrating our studio's multi-agent game development pipeline.",
-              timestamp: new Date().toISOString(),
-              showActions: false,
-            },
-            {
-              id: "msg-prompt",
-              type: "system" as const,
-              sender: "SYSTEM",
-              content:
-                "Type a command to spawn an agent or request a task. Use /spawn <role> to bring in a specialist.",
-              timestamp: new Date().toISOString(),
-              showActions: false,
-            },
-          ],
-          status: "active" as const,
-          progress: 0,
-          spawnedAt: new Date().toISOString(),
-          conversationHistory: [],
-        },
-      },
-      currentSessionId: "producer",
+      sessions: {},
+      currentSessionId: "",
       threadId: "thread-001",
       threadTitle: "Producer Session",
     };
@@ -165,6 +168,72 @@ loadChatState().then((state) => { chatStore = state; });
 
 async function saveChatState(): Promise<void> {
   await writeData(CHAT_STATE_FILE, chatStore);
+}
+
+async function getProjectById(projectId: string): Promise<Project | null> {
+  try {
+    const data = await readData<DashboardData>("dashboard.json");
+    return data.projects.find((p) => p.id === projectId) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function producerSessionId(projectId: string): string {
+  return `producer-${projectId}`;
+}
+
+function toProjectContext(project: Project): ProjectContext {
+  return {
+    name: project.name,
+    description: project.description,
+    engine: project.engine,
+    workspacePath: project.workspacePath,
+  };
+}
+
+async function getProjectContextForSession(session: ExtendedChatSession): Promise<ProjectContext | undefined> {
+  if (!session.projectId) return undefined;
+  const project = await getProjectById(session.projectId);
+  return project ? toProjectContext(project) : undefined;
+}
+
+/**
+ * Append a message to a session in memory + persist + broadcast.
+ * No-op if the session doesn't exist. Used to record orchestration
+ * events (spawn, completion) on the producer session so they survive
+ * page navigation.
+ */
+async function appendMessage(sessionId: string, msg: ChatMessage): Promise<void> {
+  const session = chatStore.sessions[sessionId];
+  if (!session) return;
+  session.messages.push(msg);
+  await saveChatState();
+  broadcast({
+    type: "chat:message",
+    sessionId,
+    message: msg,
+  } as WSEvent);
+}
+
+/**
+ * Orphan all chat sessions associated with the given project. Sets
+ * projectId to null on each matching session and persists the chat
+ * state. History is preserved but the sessions become hidden from the
+ * project-scoped UI.
+ */
+export async function orphanProjectSessions(projectId: string): Promise<number> {
+  let orphaned = 0;
+  for (const session of Object.values(chatStore.sessions)) {
+    if (session.projectId === projectId) {
+      session.projectId = null;
+      orphaned++;
+    }
+  }
+  if (orphaned > 0) {
+    await saveChatState();
+  }
+  return orphaned;
 }
 
 interface ChatState {
@@ -179,12 +248,83 @@ chatRouter.get("/sessions", (_req: Request, res: Response) => {
   const sessionsData = Object.values(chatStore.sessions).map((s) => ({
     id: s.id,
     role: s.role,
+    projectId: s.projectId,
     messages: s.messages,
     status: s.status,
     progress: s.progress,
     spawnedAt: s.spawnedAt,
   }));
   res.json({ success: true, data: { sessions: sessionsData, currentSessionId: chatStore.currentSessionId } });
+});
+
+// GET /api/chat/sessions/producer/:projectId — Get-or-create producer session for a project
+chatRouter.get("/sessions/producer/:projectId", async (req: Request, res: Response) => {
+  const projectId = String(req.params.projectId);
+
+  if (!projectId) {
+    res.status(400).json({ success: false, error: "projectId is required" });
+    return;
+  }
+
+  const sessionId = producerSessionId(projectId);
+  const existing = chatStore.sessions[sessionId];
+  if (existing) {
+    res.json({ success: true, data: existing });
+    return;
+  }
+
+  const project = await getProjectById(projectId);
+  if (!project) {
+    res.status(404).json({ success: false, error: "Project not found" });
+    return;
+  }
+
+  const now = new Date().toISOString();
+  const newSession: ExtendedChatSession = {
+    id: sessionId,
+    role: "producer",
+    projectId,
+    messages: [
+      {
+        id: `msg-${crypto.randomUUID().slice(0, 8)}`,
+        type: "welcome",
+        sender: "Producer",
+        content: `Welcome to ${project.name}. I'm the Producer, orchestrating our studio's multi-agent game development pipeline for this project.`,
+        timestamp: now,
+        showActions: false,
+      },
+      {
+        id: `msg-${crypto.randomUUID().slice(0, 8)}`,
+        type: "system",
+        sender: "SYSTEM",
+        content: `Active project: ${project.name}${project.engine ? ` (${project.engine})` : ""}. Type a command to spawn an agent or request a task. Use /spawn <role> to bring in a specialist.`,
+        timestamp: now,
+        showActions: false,
+      },
+    ],
+    status: "active",
+    progress: 0,
+    spawnedAt: now,
+    conversationHistory: [],
+  };
+
+  chatStore.sessions[sessionId] = newSession;
+
+  broadcast({
+    type: "chat:session:created",
+    session: {
+      id: newSession.id,
+      role: newSession.role,
+      projectId: newSession.projectId,
+      messages: newSession.messages,
+      status: newSession.status,
+      progress: newSession.progress,
+      spawnedAt: newSession.spawnedAt,
+    },
+  } as WSEvent);
+
+  await saveChatState();
+  res.status(201).json({ success: true, data: newSession });
 });
 
 // GET /api/chat/sessions/:id — Get session by ID
@@ -198,13 +338,34 @@ chatRouter.get("/sessions/:id", (req: Request, res: Response) => {
   res.json({ success: true, data: session });
 });
 
-// POST /api/chat/sessions — Create new session
+// POST /api/chat/sessions — Create new specialist session
 chatRouter.post("/sessions", async (req: Request, res: Response) => {
   const body = req.body as CreateChatSessionRequest;
 
+  const role = (body.role ?? "agent") as AgentRole;
+
+  // Producer sessions go through GET /sessions/producer/:projectId, not this endpoint
+  if (role === "producer") {
+    res.status(400).json({
+      success: false,
+      error: "Use GET /api/chat/sessions/producer/:projectId to create a producer session",
+    });
+    return;
+  }
+
+  if (!body.projectId) {
+    res.status(400).json({ success: false, error: "projectId is required" });
+    return;
+  }
+
+  const project = await getProjectById(body.projectId);
+  if (!project) {
+    res.status(404).json({ success: false, error: "Project not found" });
+    return;
+  }
+
   const sessionId = `session-${crypto.randomUUID().slice(0, 8)}`;
   const now = new Date().toISOString();
-  const role = (body.role ?? "agent") as AgentRole;
 
   // Load the agent's system prompt for the welcome message
   let welcomeContent = `${role} session initialized.`;
@@ -218,6 +379,7 @@ chatRouter.post("/sessions", async (req: Request, res: Response) => {
   const newSession: ExtendedChatSession = {
     id: sessionId,
     role,
+    projectId: body.projectId,
     messages: [
       {
         id: `msg-${crypto.randomUUID().slice(0, 8)}`,
@@ -241,6 +403,7 @@ chatRouter.post("/sessions", async (req: Request, res: Response) => {
     session: {
       id: newSession.id,
       role: newSession.role,
+      projectId: newSession.projectId,
       messages: newSession.messages,
       status: newSession.status,
       progress: newSession.progress,
@@ -256,8 +419,8 @@ chatRouter.post("/sessions", async (req: Request, res: Response) => {
 chatRouter.delete("/sessions/:id", async (req: Request, res: Response) => {
   const id = String(req.params.id);
 
-  // Prevent deleting producer
-  if (id === "producer") {
+  // Prevent deleting any producer session (legacy "producer" or per-project "producer-<id>")
+  if (id === "producer" || id.startsWith("producer-")) {
     res.status(400).json({ success: false, error: "Cannot delete producer session" });
     return;
   }
@@ -436,7 +599,15 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
     }, 2000);
 
     // Call the LLM with progress callback
-    const result = await continueConversation(agentRole, session.conversationHistory, id, onProgress);
+    const projectContext = await getProjectContextForSession(session);
+    const result = await continueConversation(
+      agentRole,
+      session.conversationHistory,
+      id,
+      onProgress,
+      0,
+      projectContext,
+    );
 
     // Stop heartbeat
     clearInterval(heartbeat);
@@ -554,10 +725,21 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
 
 // POST /api/chat/spawn — Spawn an agent with real ZAI API
 chatRouter.post("/spawn", async (req: Request, res: Response) => {
-  const { role, task } = req.body as { role?: string; task?: string };
+  const { role, task, projectId } = req.body as { role?: string; task?: string; projectId?: string };
 
   if (!role) {
     res.status(400).json({ success: false, error: "role is required" });
+    return;
+  }
+
+  if (!projectId) {
+    res.status(400).json({ success: false, error: "projectId is required" });
+    return;
+  }
+
+  const project = await getProjectById(projectId);
+  if (!project) {
+    res.status(404).json({ success: false, error: "Project not found" });
     return;
   }
 
@@ -576,6 +758,7 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
   const newSession: ExtendedChatSession = {
     id: sessionId,
     role: agentRole,
+    projectId,
     messages: [
       {
         id: `msg-${crypto.randomUUID().slice(0, 8)}`,
@@ -606,6 +789,7 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
     session: {
       id: newSession.id,
       role: newSession.role,
+      projectId: newSession.projectId,
       messages: newSession.messages,
       status: newSession.status,
       progress: newSession.progress,
@@ -614,6 +798,18 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
   } as WSEvent);
 
   await saveChatState();
+
+  // Record the spawn on the project's producer session so the entry
+  // survives page navigation (frontend was previously holding this
+  // message in local state only).
+  await appendMessage(producerSessionId(projectId), {
+    id: `msg-${crypto.randomUUID().slice(0, 8)}`,
+    type: "system",
+    sender: "SYSTEM",
+    content: `${agentRole.toUpperCase()} spawned at ${now} UTC`,
+    timestamp: now,
+    showActions: false,
+  });
 
   // If a task is provided, execute it immediately
   if (task) {
@@ -648,7 +844,18 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
 
     try {
       // Don't broadcast agent events from invokeAgent — we handle them ourselves here
-      const result = await invokeAgent(agentRole, task, sessionId, undefined, [], onProgress, false);
+      const projectContext = toProjectContext(project);
+      const result = await invokeAgent(
+        agentRole,
+        task,
+        sessionId,
+        undefined,
+        [],
+        onProgress,
+        false,
+        0,
+        projectContext,
+      );
 
       // Remove progress placeholder
       const idx = newSession.messages.findIndex((m) => m.id === progressMsgId);
@@ -685,6 +892,16 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
         sessionId: sessionId,
       } as WSEvent);
 
+      // Persist completion notice on the producer session.
+      await appendMessage(producerSessionId(projectId), {
+        id: `msg-${crypto.randomUUID().slice(0, 8)}`,
+        type: "agent",
+        sender: "producer",
+        content: `${agentRole.replace(/-/g, " ")} reports task complete. Session awaiting closure.`,
+        timestamp: new Date().toISOString(),
+        showActions: true,
+      });
+
       // Quest Bridge: move ticket to completed
       if (ticketId) {
         await moveQuestTicket(ticketId, "completed", agentRole);
@@ -698,6 +915,16 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
         error: error.message,
         sessionId: sessionId,
       } as WSEvent);
+
+      // Persist failure notice on the producer session.
+      await appendMessage(producerSessionId(projectId), {
+        id: `msg-${crypto.randomUUID().slice(0, 8)}`,
+        type: "system",
+        sender: "SYSTEM",
+        content: `${agentRole.toUpperCase()} failed: ${error.message}`,
+        timestamp: new Date().toISOString(),
+        showActions: false,
+      });
 
       // Quest Bridge: move ticket back to available on failure
       if (ticketId) {

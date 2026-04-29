@@ -9,8 +9,8 @@ interface AgentTreeProps {
   sessions: Map<string, AgentSession>;
   currentSession: string;
   totalProgress: number;
-  onSelectSession: (role: string) => void;
-  onCloseSession?: (role: string) => void;
+  onSelectSession: (sessionId: string) => void;
+  onCloseSession?: (sessionId: string) => void;
 }
 
 /* ─── Hierarchy Tree ─── */
@@ -130,7 +130,7 @@ function filterActiveTree(nodes: AgentTreeNode[], activeRoles: string[]): AgentT
 
 /* ─── Background Task Card ─── */
 
-function BackgroundTaskCard({ session, onSelect, onClose }: { session: AgentSession; onSelect?: (role: string) => void; onClose?: (role: string) => void }) {
+function BackgroundTaskCard({ id, session, onSelect, onClose }: { id: string; session: AgentSession; onSelect?: (sessionId: string) => void; onClose?: (sessionId: string) => void }) {
   const icon = getAgentIcon(session.role);
   const label = session.role.replace(/-/g, "_").toUpperCase();
   const isDone = session.status === "done";
@@ -138,7 +138,7 @@ function BackgroundTaskCard({ session, onSelect, onClose }: { session: AgentSess
 
   return (
     <div
-      onClick={() => onSelect?.(session.role)}
+      onClick={() => onSelect?.(id)}
       className={`border-2 border-black p-3 relative cursor-pointer ${isDone ? "bg-[#e7e7f5] opacity-70" : "bg-white hover:bg-[#f3f2ff]"} transition-colors`}
     >
       <div className="flex items-center gap-2 mb-2">
@@ -156,7 +156,7 @@ function BackgroundTaskCard({ session, onSelect, onClose }: { session: AgentSess
         </div>
         {onClose && (
           <button
-            onClick={() => onClose(session.role)}
+            onClick={() => onClose(id)}
             className="w-5 h-5 border border-black flex items-center justify-center text-[10px] hover:bg-[#df2b31] hover:text-white transition-colors"
             title="Dismiss"
           >
@@ -177,16 +177,20 @@ function BackgroundTaskCard({ session, onSelect, onClose }: { session: AgentSess
 
 export default function AgentTree({ sessions, currentSession, totalProgress, onSelectSession, onCloseSession }: AgentTreeProps) {
   const [showHierarchy, setShowHierarchy] = useState(false);
-  const activeRoles = useMemo(() =>
-    [...sessions.values()]
-      .filter((s) => s.role !== "producer" && s.status === "active")
-      .map((s) => s.role),
-    [sessions]);
+  const entries = useMemo(() => [...sessions.entries()], [sessions]);
+  const producerEntry = useMemo(() => entries.find(([, s]) => s.role === "producer"), [entries]);
+  const producerSessionId = producerEntry?.[0] ?? "";
 
-  // Background tasks (all non-GD sessions)
+  const activeRoles = useMemo(() =>
+    entries
+      .filter(([, s]) => s.role !== "producer" && s.status === "active")
+      .map(([, s]) => s.role),
+    [entries]);
+
+  // Background tasks (all non-producer sessions, with their session id)
   const backgroundTasks = useMemo(() =>
-    [...sessions.values()].filter((s) => s.role !== "producer"),
-    [sessions]);
+    entries.filter(([, s]) => s.role !== "producer"),
+    [entries]);
 
   const treeData = showHierarchy ? AGENT_TREE : [];
 
@@ -209,30 +213,32 @@ export default function AgentTree({ sessions, currentSession, totalProgress, onS
         className="flex-1 overflow-y-auto"
         style={{ backgroundImage: "radial-gradient(#d9d9e6 2px, transparent 2px)", backgroundSize: "16px 16px" }}
       >
-        {/* Game Director — always at top */}
-        <div className="p-4 pb-2">
-          <button
-            onClick={() => onSelectSession("producer")}
-            className={`w-full flex items-center gap-3 p-3 border-2 border-black transition-colors ${
-              currentSession === "producer"
-                ? "bg-[#0055FF] text-white shadow-[4px_4px_0_0_rgba(0,0,0,1)]"
-                : "bg-white hover:bg-[#e7e7f5]"
-            }`}
-          >
-            <div className={`w-10 h-10 border-2 border-black flex items-center justify-center shrink-0 ${
-              currentSession === "producer" ? "bg-black text-white" : "bg-[#0055FF] text-white"
-            }`}>
-              <span className="material-symbols-outlined">stadia_controller</span>
-            </div>
-            <div className="text-left flex-1 min-w-0">
-              <div className="font-[var(--font-label)] text-xs font-bold uppercase">PRODUCER</div>
-              <div className="font-[var(--font-terminal)] text-[10px] flex items-center gap-1">
-                <span className="w-1.5 h-1.5 bg-[#df2b31] border border-black inline-block animate-pulse" />
-                ORCHESTRATOR — ONLINE
+        {/* Producer — always at top */}
+        {producerEntry && (
+          <div className="p-4 pb-2">
+            <button
+              onClick={() => onSelectSession(producerSessionId)}
+              className={`w-full flex items-center gap-3 p-3 border-2 border-black transition-colors ${
+                currentSession === producerSessionId
+                  ? "bg-[#0055FF] text-white shadow-[4px_4px_0_0_rgba(0,0,0,1)]"
+                  : "bg-white hover:bg-[#e7e7f5]"
+              }`}
+            >
+              <div className={`w-10 h-10 border-2 border-black flex items-center justify-center shrink-0 ${
+                currentSession === producerSessionId ? "bg-black text-white" : "bg-[#0055FF] text-white"
+              }`}>
+                <span className="material-symbols-outlined">stadia_controller</span>
               </div>
-            </div>
-          </button>
-        </div>
+              <div className="text-left flex-1 min-w-0">
+                <div className="font-[var(--font-label)] text-xs font-bold uppercase">PRODUCER</div>
+                <div className="font-[var(--font-terminal)] text-[10px] flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 bg-[#df2b31] border border-black inline-block animate-pulse" />
+                  ORCHESTRATOR — ONLINE
+                </div>
+              </div>
+            </button>
+          </div>
+        )}
 
         {/* Background Tasks */}
         {backgroundTasks.length > 0 && (
@@ -241,9 +247,10 @@ export default function AgentTree({ sessions, currentSession, totalProgress, onS
               Background Tasks ({backgroundTasks.length})
             </span>
             <div className="space-y-2">
-              {backgroundTasks.map((session) => (
+              {backgroundTasks.map(([id, session]) => (
                 <BackgroundTaskCard
-                  key={session.role}
+                  key={id}
+                  id={id}
                   session={session}
                   onSelect={onSelectSession}
                   onClose={onCloseSession}

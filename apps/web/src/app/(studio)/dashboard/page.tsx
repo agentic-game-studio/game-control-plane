@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useDashboard } from "@/hooks/useDashboard";
-import { useCurrentProject } from "@/hooks/useCurrentProject";
+import { useProject } from "@/contexts/ProjectContext";
 import { DataLoader } from "@/components/DataLoader";
 import { StatsCards } from "./components/StatsCards";
 import { ProjectGrid } from "./components/ProjectGrid";
@@ -11,7 +11,7 @@ import { NewProjectModal } from "./components/NewProjectModal";
 
 export default function DashboardPage() {
   const { data, loading, error, retry, createProject } = useDashboard();
-  const { currentProject, selectProject } = useCurrentProject(data.projects);
+  const { currentProject, selectProject } = useProject();
   const [isModalOpen, setIsModalOpen] = useState(false);
 
   return (

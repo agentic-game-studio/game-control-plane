@@ -8,6 +8,7 @@ import type {
   UpdateProjectRequest,
 } from "@game-studio/types";
 import type { WSEvent } from "@game-studio/types";
+import { orphanProjectSessions } from "./chat.js";
 
 const DEFAULT_DATA: DashboardData = {
   summary: {
@@ -181,6 +182,10 @@ dashboardRouter.delete("/projects/:id", async (req: Request, res: Response) => {
 
     data.projects.splice(projectIndex, 1);
     await writeData("dashboard.json", data);
+
+    // Orphan any chat sessions tied to this project (history is preserved
+    // but the sessions become hidden from the project-scoped UI).
+    await orphanProjectSessions(String(id));
 
     // Broadcast event
     broadcastEvent({

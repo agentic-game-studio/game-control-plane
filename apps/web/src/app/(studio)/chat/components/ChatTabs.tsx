@@ -2,43 +2,57 @@
 
 import { useMemo } from "react";
 import { getAgentIcon } from "@/lib/agent-icons";
+import { useProject } from "@/contexts/ProjectContext";
 import type { AgentSession } from "@/hooks/useCommandRoom";
 
 interface ChatTabsProps {
   sessions: Map<string, AgentSession>;
   currentSession: string;
-  onSelectSession: (role: string) => void;
-  onCloseSession: (role: string) => void;
+  onSelectSession: (sessionId: string) => void;
+  onCloseSession: (sessionId: string) => void;
 }
 
 export default function ChatTabs({ sessions, currentSession, onSelectSession, onCloseSession }: ChatTabsProps) {
-  const sessionList = useMemo(() => [...sessions.values()], [sessions]);
-  const gdSession = sessionList.find((s) => s.role === "producer");
-  const agentSessions = sessionList.filter((s) => s.role !== "producer");
+  const { currentProject } = useProject();
+  const entries = useMemo(() => [...sessions.entries()], [sessions]);
+  const producerEntry = entries.find(([, s]) => s.role === "producer");
+  const agentEntries = entries.filter(([, s]) => s.role !== "producer");
 
   return (
-    <div className="h-12 bg-[#ededfb] border-b-2 border-black flex items-end px-2 gap-1 overflow-x-auto shrink-0">
-      {/* Game Director tab — always first */}
-      {gdSession && (
-        <TabButton
-          session={gdSession}
-          isActive={currentSession === "producer"}
-          isClosable={false}
-          onSelect={() => onSelectSession("producer")}
-        />
+    <div className="shrink-0 border-b-2 border-black">
+      {/* Project context header */}
+      {currentProject && (
+        <div className="h-8 px-3 flex items-center bg-black text-white font-[var(--font-terminal)] text-xs uppercase tracking-wider gap-3">
+          <span className="material-symbols-outlined text-sm">folder_open</span>
+          <span className="font-bold truncate">{currentProject.name}</span>
+          <span className="opacity-50">·</span>
+          <span className="opacity-70">{currentProject.engine ?? "engine: TBD"}</span>
+        </div>
       )}
 
-      {/* Agent session tabs */}
-      {agentSessions.map((session) => (
-        <TabButton
-          key={session.role}
-          session={session}
-          isActive={currentSession === session.role}
-          isClosable={true}
-          onSelect={() => onSelectSession(session.role)}
-          onClose={() => onCloseSession(session.role)}
-        />
-      ))}
+      <div className="h-12 bg-[#ededfb] flex items-end px-2 gap-1 overflow-x-auto">
+        {/* Producer tab — always first */}
+        {producerEntry && (
+          <TabButton
+            session={producerEntry[1]}
+            isActive={currentSession === producerEntry[0]}
+            isClosable={false}
+            onSelect={() => onSelectSession(producerEntry[0])}
+          />
+        )}
+
+        {/* Agent session tabs */}
+        {agentEntries.map(([id, session]) => (
+          <TabButton
+            key={id}
+            session={session}
+            isActive={currentSession === id}
+            isClosable={true}
+            onSelect={() => onSelectSession(id)}
+            onClose={() => onCloseSession(id)}
+          />
+        ))}
+      </div>
     </div>
   );
 }

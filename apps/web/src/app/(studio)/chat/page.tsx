@@ -5,8 +5,17 @@ import ChatTabs from "./components/ChatTabs";
 import ChatThread from "./components/ChatThread";
 import CommandInput from "./components/CommandInput";
 import { useCommandRoom } from "@/hooks/useCommandRoom";
+import { ProjectGuard } from "@/components/ProjectGuard";
 
 export default function ChatPage() {
+  return (
+    <ProjectGuard>
+      <ChatPageInner />
+    </ProjectGuard>
+  );
+}
+
+function ChatPageInner() {
   const {
     sessions,
     currentSession,
@@ -21,13 +30,14 @@ export default function ChatPage() {
     initialized,
     connected,
     isLoading,
+    producerSessionId,
   } = useCommandRoom();
 
   const handleDecision = (action: string, sender: string) => {
     if (action === "approve") {
       approveAgent(sender);
     } else if (action === "navigate") {
-      selectSession(sender === "producer" ? "producer" : sender);
+      selectSession(sender === "producer" ? producerSessionId : sender);
     } else if (action === "close") {
       closeSession(sender);
     }
@@ -96,9 +106,10 @@ export default function ChatPage() {
           onNavigate={handleNavigate}
           onAnswer={handleAnswer}
           onPlanAction={handlePlanAction}
+          onSamplePrompt={(prompt) => executeCommand(prompt)}
         />
       </div>
-      {currentSession === "producer" ? (
+      {currentSession === producerSessionId ? (
         <CommandInput onSend={executeCommand} isLoading={isLoading} />
       ) : (
         <AgentStatusBar session={sessions.get(currentSession)} onClose={() => closeSession(currentSession)} />

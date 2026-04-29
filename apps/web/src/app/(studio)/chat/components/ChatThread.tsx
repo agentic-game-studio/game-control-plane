@@ -21,7 +21,26 @@ interface ChatThreadProps {
   onNavigate?: (targetSession: string) => void;
   onAnswer?: (questionId: string, selected: string[], customInput?: string) => void;
   onPlanAction?: (phaseId: string, action: "execute" | "execute-all") => void;
+  onSamplePrompt?: (prompt: string) => void;
 }
+
+const SAMPLE_PROMPTS: { icon: string; label: string; prompt: string }[] = [
+  {
+    icon: "swords",
+    label: "Design a combat system",
+    prompt: "I'd like to design the core combat system for this game. Help me sketch the mechanics, hit feedback, and balance levers.",
+  },
+  {
+    icon: "auto_stories",
+    label: "Write the opening cutscene",
+    prompt: "Help me draft the opening cutscene for this game — set the tone, introduce the world, and hook the player.",
+  },
+  {
+    icon: "checklist",
+    label: "Plan sprint 1",
+    prompt: "Plan out sprint 1 for this project. Break the milestone into discrete tasks across design, programming, art, and QA.",
+  },
+];
 
 const TOOL_ICONS: Record<string, string> = {
   Read: "description",
@@ -372,7 +391,7 @@ const NavigateMessage = memo(function NavigateMessage({ msg, onNavigate }: { msg
   );
 });
 
-export default function ChatThread({ messages, sessions, threadId, threadTitle, currentSession, connected, onDecision, onNavigate, onAnswer, onPlanAction }: ChatThreadProps) {
+export default function ChatThread({ messages, sessions, threadId, threadTitle, currentSession, connected, onDecision, onNavigate, onAnswer, onPlanAction, onSamplePrompt }: ChatThreadProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const prevMsgCountRef = useRef(0);
 
@@ -396,20 +415,28 @@ export default function ChatThread({ messages, sessions, threadId, threadTitle, 
     return map;
   }, [sessions]);
 
-  const sessionLabel = currentSession === "producer"
+  const isProducerView = currentSession.startsWith("producer-") || currentSession === "producer";
+  const sessionLabel = isProducerView
     ? "BOARD_ROOM"
     : currentSession.replace(/-/g, "_").toUpperCase();
+
+  // Show sample prompts only in the producer view when the user hasn't
+  // sent anything yet (only welcome/system messages so far).
+  const hasUserActivity = messages.some(
+    (m) => m.type === "user" || m.type === "agent" || m.type === "question" || m.type === "plan",
+  );
+  const showSamplePrompts = isProducerView && !hasUserActivity && !!onSamplePrompt;
 
   return (
     <section className="flex-1 flex flex-col bg-[#faf8ff] relative z-0 min-h-0">
       {/* Header */}
       <div className="h-14 border-b-2 border-black bg-white flex items-center justify-between px-6 shrink-0 z-20">
         <div className="flex items-center gap-4">
-          <span className="material-symbols-outlined">{currentSession === "producer" ? "forum" : "smart_toy"}</span>
+          <span className="material-symbols-outlined">{isProducerView ? "forum" : "smart_toy"}</span>
           <h2 className="font-[var(--font-terminal)] text-base font-bold uppercase tracking-widest">
             {sessionLabel}
           </h2>
-          {currentSession !== "producer" && (
+          {!isProducerView && (
             <span className="font-[var(--font-label)] text-[10px] uppercase bg-[#e7e7f5] px-2 py-1 border border-black">
               Agent Session
             </span>
@@ -475,6 +502,28 @@ export default function ChatThread({ messages, sessions, threadId, threadTitle, 
               return null;
           }
         })}
+        {showSamplePrompts && (
+          <div className="border-2 border-black bg-white shadow-[4px_4px_0_0_rgba(0,0,0,1)] p-5 self-start max-w-2xl">
+            <div className="font-[var(--font-terminal)] text-xs uppercase tracking-widest text-[#737688] mb-3">
+              Try one of these to get started:
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              {SAMPLE_PROMPTS.map((sp) => (
+                <button
+                  key={sp.label}
+                  type="button"
+                  onClick={() => onSamplePrompt?.(sp.prompt)}
+                  className="border-2 border-black bg-white px-3 py-4 text-left hover:bg-black hover:text-white transition-colors retro-press flex flex-col gap-2"
+                >
+                  <span className="material-symbols-outlined">{sp.icon}</span>
+                  <span className="font-[var(--font-label)] text-xs font-bold uppercase leading-tight">
+                    {sp.label}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
         <div ref={bottomRef} />
       </div>
     </section>

@@ -2,9 +2,18 @@
 
 import { useTickets } from "@/hooks/useTickets";
 import { DataLoader } from "@/components/DataLoader";
+import { ProjectGuard } from "@/components/ProjectGuard";
 import { QuestBoard } from "./components/QuestBoard";
 
 export default function TicketsPage() {
+  return (
+    <ProjectGuard>
+      <TicketsPageInner />
+    </ProjectGuard>
+  );
+}
+
+function TicketsPageInner() {
   const { data, loading, error, retry, acknowledgeTicket } = useTickets();
 
   const totalQuests = data.columns.reduce(
