@@ -1,6 +1,6 @@
 # Game Studio Control Plane
 
-Multi-agent game development orchestration platform. Runs AI agents (game director, lead programmer, artists, etc.) to build games collaboratively, with a web UI for monitoring and control.
+Multi-agent game development orchestration platform. Producer acts as the Board Room orchestrator, spawning specialized agents to build games collaboratively. Per-project producer sessions with LLM context injection. Quest Bridge auto-tracks agent tasks on the Kanban board. Web UI provides real-time monitoring, interactive Q&A, and workflow pipeline visualization.
 
 ## Quick Start
 
@@ -92,13 +92,15 @@ Review modes: `solo` (AI-only), `lean` (key checkpoints, default), `full` (all g
 Express server on port 3001 with:
 
 - **Express body limit**: 50mb for image payloads (clipboard paste base64)
+- **Security**: Path traversal protection, Bash sandboxing, ReDoS prevention, timing-safe auth, WebSocket auth via apiKey query param, XSS filtering, configurable CORS
+- **Reliability**: Heartbeat cleanup, 409 spawn collision handling, atomic pruneMessages, recursion depth limit, graceful shutdown, SSE keepalive
 - **Routes**:
   - `/api/sessions`, `/api/agents`, `/api/skills`, `/api/teams`, `/api/gates`, `/api/design`, `/api/documents` — Core orchestration
   - `/api/dashboard` — Projects CRUD (`GET`, `POST/DELETE /projects`)
   - `/api/tickets` — Kanban board CRUD (`GET`, `POST/PATCH/DELETE`, `PATCH /:id/move`)
   - `/api/assets` — Asset inventory CRUD + art bible (`GET`, `POST/PATCH/DELETE`, `PATCH /art-bible`)
   - `/api/settings` — Config CRUD (`GET`, `PATCH`, `POST /reset`)
-  - `/api/chat` — Session management (`GET/POST /sessions`, `DELETE /sessions/:id`, `POST /sessions/:id/messages`)
+  - `/api/chat` — Session management (`GET/POST /sessions`, `DELETE /sessions/:id`, `POST /sessions/:id/messages`, `GET /sessions/producer/:projectId` get-or-create)
 - **WebSocket**: Real-time events (agent:spawned, checkpoint:saved, gate:verdict, log:entry)
 - **SSE**: Log streaming at `/api/sessions/:sessionId/stream`
 - **LLM**: ZAI API client (`src/llm/zai-client.ts`) with tool execution loop, retry, message pruning
@@ -145,15 +147,16 @@ Next.js 15 App Router, Tailwind CSS v4, no UI framework. All pages are client co
 | Route | Description |
 |-------|-------------|
 | `/dashboard` | Project management with create/delete modals, activity log, credit summary |
-| `/tickets` | Kanban board with 4 columns (Available, Processing, Verify, Archived), create/delete quests |
-| `/assets` | Asset inventory grid with create/delete, Art Bible sidebar with constraints |
+| `/tickets` | Kanban board (project-scoped), 4 columns (Available, Processing, Verify, Archived), create/delete quests |
+| `/assets` | Asset inventory grid (project-scoped), create/delete, Art Bible sidebar with constraints |
+| `/chat` | Board room command page — per-project producer session, sample prompt buttons on empty state |
 | `/settings` | Ledger & config — credit/tier pools, subscription, top-up history, usage log, engine selection, model dropdown, API key, webhook, reset |
 | `/agents` | Agent registry page with searchable list + tier filter |
 | `/skills` | Skills library with filterable categories |
 | `/teams` | Team workflows with workflow timeline + run dialog |
 | `/gates` | Director gates matrix with category filter + run functionality |
 
-**Shared Components**: `components/Modal.tsx` (reusable modal), `components/DataLoader.tsx` (loading/error states)
+**Shared Components**: `components/Modal.tsx` (reusable modal), `components/DataLoader.tsx` (loading/error states), `components/ProjectGuard.tsx` (project-required page overlay), `contexts/ProjectContext.tsx` (project provider + useProject hook)
 
 ### Chat UI Components (apps/web/src/app/(studio)/chat/components/)
 
@@ -164,21 +167,34 @@ Next.js 15 App Router, Tailwind CSS v4, no UI framework. All pages are client co
 | `DiffView.tsx` | Line-by-line diff rendering with syntax highlighting |
 | `AgentTree.tsx` | Sidebar with agent sessions and hierarchy tree |
 | `QuestionMessage.tsx` | Interactive Q&A with radio/checkbox options |
+| `WorkflowMessage.tsx` | OMC 5-stage pipeline stepper visualization |
+| `PlanMessage.tsx` | Structured plan phases with per-phase execution |
+| `ChatTabs.tsx` | Tabbed navigation between board room and agent sessions |
+| `TopAppBar.tsx` | Top bar with project pill + switcher dropdown |
 
 ### Chat Features
 
 - **Slash commands**: `/spawn`, `/approve`, `/done`, `/clear`, `/help`, `/cost`, `/diff`
-- **6-step approve workflow**: Progress bars with tool calls (Read, Grep, Edit, Write)
+- **OMC 5-stage workflow pipeline**: Plan → Decompose → Execute → Verify → Fix with progress stepper
+- **Activity log**: Real-time tool call activity (Read, Bash, Edit, etc.) under progress bar
+- **Real-time progress bar**: Smooth percentage updates (+3% every 2s) during agent work
 - **Thinking panel**: Shows agent reasoning during progress
 - **Navigate messages**: "Back to Producer" button after task completion
-- **Message types**: `system`, `agent`, `user`, `progress`, `welcome`, `diff`, `navigate`, `question`, `plan`
+- **Message types**: `system`, `agent`, `user`, `progress`, `welcome`, `diff`, `navigate`, `question`, `plan`, `workflow`
 - **Markdown rendering**: Messages render markdown with code blocks, lists, links
 - **Image paste**: Base64 inline images via clipboard paste (50mb body limit)
 - **Typing indicator**: Immediate visual feedback when agent is responding
-- **Message deduplication**: Prevents duplicate messages on re-renders
+- **Message deduplication**: Bidirectional dedup prevents duplicate messages from WS + API race conditions
 - **showActions**: Approve/Override/Pause buttons only appear when explicitly requested by the agent
 - **Interactive Q&A**: Agents can ask questions with selectable options (radio/checkbox), custom input, keyboard navigation via `AskUserQuestion` tool
 - **Plan phases**: Agents can propose structured plans with phases via `ProposePlan` tool — users can execute individual phases or all at once
+- **Per-project sessions**: Each project has its own Producer chat (`producer-<projectId>`), lazy-created on first visit
+- **Project context injection**: LLM system prompt includes active project context (name, description, engine, workspace)
+- **ProjectGuard**: `/chat`, `/tickets`, `/assets` require active project — yellow overlay with link to dashboard otherwise
+- **Sample prompts**: Empty producer chat shows "Design a combat system", "Write opening cutscene", "Plan sprint 1" buttons
+- **Animation fixes**: Restored `animate-spin` / `animate-pulse` keyframes for loading spinners
+- **Session persistence**: Chat sessions saved to `chat-state.json`, survive page refreshes and server restarts; spawn/completion messages persist on producer session
+- **Legacy migration**: On startup, legacy `producer` session renamed to `producer-legacy`
 
 ## Data Flow
 
@@ -195,6 +211,10 @@ Next.js 15 App Router, Tailwind CSS v4, no UI framework. All pages are client co
 Session state lives in `workspace/production/session-state/` as JSON files:
 - `*.json` — Full session state (checkpoints, logs, agent invocations)
 - `{sessionId}/*.json` — Individual checkpoint snapshots
+
+Chat sessions persisted to `chat-state.json` survive page refreshes and server restarts.
+
+Quest tickets auto-created via Quest Bridge when agents spawn (Available → Processing → Verify → Completed).
 
 Design documents in `workspace/design/gdd/` and `workspace/docs/architecture/` as Markdown.
 
@@ -228,6 +248,7 @@ pnpm build             # Turbo build pipeline
 pnpm generate:agents    # Validate 49 agent definitions
 pnpm generate:skills   # Validate 67 skill definitions
 pnpm generate          # Both validations
+pnpm test:e2e          # Playwright E2E test suite (apps/web/e2e/)
 ```
 
 ## Key Files
@@ -247,11 +268,15 @@ pnpm generate          # Both validations
 - `apps/api/src/routes/assets.ts` — Asset inventory + art bible CRUD
 - `apps/api/src/routes/settings.ts` — Config CRUD
 - `apps/api/src/routes/chat.ts` — Session management + diff API
+- `apps/api/src/middleware/auth.ts` — Timing-safe authentication middleware
 - `apps/api/src/services/websocket.ts` — WebSocket broadcast + SSE client tracking
 - `apps/api/src/services/document-store.ts` — Workspace file scanning, wikilink extraction, backlink computation, fs.watch for real-time updates
-- `apps/api/src/services/data-store.ts` — File-based JSON persistence for studio data
+- `apps/api/src/services/data-store.ts` — Async file-based JSON persistence for dashboard, tickets, assets, settings with rate limiting
+- `apps/api/src/services/quest-bridge.ts` — Intercepts Task tool calls to auto-create and track Quest tickets (Available → Processing → Verify → Completed)
 - `apps/web/src/hooks/useCommandRoom.ts` — Chat state management with tool calls, diff, navigate
 - `apps/web/src/app/(studio)/chat/components/DiffView.tsx` — Diff rendering component
+- `apps/web/src/lib/api.ts` — WebSocket API client with apiKey auth, debounced reconnect
+- `apps/web/src/lib/format-time.ts` — Shared time formatting utilities
 - `packages/types/src/api.ts` — WSEvent union type (all real-time event types)
 - `packages/types/src/document.ts` — DocumentEntry, DocumentDetail, GraphData types
 - `packages/types/src/chat.ts` — ChatMessage, ToolCall, DiffBlock types
