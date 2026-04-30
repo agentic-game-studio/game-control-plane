@@ -749,18 +749,20 @@ export function launchGodotEditor(projectDir: string): { success: boolean; pid?:
   }
 
   // Find Godot binary — platform-specific candidates
+  const localAppData = process.env.LOCALAPPDATA ?? "";
+  const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
   const candidates: string[] = platform === "win32" ? [
     // Windows: Program Files, user installs, Steam
     "C:\\Program Files\\Godot\\Godot.exe",
     "C:\\Program Files (x86)\\Godot\\Godot.exe",
-    ...globSync("C:\\Program Files\\Godot*\\Godot*.exe"),
-    ...globSync(`${process.env.LOCALAPPDATA ?? ""}\\Programs\\Godot*\\Godot*.exe`),
-    ...globSync(`${process.env.HOME ?? ""}\\AppData\\Local\\Programs\\Godot*\\Godot*.exe`),
-    ...globSync("C:\\Program Files (x86)\\Steam\\steamapps\\common\\Godot*\\Godot*.exe"),
+    ...globSync("C:/Program Files/Godot*/Godot*.exe"),
+    ...(localAppData ? globSync(`${localAppData}/Programs/Godot*/Godot*.exe`) : []),
+    ...(home ? globSync(`${home}/AppData/Local/Programs/Godot*/Godot*.exe`) : []),
+    ...globSync("C:/Program Files (x86)/Steam/steamapps/common/Godot*/Godot*.exe"),
   ] : platform === "darwin" ? [
     // macOS: .app bundle, Homebrew
     "/Applications/Godot.app/Contents/MacOS/Godot",
-    "/Applications/Godot*.app/Contents/MacOS/Godot",
+    ...globSync("/Applications/Godot*.app/Contents/MacOS/Godot"),
     "/usr/local/bin/godot",
     "/opt/homebrew/bin/godot",
   ] : [
@@ -770,8 +772,8 @@ export function launchGodotEditor(projectDir: string): { success: boolean; pid?:
     "/opt/homebrew/bin/godot",
     "/snap/bin/godot",
     ...globSync("/usr/local/bin/godot*"),
-    ...globSync(`${process.env.HOME ?? ""}/Applications/Godot*.AppImage`),
-    ...globSync(`${process.env.HOME ?? ""}/.local/bin/godot*`),
+    ...(home ? globSync(`${home}/Applications/Godot*.AppImage`) : []),
+    ...(home ? globSync(`${home}/.local/bin/godot*`) : []),
   ];
 
   // Check env var override first (highest priority)
