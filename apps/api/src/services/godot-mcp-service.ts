@@ -17,6 +17,7 @@ import { randomUUID } from "node:crypto";
 import { accessSync } from "node:fs";
 import type { LLMTool } from "../llm/zai-client.js";
 import { logger } from "../utils/logger.js";
+import { loadConfig } from "../config.js";
 
 // Re-export tool type for consumers
 export type { LLMTool } from "../llm/zai-client.js";
@@ -620,34 +621,49 @@ export function installGodotMCPPlugin(
     result.pluginCopied = true;
     logger.info({ sourcePath, destPath: projectPluginDir }, "Godot MCP plugin copied");
 
-    // Enable the plugin in project.godot
+    // Enable the plugin in project.godot (Godot 4 format)
     const projectGodotPath = join(projectDir, "project.godot");
     if (existsSync(projectGodotPath)) {
       let projectGodotContent = readFileSync(projectGodotPath, "utf-8");
+      const pluginCfgPath = "res://addons/godot_mcp/plugin.cfg";
 
-      // Check if plugin is already enabled
-      if (projectGodotContent.includes('"Godot MCP Pro"')) {
-        // Update existing entry to enable it
-        projectGodotContent = projectGodotContent.replace(
-          /\[plugins\][\s\S]*?"Godot MCP Pro"\/enable="[^"]*"/,
-          '[plugins]\n\n"Godot MCP Pro"/enable="On"'
-        );
-        // If pattern didn't match, try alternate approach
-        if (!projectGodotContent.includes('"Godot MCP Pro"/enable="On"')) {
-          projectGodotContent = projectGodotContent.replace(
-            /"Godot MCP Pro"\/enable="[^"]*"/,
-            '"Godot MCP Pro"/enable="On"'
-          );
-        }
+      // Check if already enabled in Godot 4 format ([editor_plugins])
+      if (projectGodotContent.includes(pluginCfgPath)) {
+        result.pluginEnabled = true;
       } else {
-        // Add new plugin entry
-        const pluginEntry = '\n[plugins]\n\n"Godot MCP Pro"/enable="On"\n';
-        projectGodotContent += pluginEntry;
-      }
+        // Remove any Godot 3 format [plugins] entries
+        projectGodotContent = projectGodotContent.replace(
+          /\[plugins\][^\[]*?"Godot MCP Pro"\/enable="[^"]*"[^\[]*?\n/g,
+          ""
+        );
 
-      writeFileSync(projectGodotPath, projectGodotContent, "utf-8");
-      result.pluginEnabled = true;
-      logger.info({ projectGodotPath }, "Godot MCP plugin enabled in project.godot");
+        if (projectGodotContent.includes("[editor_plugins]")) {
+          // Append to existing [editor_plugins] section
+          projectGodotContent = projectGodotContent.replace(
+            /\[editor_plugins\]\s*\nenabled=PackedStringArray\(([^)]*)\)/,
+            (_, existing: string) => {
+              // Add plugin to existing PackedStringArray
+              if (existing.includes(pluginCfgPath)) return `enabled=PackedStringArray(${existing})`;
+              return `enabled=PackedStringArray(${existing.replace(/\)$/, "")}, "${pluginCfgPath}")`;
+            }
+          );
+          // Fallback: if regex didn't match the PackedStringArray pattern, just add after section header
+          if (!projectGodotContent.includes(pluginCfgPath)) {
+            projectGodotContent = projectGodotContent.replace(
+              /\[editor_plugins\]/,
+              `[editor_plugins]\n\nenabled=PackedStringArray("${pluginCfgPath}")`
+            );
+          }
+        } else {
+          // Add new [editor_plugins] section
+          const pluginEntry = `\n[editor_plugins]\n\nenabled=PackedStringArray("${pluginCfgPath}")\n`;
+          projectGodotContent += pluginEntry;
+        }
+
+        writeFileSync(projectGodotPath, projectGodotContent, "utf-8");
+        result.pluginEnabled = true;
+        logger.info({ projectGodotPath }, "Godot MCP plugin enabled in project.godot (Godot 4 format)");
+      }
     } else {
       result.error = `project.godot not found at ${projectGodotPath}`;
       return result;
@@ -684,7 +700,8 @@ export function isGodotMCPPluginEnabled(projectDir: string): boolean {
   if (!existsSync(projectGodotPath)) return false;
 
   const content = readFileSync(projectGodotPath, "utf-8");
-  return content.includes('"Godot MCP Pro"/enable="On"');
+  // Check Godot 4 format ([editor_plugins] with plugin.cfg path)
+  return content.includes("res://addons/godot_mcp/plugin.cfg");
 }
 
 // ─── Godot Editor Launch ──────────────────────────────────────────────────
@@ -692,12 +709,18 @@ export function isGodotMCPPluginEnabled(projectDir: string): boolean {
 /**
  * Launch the Godot editor with a specific project.
  *
- * Searches for the Godot binary in common locations, then spawns it
- * as a detached process with --path pointing to the project directory.
- * The plugin must already be installed and enabled in project.godot
- * (handled by installGodotMCPPlugin).
+ * Ensures the MCP plugin is installed and enabled in project.godot
+ * before launching. Uses Godot 4 [editor_plugins] format.
  */
 export function launchGodotEditor(projectDir: string): { success: boolean; pid?: number; error?: string } {
+  // Ensure plugin is installed and enabled before launching
+  if (!isGodotMCPPluginInstalled(projectDir) || !isGodotMCPPluginEnabled(projectDir)) {
+    const config = loadConfig();
+    const installResult = installGodotMCPPlugin(projectDir, config.WORKSPACE_DIR);
+    if (!installResult.success) {
+      logger.warn({ projectDir, error: installResult.error }, "Could not install/enable Godot MCP plugin before launch");
+    }
+  }
   const candidates = [
     // macOS .app bundle
     "/Applications/Godot.app/Contents/MacOS/Godot",
