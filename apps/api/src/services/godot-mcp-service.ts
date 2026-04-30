@@ -642,9 +642,8 @@ export function installGodotMCPPlugin(
           projectGodotContent = projectGodotContent.replace(
             /\[editor_plugins\]\s*\nenabled=PackedStringArray\(([^)]*)\)/,
             (_, existing: string) => {
-              // Add plugin to existing PackedStringArray
               if (existing.includes(pluginCfgPath)) return `enabled=PackedStringArray(${existing})`;
-              return `enabled=PackedStringArray(${existing.replace(/\)$/, "")}, "${pluginCfgPath}")`;
+              return `enabled=PackedStringArray(${existing}, "${pluginCfgPath}")`;
             }
           );
           // Fallback: if regex didn't match the PackedStringArray pattern, just add after section header
@@ -722,9 +721,10 @@ export function launchGodotEditor(projectDir: string): { success: boolean; pid?:
     }
   }
 
-  // Check if Godot is already running with this project
+  // Check if Godot is already running
   try {
-    const psResult = execSync("pgrep -x Godot || pgrep -f 'Godot.*--path'", { encoding: "utf-8", stdio: ["pipe", "pipe", "ignore"] }).trim();
+    // -x matches exact process name, -i case-insensitive for macOS .app bundles
+    const psResult = execSync("pgrep -xi Godot 2>/dev/null || pgrep -f 'Godot.app' 2>/dev/null || true", { encoding: "utf-8", stdio: ["pipe", "pipe", "ignore"] }).trim();
     if (psResult) {
       logger.info({ projectDir, existingPid: psResult.split("\n")[0] }, "Godot editor already running, skipping launch");
       return { success: true, pid: parseInt(psResult.split("\n")[0], 10) };
