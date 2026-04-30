@@ -1,15 +1,20 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
+import { join } from "node:path";
 import { readData, writeData, broadcastEvent } from "../services/data-store.js";
+import { logger } from "../utils/logger.js";
 import type {
   DashboardData,
   Project,
   CreateProjectRequest,
   UpdateProjectRequest,
+  ProjectEngine,
 } from "@game-studio/types";
 import type { WSEvent } from "@game-studio/types";
 import { orphanProjectSessions } from "./chat.js";
-import { removeGodotMCPService } from "../services/godot-mcp-service.js";
+import { removeGodotMCPService, installGodotMCPPlugin, isGodotMCPPluginInstalled, isGodotMCPPluginEnabled } from "../services/godot-mcp-service.js";
+import { detectEngineFromWorkspace } from "../services/llm-service.js";
+import { loadConfig } from "../config.js";
 
 const DEFAULT_DATA: DashboardData = {
   summary: {
@@ -103,14 +108,26 @@ dashboardRouter.post("/projects", async (req: Request, res: Response) => {
   try {
     const data = await readData<DashboardData>("dashboard.json");
     const now = new Date().toISOString();
+    const config = loadConfig();
+
+    // Auto-detect engine from workspacePath if provided and engine not specified
+    let engine: ProjectEngine | null = body.engine ?? null;
+    const workspacePath = body.workspacePath ?? null;
+    if (!engine && workspacePath) {
+      const detected = await detectEngineFromWorkspace(workspacePath);
+      if (detected) {
+        engine = detected as ProjectEngine;
+      }
+    }
+
     const newProject = normalizeProject({
       id: `proj-${Date.now()}`,
       name: body.name,
       description: body.description ?? "",
-      engine: body.engine ?? null,
+      engine,
       progress: 0,
       status: "active",
-      workspacePath: body.workspacePath ?? null,
+      workspacePath,
       icon: body.icon ?? "folder",
       createdAt: now,
       updatedAt: now,
@@ -119,13 +136,27 @@ dashboardRouter.post("/projects", async (req: Request, res: Response) => {
     data.projects.push(newProject);
     await writeData("dashboard.json", data);
 
+    // Auto-install Godot MCP plugin for Godot projects with workspacePath
+    let pluginInstallResult: { success: boolean; pluginCopied: boolean; pluginEnabled: boolean; error?: string } | null = null;
+    if (engine === "godot" && workspacePath) {
+      const projectDir = join(config.WORKSPACE_DIR, workspacePath);
+      pluginInstallResult = installGodotMCPPlugin(projectDir, config.WORKSPACE_DIR);
+      if (!pluginInstallResult.success && pluginInstallResult.error) {
+        logger.warn({ error: pluginInstallResult.error, projectDir }, "Failed to auto-install Godot MCP plugin");
+      }
+    }
+
     // Broadcast event
     broadcastEvent({
       type: "project:created",
       project: newProject,
     } as WSEvent);
 
-    res.status(201).json({ success: true, data: newProject });
+    res.status(201).json({
+      success: true,
+      data: newProject,
+      pluginInstall: pluginInstallResult,
+    });
   } catch {
     res.status(500).json({ success: false, error: "Failed to create project" });
   }
@@ -200,5 +231,197 @@ dashboardRouter.delete("/projects/:id", async (req: Request, res: Response) => {
     res.json({ success: true });
   } catch {
     res.status(500).json({ success: false, error: "Failed to delete project" });
+  }
+});
+
+// POST /api/dashboard/projects/:id/install-plugin - Install Godot MCP plugin
+dashboardRouter.post("/projects/:id/install-plugin", async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const config = loadConfig();
+
+  try {
+    const data = await readData<DashboardData>("dashboard.json");
+    const project = data.projects.find((p) => p.id === id);
+
+    if (!project) {
+      res.status(404).json({ success: false, error: "Project not found" });
+      return;
+    }
+
+    if (project.engine !== "godot") {
+      res.status(400).json({ success: false, error: "Project is not a Godot project" });
+      return;
+    }
+
+    if (!project.workspacePath) {
+      res.status(400).json({ success: false, error: "Project has no workspace path configured" });
+      return;
+    }
+
+    const projectDir = join(config.WORKSPACE_DIR, project.workspacePath);
+    const result = installGodotMCPPlugin(projectDir, config.WORKSPACE_DIR);
+
+    if (result.success) {
+      res.json({
+        success: true,
+        data: {
+          pluginCopied: result.pluginCopied,
+          pluginEnabled: result.pluginEnabled,
+        },
+      });
+    } else {
+      res.status(500).json({ success: false, error: result.error });
+    }
+  } catch {
+    res.status(500).json({ success: false, error: "Failed to install plugin" });
+  }
+});
+
+// GET /api/dashboard/projects/:id/plugin-status - Check Godot MCP plugin status
+dashboardRouter.get("/projects/:id/plugin-status", async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const config = loadConfig();
+
+  try {
+    const data = await readData<DashboardData>("dashboard.json");
+    const project = data.projects.find((p) => p.id === id);
+
+    if (!project) {
+      res.status(404).json({ success: false, error: "Project not found" });
+      return;
+    }
+
+    if (project.engine !== "godot") {
+      res.status(400).json({ success: false, error: "Project is not a Godot project" });
+      return;
+    }
+
+    if (!project.workspacePath) {
+      res.json({
+        success: true,
+        data: {
+          installed: false,
+          enabled: false,
+          error: "Project has no workspace path configured",
+        },
+      });
+      return;
+    }
+
+    const projectDir = join(config.WORKSPACE_DIR, project.workspacePath);
+    const installed = isGodotMCPPluginInstalled(projectDir);
+    const enabled = isGodotMCPPluginEnabled(projectDir);
+
+    res.json({
+      success: true,
+      data: {
+        installed,
+        enabled,
+      },
+    });
+  } catch {
+    res.status(500).json({ success: false, error: "Failed to check plugin status" });
+  }
+});
+
+// GET /api/dashboard/server-status - Check Godot MCP server status
+dashboardRouter.get("/server-status", async (_req: Request, res: Response) => {
+  try {
+    const { findServerDir, isServerBuilt, isDependenciesInstalled } = await import("../services/godot-mcp-service.js");
+    const serverDir = findServerDir();
+    if (!serverDir) {
+      res.json({
+        success: true,
+        data: {
+          found: false,
+          installed: false,
+          built: false,
+          error: "Server directory not found",
+        },
+      });
+      return;
+    }
+
+    res.json({
+      success: true,
+      data: {
+        found: true,
+        installed: isDependenciesInstalled(serverDir),
+        built: isServerBuilt(serverDir),
+        serverDir,
+      },
+    });
+  } catch {
+    res.status(500).json({ success: false, error: "Failed to check server status" });
+  }
+});
+
+// POST /api/dashboard/setup-server - Setup Godot MCP server (install + build)
+dashboardRouter.post("/setup-server", async (_req: Request, res: Response) => {
+  try {
+    const { setupGodotMCPServer } = await import("../services/godot-mcp-service.js");
+    const result = setupGodotMCPServer();
+
+    if (result.success) {
+      res.json({
+        success: true,
+        data: {
+          installed: result.installed,
+          built: result.built,
+        },
+      });
+    } else {
+      res.status(500).json({ success: false, error: result.error });
+    }
+  } catch {
+    res.status(500).json({ success: false, error: "Failed to setup server" });
+  }
+});
+
+// GET /api/dashboard/projects/:id/mcp-health - Check Godot MCP connection health
+dashboardRouter.get("/projects/:id/mcp-health", async (req: Request, res: Response) => {
+  const { id } = req.params;
+
+  try {
+    const data = await readData<DashboardData>("dashboard.json");
+    const project = data.projects.find((p) => p.id === id);
+
+    if (!project) {
+      res.status(404).json({ success: false, error: "Project not found" });
+      return;
+    }
+
+    if (project.engine !== "godot") {
+      res.status(400).json({ success: false, error: "Project is not a Godot project" });
+      return;
+    }
+
+    const { getGodotMCPService } = await import("../services/godot-mcp-service.js");
+    const godotService = getGodotMCPService(String(id));
+
+    if (!godotService?.running()) {
+      res.json({
+        success: true,
+        data: {
+          status: "not_running",
+          message: "MCP service not started. Open the chat to start it.",
+        },
+      });
+      return;
+    }
+
+    const health = await godotService.healthCheck();
+    res.json({
+      success: true,
+      data: {
+        status: health.godotConnected ? "connected" : "disconnected",
+        serverRunning: health.serverRunning,
+        godotConnected: health.godotConnected,
+        projectInfo: health.projectInfo,
+        error: health.error,
+      },
+    });
+  } catch {
+    res.status(500).json({ success: false, error: "Failed to check MCP health" });
   }
 });

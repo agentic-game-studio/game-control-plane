@@ -12,6 +12,17 @@ export function broadcast(event: WSEvent) {
   });
 }
 
+/**
+ * Broadcast session update to frontend (progress, status changes)
+ */
+export function broadcastSessionUpdate(sessionId: string, updates: { progress?: number; status?: string }) {
+  broadcast({
+    type: "chat:session:updated",
+    sessionId,
+    session: updates,
+  } as WSEvent);
+}
+
 // SSE client tracking
 interface SSEClient {
   sessionId: string;

@@ -198,6 +198,18 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, prod
       // via chat:message — do not duplicate here.
       return { sessions: next, messages };
     }
+    case "chat:session:updated": {
+      const sessionId = event.sessionId;
+      const session = sessions.get(sessionId);
+      if (!session) return { sessions: null, messages };
+      const next = new Map(sessions);
+      next.set(sessionId, {
+        ...session,
+        progress: event.session.progress ?? session.progress,
+        status: (event.session.status as "active" | "done") ?? session.status,
+      });
+      return { sessions: next, messages };
+    }
     case "chat:message": {
       const sessionId = event.sessionId;
       const message = event.message;

@@ -5,11 +5,20 @@ import type { Project } from "@game-studio/types";
 import { ProjectCard } from "./ProjectCard";
 import { ConfirmSwitchModal } from "./ConfirmSwitchModal";
 
+interface MCPStatus {
+  status: "not_running" | "connected" | "disconnected";
+  serverRunning?: boolean;
+  godotConnected?: boolean;
+  projectInfo?: { name: string; version: string };
+  error?: string;
+}
+
 interface ProjectGridProps {
   projects: Project[];
   currentProject: Project | null;
   onSelectProject: (project: Project) => void;
   onNewProject: () => void;
+  mcpStatuses?: Record<string, MCPStatus>;
 }
 
 export function ProjectGrid({
@@ -17,6 +26,7 @@ export function ProjectGrid({
   currentProject,
   onSelectProject,
   onNewProject,
+  mcpStatuses = {},
 }: ProjectGridProps) {
   const [pendingProject, setPendingProject] = useState<Project | null>(null);
 
@@ -88,6 +98,7 @@ export function ProjectGrid({
             project={project}
             isSelected={project.id === currentProject?.id}
             onClick={() => handleCardClick(project)}
+            mcpStatus={mcpStatuses[project.id]}
           />
         ))}
         {/* Empty slot */}

@@ -11,8 +11,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { loadConfig } from "../config.js";
 import { getAgentSystemPrompt, loadAgentPrompts } from "../prompts/agent-prompt-loader.js";
-import { callLLMWithTools, GAME_STUDIO_TOOLS, type LLMMessage, type ProgressCallback } from "../llm/zai-client.js";
-import { broadcast } from "./websocket.js";
+import { callLLMWithTools, GAME_STUDIO_TOOLS, type LLMMessage, type ProgressCallback, type FileOperationCallback } from "../llm/zai-client.js";
+import { broadcast, broadcastSessionUpdate } from "./websocket.js";
 import { getZaiModel } from "../config/model-mapping.js";
 import type { WSEvent, AgentRole } from "@game-studio/types";
 import {
@@ -31,6 +31,42 @@ export interface ProjectContext {
   engine: string | null;
   workspacePath: string | null;
   projectId?: string;
+}
+
+/** Detect engine from workspace files */
+export async function detectEngineFromWorkspace(workspacePath: string): Promise<string | null> {
+  const config = loadConfig();
+  const fullPath = path.resolve(config.WORKSPACE_DIR, workspacePath);
+
+  // Check for Godot (project.godot file)
+  try {
+    await fs.access(path.join(fullPath, "project.godot"));
+    return "godot";
+  } catch {
+    // Not a Godot project
+  }
+
+  // Check for Unreal (*.uproject file)
+  try {
+    const entries = await fs.readdir(fullPath, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isFile() && entry.name.endsWith(".uproject")) {
+        return "unreal";
+      }
+    }
+  } catch {
+    // Can't read directory
+  }
+
+  // Check for Unity (Assembly-CSharp.csproj or ProjectSettings/ProjectVersion.txt)
+  try {
+    await fs.access(path.join(fullPath, "ProjectSettings", "ProjectVersion.txt"));
+    return "unity";
+  } catch {
+    // Not Unity
+  }
+
+  return null;
 }
 
 function appendProjectContext(systemPrompt: string, project: ProjectContext): string {
@@ -99,12 +135,56 @@ function logEntry(sessionId: string, level: string, message: string, agent?: Age
 
 /** Validate that a resolved path stays within the workspace boundary (S1) */
 function safePath(inputPath: string, baseDir: string): string {
-  const resolved = path.resolve(inputPath);
-  const base = path.resolve(baseDir);
-  if (!resolved.startsWith(base + path.sep) && resolved !== base) {
+  const workspaceDir = loadConfig().WORKSPACE_DIR;
+  const resolvedWorkspaceDir = path.resolve(workspaceDir);
+
+  // If the input path is already inside the resolved workspace directory, use it as-is
+  // This handles paths like /Users/.../workspace/godot-test-1/... that are already correct
+  if (inputPath.startsWith(resolvedWorkspaceDir + "/")) {
+    // Verify no path traversal
+    const resolved = path.resolve(inputPath);
+    if (resolved.startsWith(resolvedWorkspaceDir)) {
+      return resolved;
+    }
     throw new Error(`Path outside workspace is not allowed: ${inputPath}`);
   }
-  return resolved;
+
+  // For paths outside workspace, apply normalization
+
+  // Strip leading "./workspace/" or "/workspace/" prefix if present
+  let workingPath = inputPath;
+  const workspacePattern = /^\.?\/?workspace\//;
+  if (workspacePattern.test(inputPath)) {
+    const pathAfterWorkspace = inputPath.replace(workspacePattern, "");
+    workingPath = path.join(workspaceDir, pathAfterWorkspace);
+  }
+
+  // Handle absolute paths to Godot projects that are mirrored in the workspace
+  // Godot returns paths like /Users/choguun/godot-test-1/project.godot
+  const homeDir = process.env.HOME || "";
+  const godotPathMatch = inputPath.match(new RegExp(`^${homeDir.replace("/", "\\/")}\/([^\/]+)(\/.*)?$`));
+  if (godotPathMatch && godotPathMatch[2]) {
+    const projectName = godotPathMatch[1];
+    const relativePath = godotPathMatch[2].substring(1);
+    workingPath = path.join(workspaceDir, projectName, relativePath);
+  }
+
+  // Handle project-relative paths like "godot-test-1/gdd/..."
+  // Resolve relative to WORKSPACE_DIR
+  const normalizedResolved = path.resolve(workingPath);
+  const base = path.resolve(baseDir);
+
+  // Allow paths that resolve to either:
+  // 1. Within the base directory (project workspace)
+  // 2. Within the global workspace directory (for shared files like design docs)
+  if (normalizedResolved.startsWith(base + path.sep) || normalizedResolved === base) {
+    return normalizedResolved;
+  }
+  if (normalizedResolved.startsWith(resolvedWorkspaceDir + path.sep) || normalizedResolved === resolvedWorkspaceDir) {
+    return normalizedResolved;
+  }
+
+  throw new Error(`Path outside workspace is not allowed: ${inputPath}`);
 }
 
 export interface InvokeResult {
@@ -115,6 +195,7 @@ export interface InvokeResult {
 
 /** Create a progress callback that broadcasts chat:progress events with thinking content */
 export function makeProgressCallback(sessionId: string, progressMsgId: string): ProgressCallback {
+  let lastBroadcastProgress = 0;
   return (info) => {
     if (info.phase === "executing" && info.currentTool) {
       logEntry(sessionId, "info", `[TOOL] ${info.currentTool} (iteration ${info.iteration})`);
@@ -130,6 +211,12 @@ export function makeProgressCallback(sessionId: string, progressMsgId: string): 
         thinking: info.thinking.slice(0, 2000),
       } as WSEvent);
     }
+    // Broadcast progress updates (every ~20 iterations = 20% progress)
+    if (info.iteration > 0 && info.iteration % 20 === 0 && info.iteration !== lastBroadcastProgress) {
+      lastBroadcastProgress = info.iteration;
+      const progressPct = Math.min(90, Math.round((info.iteration / 100) * 100));
+      broadcastSessionUpdate(sessionId, { progress: progressPct });
+    }
   };
 }
 
@@ -143,6 +230,7 @@ async function executeTool(
   agentRole: AgentRole,
   projectContext?: ProjectContext,
   _depth = 0,
+  onFileOperation?: FileOperationCallback,
 ): Promise<string> {
   // Use project's workspacePath if available, otherwise fall back to global config
   const workspaceDir = projectContext?.workspacePath
@@ -160,6 +248,7 @@ async function executeTool(
         if (stat.size > 1_048_576) return `Error: File too large (${Math.round(stat.size / 1024)}KB). Maximum is 1MB.`;
         const content = await fs.readFile(filePath, "utf-8");
         logEntry(sessionId, "info", `[${agentRole}] Read: ${filePath}`, agentRole);
+        onFileOperation?.({ tool: "Read", path: filePath, result: "success" });
         return content;
       }
 
@@ -171,6 +260,7 @@ async function executeTool(
         await fs.mkdir(path.dirname(filePath), { recursive: true });
         await fs.writeFile(filePath, content, "utf-8");
         logEntry(sessionId, "info", `[${agentRole}] Wrote: ${filePath}`, agentRole);
+        onFileOperation?.({ tool: "Write", path: filePath, result: "success" });
         return `Successfully wrote ${content.length} characters to ${filePath}`;
       }
 
@@ -281,7 +371,7 @@ async function executeTool(
         await moveQuestTicket(ticketId, "in_progress", agent);
 
         // Recursively invoke subagent (don't broadcast events — subagent runs inline within parent session)
-        const subResult = await invokeAgent(agent, task, sessionId, context, undefined, undefined, false, _depth + 1);
+        const subResult = await invokeAgent(agent, task, sessionId, context, undefined, undefined, false, _depth + 1, undefined, onFileOperation);
 
         // Quest Bridge: move ticket to QA
         await moveQuestTicket(ticketId, "qa", agent);
@@ -344,12 +434,14 @@ async function executeTool(
         if (isGodotMCPTool(name)) {
           // Use projectId from ProjectContext to lookup the service (shared across sessions)
           const projectId = projectContext?.projectId;
+          logEntry(sessionId, "info", `[${agentRole}] Godot MCP lookup: projectId=${projectId}`, agentRole);
           const godotService = projectId ? getGodotMCPService(projectId) : null;
           if (godotService?.running()) {
             logEntry(sessionId, "info", `[${agentRole}] Godot MCP: ${name}`, agentRole);
             const result = await godotService.executeTool(name, input);
             return result;
           } else {
+            logEntry(sessionId, "info", `[${agentRole}] Godot MCP service not running for projectId=${projectId}`, agentRole);
             return `Error: Godot MCP tool '${name}' called but Godot MCP service is not running for this project. ` +
               `Ensure project engine is "godot" and the Godot editor is running with the MCP plugin enabled.`;
           }
@@ -527,6 +619,7 @@ export async function invokeAgent(
   broadcastEvents = true,
   _depth = 0,
   projectContext?: ProjectContext,
+  onFileOperation?: FileOperationCallback,
 ): Promise<InvokeResult> {
   const invocationId = `invoke-${crypto.randomUUID().slice(0, 8)}`;
 
@@ -577,6 +670,10 @@ export async function invokeAgent(
       : [];
     const allTools = [...GAME_STUDIO_TOOLS, ...godotTools];
 
+    const toolExecutor = async (name: string, input: Record<string, unknown>): Promise<string> => {
+      return executeTool(name, input, sessionId, agentRole, projectContext, _depth, onFileOperation);
+    };
+
     // Call ZAI API with tools
     const response = await callLLMWithTools(
       {
@@ -586,9 +683,10 @@ export async function invokeAgent(
         systemPrompt,
         model,
       },
-      (name, input) => executeTool(name, input, sessionId, agentRole, projectContext, _depth),
+      toolExecutor,
       onProgress,
-      sessionId
+      sessionId,
+      onFileOperation
     );
 
     if (broadcastEvents) {
@@ -631,8 +729,15 @@ export async function continueConversation(
   onProgress?: ProgressCallback,
   _depth = 0,
   projectContext?: ProjectContext,
+  onFileOperation?: FileOperationCallback,
+  continuationContext?: string,
 ): Promise<InvokeResult> {
   try {
+    // Inject continuation context temporarily (not persisted to session)
+    const effectiveMessages = continuationContext
+      ? [...messages, { role: "user" as const, content: continuationContext }]
+      : messages;
+
     // Load agent's system prompt and model tier from MD file
     const [rawSystemPrompt, prompts] = await Promise.all([
       getAgentSystemPrompt(agentRole),
@@ -654,17 +759,22 @@ export async function continueConversation(
       : [];
     const allTools = [...GAME_STUDIO_TOOLS, ...godotTools];
 
+    const toolExecutor = async (name: string, input: Record<string, unknown>): Promise<string> => {
+      return executeTool(name, input, sessionId, agentRole, projectContext, _depth, onFileOperation);
+    };
+
     const response = await callLLMWithTools(
       {
         agentRole,
-        messages,
+        messages: effectiveMessages,
         tools: allTools,
         systemPrompt,
         model,
       },
-      (name, input) => executeTool(name, input, sessionId, agentRole, projectContext, _depth),
+      toolExecutor,
       onProgress,
-      sessionId
+      sessionId,
+      onFileOperation
     );
 
     return {

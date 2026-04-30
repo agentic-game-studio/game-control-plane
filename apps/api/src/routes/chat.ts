@@ -1,9 +1,9 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
-import type { AgentRole, ChatSession, ChatMessage, CreateMessageRequest, CreateChatSessionRequest, DashboardData, Project } from "@game-studio/types";
+import type { AgentRole, ChatSession, ChatMessage, CreateMessageRequest, CreateChatSessionRequest, DashboardData, Project, ProjectEngine } from "@game-studio/types";
 import type { LLMMessage } from "../llm/zai-client.js";
 import { broadcastEvent, readData, writeData } from "../services/data-store.js";
-import { invokeAgent, continueConversation, type ProjectContext } from "../services/llm-service.js";
+import { invokeAgent, continueConversation, type ProjectContext, detectEngineFromWorkspace } from "../services/llm-service.js";
 import { makeProgressCallback } from "../services/llm-service.js";
 import { getAgentSystemPrompt } from "../prompts/agent-prompt-loader.js";
 import type { WSEvent } from "@game-studio/types";
@@ -108,6 +108,10 @@ function parsePlanPhasesFromToolResult(toolCalls?: { name: string; input: Record
 // In-memory store for chat sessions with conversation history
 interface ExtendedChatSession extends ChatSession {
   conversationHistory: LLMMessage[];
+  // Execution state for long-running tasks
+  fileOperations: Array<{ tool: string; path?: string; result: "success" | "failed"; timestamp: string }>;
+  completedPhases: string[];
+  currentTask: string;
 }
 
 const CHAT_STATE_FILE = "chat-state.json";
@@ -149,7 +153,8 @@ function pruneConversationHistory(history: LLMMessage[]): LLMMessage[] {
   if (totalChars <= MAX_CONTEXT_CHARS) return history;
 
   // Keep recent messages as atomic groups (assistant+tool pairs must not be split)
-  const recentCount = 30;
+  // Increased from 30 to 50 to preserve more context for long-running tasks
+  const recentCount = 50;
   let recent = history.slice(-recentCount);
 
   // If slice starts with tool result, skip it (incomplete pair)
@@ -160,14 +165,42 @@ function pruneConversationHistory(history: LLMMessage[]): LLMMessage[] {
   return recent;
 }
 
+/**
+ * Build continuation context for active sessions to preserve execution state.
+ * This helps agents continue long-running tasks without losing context.
+ */
+function buildContinueContext(session: ExtendedChatSession): string {
+  if (session.status !== "active" || session.fileOperations.length === 0) {
+    return "";
+  }
+
+  const writeOps = session.fileOperations.filter((o) => o.tool === "Write");
+  const readOps = session.fileOperations.filter((o) => o.tool === "Read");
+
+  return `CONTINUATION CONTEXT:
+- You are continuing this session after a tool execution loop
+- Files written so far: ${writeOps.map((o) => o.path).filter(Boolean).join(", ") || "none"}
+- Files read so far: ${readOps.map((o) => o.path).filter(Boolean).join(", ") || "none"}
+- Total operations completed: ${session.fileOperations.length}
+- Current phase: ${session.currentTask || "in progress"}
+- Completed phases: ${session.completedPhases.join(", ") || "none"}
+
+Continue executing the plan. Do NOT re-propose the same plan. Update completedPhases and currentTask as you make progress.`;
+}
+
 async function loadChatState(): Promise<ChatState> {
   try {
     const state = await readData<ChatState>(CHAT_STATE_FILE);
-    // R5: Filter out stale progress messages from crashed sessions
-    for (const session of Object.values(state.sessions)) {
-      (session as ExtendedChatSession).messages = (session as ExtendedChatSession).messages.filter(
-        (m) => m.type !== "progress"
-      );
+    // R5: Filter out stale progress messages + hydrate extended fields
+    for (const [key, s] of Object.entries(state.sessions)) {
+      const session = s as ExtendedChatSession;
+      session.messages = session.messages.filter((m) => m.type !== "progress");
+      // Hydrate fields that may be missing from older persisted sessions
+      if (!session.conversationHistory) session.conversationHistory = [];
+      if (!session.fileOperations) session.fileOperations = [];
+      if (!session.completedPhases) session.completedPhases = [];
+      if (!session.currentTask) session.currentTask = "";
+      state.sessions[key] = session;
     }
     if (migrateLegacyProducer(state)) {
       // Persist the migration so it doesn't run again on next boot.
@@ -194,15 +227,6 @@ async function saveChatState(): Promise<void> {
   await writeData(CHAT_STATE_FILE, chatStore);
 }
 
-async function getProjectById(projectId: string): Promise<Project | null> {
-  try {
-    const data = await readData<DashboardData>("dashboard.json");
-    return data.projects.find((p) => p.id === projectId) ?? null;
-  } catch {
-    return null;
-  }
-}
-
 function producerSessionId(projectId: string): string {
   return `producer-${projectId}`;
 }
@@ -220,7 +244,46 @@ function toProjectContext(project: Project): ProjectContext {
 async function getProjectContextForSession(session: ExtendedChatSession): Promise<ProjectContext | undefined> {
   if (!session.projectId) return undefined;
   const project = await getProjectById(session.projectId);
-  return project ? toProjectContext(project) : undefined;
+  if (!project) return undefined;
+
+  // Auto-detect engine if not set
+  let engine: ProjectEngine | null = project.engine;
+  if (!engine && project.workspacePath) {
+    const detected = await detectEngineFromWorkspace(project.workspacePath);
+    if (detected) {
+      engine = detected as ProjectEngine;
+      // Update project with detected engine
+      await updateProjectEngine(project.id, engine);
+    }
+  }
+
+  return {
+    name: project.name,
+    description: project.description,
+    engine,
+    workspacePath: project.workspacePath,
+    projectId: project.id,
+  };
+}
+
+async function getProjectById(projectId: string): Promise<Project | null> {
+  const data = await readData<DashboardData>("dashboard.json");
+  return data.projects.find((p) => p.id === projectId) ?? null;
+}
+
+async function updateProjectEngine(projectId: string, engine: ProjectEngine): Promise<void> {
+  const data = await readData<DashboardData>("dashboard.json");
+  const idx = data.projects.findIndex((p) => p.id === projectId);
+  if (idx !== -1) {
+    data.projects[idx].engine = engine as Project["engine"];
+    data.projects[idx].updatedAt = new Date().toISOString();
+    await writeData("dashboard.json", data);
+    // Broadcast update
+    broadcast({
+      type: "project:updated",
+      project: data.projects[idx],
+    } as WSEvent);
+  }
 }
 
 /**
@@ -291,16 +354,30 @@ chatRouter.get("/sessions/producer/:projectId", async (req: Request, res: Respon
     return;
   }
 
+  const project = await getProjectById(projectId);
+  if (!project) {
+    res.status(404).json({ success: false, error: "Project not found" });
+    return;
+  }
+
+  // Start Godot MCP service for godot projects (even if session exists)
+  if (project.engine === "godot") {
+    const mcpOptions: GodotMCPServiceOptions = {
+      projectPath: project.workspacePath ?? undefined,
+      mode: "lite",
+    };
+    logger.info({ projectId, projectName: project.name, workspacePath: project.workspacePath, event: "godot_mcp_starting" }, "Starting Godot MCP service for project");
+    getOrCreateGodotMCPService(projectId, mcpOptions).then((service) => {
+      logger.info({ projectId, running: service.running(), event: "godot_mcp_started" }, "Godot MCP service started");
+    }).catch((err) => {
+      logger.error({ projectId, error: err.message, event: "godot_mcp_start_error" }, "Failed to start Godot MCP service");
+    });
+  }
+
   const sessionId = producerSessionId(projectId);
   const existing = chatStore.sessions[sessionId];
   if (existing) {
     res.json({ success: true, data: existing });
-    return;
-  }
-
-  const project = await getProjectById(projectId);
-  if (!project) {
-    res.status(404).json({ success: false, error: "Project not found" });
     return;
   }
 
@@ -331,21 +408,12 @@ chatRouter.get("/sessions/producer/:projectId", async (req: Request, res: Respon
     progress: 0,
     spawnedAt: now,
     conversationHistory: [],
+    fileOperations: [],
+    completedPhases: [],
+    currentTask: "",
   };
 
   chatStore.sessions[sessionId] = newSession;
-
-  // Start Godot MCP service for godot projects (keyed by projectId)
-  if (project.engine === "godot") {
-    const mcpOptions: GodotMCPServiceOptions = {
-      projectPath: project.workspacePath ?? undefined,
-      mode: "lite",
-    };
-    // Non-blocking — service starts in background
-    getOrCreateGodotMCPService(projectId, mcpOptions).catch((err) => {
-      logger.error({ projectId, error: err.message, event: "godot_mcp_start_error" }, "Failed to start Godot MCP service");
-    });
-  }
 
   broadcast({
     type: "chat:session:created",
@@ -431,6 +499,9 @@ chatRouter.post("/sessions", async (req: Request, res: Response) => {
     progress: 0,
     spawnedAt: now,
     conversationHistory: [],
+    fileOperations: [],
+    completedPhases: [],
+    currentTask: "",
   };
 
   chatStore.sessions[sessionId] = newSession;
@@ -493,6 +564,9 @@ chatRouter.post("/sessions/:id/clear", async (req: Request, res: Response) => {
   }
 
   session.conversationHistory = [];
+  (session as ExtendedChatSession).fileOperations = [];
+  (session as ExtendedChatSession).completedPhases = [];
+  (session as ExtendedChatSession).currentTask = "";
   session.progress = 0;
   session.status = "active";
 
@@ -640,6 +714,23 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
 
     // Call the LLM with progress callback
     const projectContext = await getProjectContextForSession(session);
+
+    // Build continuation context (passed as temp context, not persisted)
+    const continueCtx = buildContinueContext(session as ExtendedChatSession);
+
+    // Track file operations back into session state
+    const onFileOperation = (op: { tool: string; path?: string; result: "success" | "failed" }) => {
+      const extSession = session as ExtendedChatSession;
+      extSession.fileOperations.push({
+        ...op,
+        timestamp: new Date().toISOString(),
+      });
+      // Cap at 200 operations to prevent unbounded growth
+      if (extSession.fileOperations.length > 200) {
+        extSession.fileOperations = extSession.fileOperations.slice(-200);
+      }
+    };
+
     const result = await continueConversation(
       agentRole,
       session.conversationHistory,
@@ -647,6 +738,8 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
       onProgress,
       0,
       projectContext,
+      onFileOperation,
+      continueCtx || undefined,
     );
 
     // Stop heartbeat
@@ -668,9 +761,13 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
     }
 
     // Add assistant response to conversation
+    // Handle empty content
+    if (!result.content || result.content.trim() === "") {
+      logger.warn({ event: "continue_empty_content", agentRole, sessionId: id }, `Agent ${agentRole} returned empty content`);
+    }
     session.conversationHistory.push({
       role: "assistant",
-      content: result.content,
+      content: result.content || `[${agentRole} returned no content]`,
     });
 
     // Prune conversation history to stay within context limits
@@ -698,12 +795,20 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
     else if (planPhases) messageType = "plan";
 
     // Create assistant message
+    // Handle empty content — use question text for questions, otherwise placeholder
+    let messageContent = result.content;
+    if (!messageContent || messageContent.trim() === "") {
+      messageContent = questionData
+        ? questionData.question
+        : `${agentRole} completed but returned no content`;
+      logger.warn({ event: "message_empty_content", agentRole, messageType, sessionId: id }, `Agent ${agentRole} message has empty content`);
+    }
+
     const assistantMessage: ChatMessage = {
       id: `msg-${crypto.randomUUID().slice(0, 8)}`,
       type: messageType,
       sender: agentRole,
-      // For questions, use the question text as content (not the raw tool result)
-      content: questionData ? questionData.question : result.content,
+      content: messageContent,
       timestamp: new Date().toISOString(),
       showActions: false,
       progress: 100,
@@ -797,6 +902,20 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
     return;
   }
 
+  // Start Godot MCP service for godot projects (if not already running)
+  if (project.engine === "godot") {
+    const mcpOptions: GodotMCPServiceOptions = {
+      projectPath: project.workspacePath ?? undefined,
+      mode: "lite",
+    };
+    logger.info({ projectId, projectName: project.name, role: agentRole, event: "godot_mcp_spawn_check" }, "Checking Godot MCP for agent spawn");
+    getOrCreateGodotMCPService(projectId, mcpOptions).then((service) => {
+      logger.info({ projectId, role: agentRole, running: service.running(), event: "godot_mcp_spawn_ready" }, "Godot MCP service ready for agent");
+    }).catch((err) => {
+      logger.error({ projectId, role: agentRole, error: err.message, event: "godot_mcp_spawn_error" }, "Failed to start Godot MCP for agent");
+    });
+  }
+
   // Create session for the spawned agent
   const newSession: ExtendedChatSession = {
     id: sessionId,
@@ -816,6 +935,9 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
     progress: 0,
     spawnedAt: now,
     conversationHistory: [],
+    fileOperations: [],
+    completedPhases: [],
+    currentTask: "",
   };
 
   chatStore.sessions[sessionId] = newSession;
@@ -888,6 +1010,7 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
     try {
       // Don't broadcast agent events from invokeAgent — we handle them ourselves here
       const projectContext = toProjectContext(project);
+      logger.info({ event: "spawn_invoke_start", agentRole, taskLength: task?.length ?? 0, sessionId }, `Invoking agent ${agentRole}`);
       const result = await invokeAgent(
         agentRole,
         task,
@@ -898,17 +1021,34 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
         false,
         0,
         projectContext,
+        (op) => {
+          newSession.fileOperations.push({ ...op, timestamp: new Date().toISOString() });
+          if (newSession.fileOperations.length > 200) {
+            newSession.fileOperations = newSession.fileOperations.slice(-200);
+          }
+        },
       );
+      logger.info({ event: "spawn_invoke_complete", agentRole, contentLength: result.content.length, sessionId }, `Agent ${agentRole} completed with ${result.content.length} chars`);
+
+      // Handle empty content
+      if (!result.content || result.content.trim() === "") {
+        logger.warn({ event: "spawn_empty_content", agentRole, sessionId }, `Agent ${agentRole} returned empty content`);
+      }
 
       // Remove progress placeholder
       const idx = newSession.messages.findIndex((m) => m.id === progressMsgId);
       if (idx !== -1) newSession.messages.splice(idx, 1);
 
+      // Use placeholder if content is empty
+      const effectiveContent = (result.content && result.content.trim() !== "")
+        ? result.content
+        : `${agentRole} completed task but returned no content. Please check the agent's output.`;
+
       const responseMessage: ChatMessage = {
         id: `msg-${crypto.randomUUID().slice(0, 8)}`,
         type: "agent",
         sender: role,
-        content: result.content,
+        content: effectiveContent,
         timestamp: new Date().toISOString(),
         showActions: true,
         progress: 100,
@@ -946,12 +1086,27 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
         showActions: true,
       });
 
+      // Update agent session status to done
+      newSession.progress = 100;
+      newSession.status = "completed";
+      broadcast({
+        type: "chat:session:updated",
+        sessionId,
+        session: {
+          id: newSession.id,
+          role: newSession.role,
+          progress: newSession.progress,
+          status: newSession.status,
+        },
+      } as WSEvent);
+
       // Quest Bridge: move ticket to completed
       if (ticketId) {
         await moveQuestTicket(ticketId, "completed", agentRole);
       }
     } catch (err: unknown) {
       const error = err as Error;
+      logger.error({ event: "spawn_failed", agentRole, sessionId, error: error.message, stack: error.stack }, `Agent ${agentRole} failed: ${error.message}`);
 
       broadcast({
         type: "agent:failed",

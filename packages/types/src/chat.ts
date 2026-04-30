@@ -101,6 +101,13 @@ export interface CreateMessageRequest {
   images?: string[];
 }
 
+export interface FileOperation {
+  tool: string;
+  path?: string;
+  result: "success" | "failed";
+  timestamp: string;
+}
+
 export interface ChatSession {
   id: string;
   role: string;
@@ -109,6 +116,10 @@ export interface ChatSession {
   status: ChatSessionStatus;
   progress: number;
   spawnedAt: string;
+  // Execution state for long-running tasks
+  fileOperations?: FileOperation[];
+  completedPhases?: string[];
+  currentTask?: string;
 }
 
 export interface CreateChatSessionRequest {
