@@ -14,7 +14,7 @@
 
 import { spawn, execSync, ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { accessSync } from "node:fs";
+import { accessSync, globSync } from "node:fs";
 import type { LLMTool } from "../llm/zai-client.js";
 import { logger } from "../utils/logger.js";
 import { loadConfig } from "../config.js";
@@ -712,6 +712,8 @@ export function isGodotMCPPluginEnabled(projectDir: string): boolean {
  * before launching. Uses Godot 4 [editor_plugins] format.
  */
 export function launchGodotEditor(projectDir: string): { success: boolean; pid?: number; error?: string } {
+  const platform = process.platform; // "darwin" | "linux" | "win32"
+
   // Ensure plugin is installed and enabled before launching
   if (!isGodotMCPPluginInstalled(projectDir) || !isGodotMCPPluginEnabled(projectDir)) {
     const config = loadConfig();
@@ -722,28 +724,54 @@ export function launchGodotEditor(projectDir: string): { success: boolean; pid?:
   }
 
   // Check if Godot is already running
-  try {
-    // -x matches exact process name, -i case-insensitive for macOS .app bundles
-    const psResult = execSync("pgrep -xi Godot 2>/dev/null || pgrep -f 'Godot.app' 2>/dev/null || true", { encoding: "utf-8", stdio: ["pipe", "pipe", "ignore"] }).trim();
-    if (psResult) {
-      logger.info({ projectDir, existingPid: psResult.split("\n")[0] }, "Godot editor already running, skipping launch");
-      return { success: true, pid: parseInt(psResult.split("\n")[0], 10) };
+  const isAlreadyRunning = (): number | null => {
+    try {
+      if (platform === "win32") {
+        // Windows: use tasklist
+        const output = execSync('tasklist /FI "IMAGENAME eq Godot.exe" /NH', { encoding: "utf-8", stdio: ["pipe", "pipe", "ignore"] });
+        const match = output.match(/Godot\.exe\s+(\d+)/);
+        if (match) return parseInt(match[1], 10);
+      } else {
+        // macOS / Linux: use pgrep
+        const output = execSync("pgrep -xi Godot 2>/dev/null || true", { encoding: "utf-8", stdio: ["pipe", "pipe", "ignore"] }).trim();
+        if (output) return parseInt(output.split("\n")[0], 10);
+      }
+    } catch {
+      // Process not found — proceed to launch
     }
-  } catch {
-    // pgrep returns non-zero when no match — means Godot is not running, proceed to launch
+    return null;
+  };
+
+  const existingPid = isAlreadyRunning();
+  if (existingPid) {
+    logger.info({ projectDir, existingPid }, "Godot editor already running, skipping launch");
+    return { success: true, pid: existingPid };
   }
 
-  const candidates = [
-    // macOS .app bundle
+  // Find Godot binary — platform-specific candidates
+  const candidates: string[] = platform === "win32" ? [
+    // Windows: Program Files, user installs, Steam
+    "C:\\Program Files\\Godot\\Godot.exe",
+    "C:\\Program Files (x86)\\Godot\\Godot.exe",
+    ...globSync("C:\\Program Files\\Godot*\\Godot*.exe"),
+    ...globSync(`${process.env.LOCALAPPDATA ?? ""}\\Programs\\Godot*\\Godot*.exe`),
+    ...globSync(`${process.env.HOME ?? ""}\\AppData\\Local\\Programs\\Godot*\\Godot*.exe`),
+    ...globSync("C:\\Program Files (x86)\\Steam\\steamapps\\common\\Godot*\\Godot*.exe"),
+  ] : platform === "darwin" ? [
+    // macOS: .app bundle, Homebrew
     "/Applications/Godot.app/Contents/MacOS/Godot",
-    // Homebrew
+    "/Applications/Godot*.app/Contents/MacOS/Godot",
     "/usr/local/bin/godot",
     "/opt/homebrew/bin/godot",
-    // Linux
+  ] : [
+    // Linux: standard paths, Snap, Flatpak, AppImage
     "/usr/bin/godot",
     "/usr/local/bin/godot",
-    // Snap/Flatpak
+    "/opt/homebrew/bin/godot",
     "/snap/bin/godot",
+    ...globSync("/usr/local/bin/godot*"),
+    ...globSync(`${process.env.HOME ?? ""}/Applications/Godot*.AppImage`),
+    ...globSync(`${process.env.HOME ?? ""}/.local/bin/godot*`),
   ];
 
   // Check env var override first (highest priority)
