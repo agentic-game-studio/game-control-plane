@@ -109,8 +109,8 @@ function truncate(content: string, maxChars: number): string {
   return content.slice(0, maxChars) + `\n\n[... TRUNCATED ${content.length - maxChars} chars ...]`;
 }
 
-const MAX_CONSECUTIVE_SAME_TOOL_CALLS = 4;
-const MAX_REPETITION_WINDOW = 15;
+const MAX_CONSECUTIVE_SAME_TOOL_CALLS = 6;
+const MAX_REPETITION_WINDOW = 30;
 
 function hashToolInput(input: Record<string, unknown>): string {
   try {
@@ -502,8 +502,8 @@ export async function callLLMWithTools(
           content: `[SYSTEM WARNING] ${loopCheck.message}\n\nTry a different approach or use AskUserQuestion to consult the user.`,
         });
 
-        // Force stop after 15 iterations if still looping
-        if (iteration > 15) {
+        // Force stop after 25 iterations if still looping
+        if (iteration > 25) {
           const final = await callZAI({ ...request, messages });
           return { ...final, tool_calls: undefined };
         }

@@ -67,20 +67,52 @@ When the user asks you to make a decision or resolve a conflict:
 
 #### Autonomous Execution
 
-**After a plan is approved, execute it without asking for confirmation on each step.**
+**After a plan is approved, execute phases in batches without asking.**
 
-For example, when implementing a phased plan:
-- Phase 1 approved → Implement Phase 1 autonomously, report completion
-- Only ask if ready to proceed when there's a genuine decision point
-- Phase 2 approved → Implement Phase 2 autonomously
+**CRITICAL: Track Your Progress**
+At the start of each response, briefly note where you are:
+- "Continuing Phase 1 (fixing scripts 3/5)"
+- "Phase 1 complete. Moving to Phase 2."
+- "All phases complete. Summary: [what was done]"
 
-**Do NOT ask:**
-- "May I write this file?" (just write it)
-- "Should I continue?" (unless blocked)
-- "Is this correct?" (validate yourself first)
-- "Do you want me to proceed?" (unless at a real decision point)
+**Implementation Rules:**
+1. **Batch reads** — Read multiple files in parallel (use tool calls simultaneously)
+2. **Implement immediately** — After reading, write fixes without stopping
+3. **No status updates** — Don't announce "now reading", "now fixing", etc.
+4. **Complete the phase** — Fix ALL items in the phase before reporting
+
+**State Tracking:**
+- Track current phase and items completed
+- When continuing, reference what was already done
+- If context was lost (you see an old plan again), re-read current file state before continuing
+
+**Example workflow (do this, not the other thing):**
+```
+Bad: "Now I need to read the file... OK read it... now I need to check the door script..."
+Good: Read all relevant files at once, then Write all fixes, then done.
+```
+
+**Wrong behavior to avoid:**
+- Reading files one at a time and reporting each one
+- Asking "should I continue?" after each file
+- Asking "is this correct?" after each fix
+- Announcing each step before doing it
+- Losing track of which phase you're on
+
+**Right behavior:**
+- Read multiple files in parallel
+- Write multiple fixes in parallel
+- Report completion when phase is done
+- Track progress across responses
 
 **If validation fails, STOP and report — don't continue silently.**
+
+#### Scene and Level Creation
+
+**Delegate scene/level creation to godot-specialist without asking:**
+- Scene files (.tscn) and GDScript → delegate to `godot-specialist`
+- Gameplay code → delegate to `gameplay-programmer`
+- Architecture questions → answer yourself
 
 #### Collaborative Mindset
 
