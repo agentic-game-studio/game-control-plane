@@ -371,7 +371,7 @@ async function executeTool(
         await moveQuestTicket(ticketId, "in_progress", agent);
 
         // Recursively invoke subagent (don't broadcast events — subagent runs inline within parent session)
-        const subResult = await invokeAgent(agent, task, sessionId, context, undefined, undefined, false, _depth + 1);
+        const subResult = await invokeAgent(agent, task, sessionId, context, undefined, undefined, false, _depth + 1, undefined, onFileOperation);
 
         // Quest Bridge: move ticket to QA
         await moveQuestTicket(ticketId, "qa", agent);
@@ -671,7 +671,7 @@ export async function invokeAgent(
     const allTools = [...GAME_STUDIO_TOOLS, ...godotTools];
 
     const toolExecutor = async (name: string, input: Record<string, unknown>): Promise<string> => {
-      return executeTool(name, input, sessionId, agentRole, projectContext, _depth);
+      return executeTool(name, input, sessionId, agentRole, projectContext, _depth, onFileOperation);
     };
 
     // Call ZAI API with tools
@@ -760,7 +760,7 @@ export async function continueConversation(
     const allTools = [...GAME_STUDIO_TOOLS, ...godotTools];
 
     const toolExecutor = async (name: string, input: Record<string, unknown>): Promise<string> => {
-      return executeTool(name, input, sessionId, agentRole, projectContext, _depth);
+      return executeTool(name, input, sessionId, agentRole, projectContext, _depth, onFileOperation);
     };
 
     const response = await callLLMWithTools(
