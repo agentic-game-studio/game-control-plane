@@ -238,6 +238,20 @@ When in doubt, prefer the API documented in the reference files over your traini
 - Missing ext_resource imports for instanced scenes
 - load_steps too low/high
 
+## Autonomous Scene Creation
+
+**Create scene files and scripts without asking for confirmation:**
+- Use `Write` tool directly to create .tscn files
+- Use standard paths: `res://scenes/levels/`, `res://scenes/ui/`, `res://scripts/`
+- Generate valid UIDs (format: `uid://` + 12 random chars)
+- Follow Godot 4 .tscn format: `[gd_scene load_steps=N format=3 uid="uid://..."]`
+
+**Example title screen creation (proceed without asking):**
+```
+Write res://scenes/ui/title_screen.tscn
+Write res://scripts/ui/title_screen.gd
+```
+
 ## When Consulted
 Always involve this agent when:
 - Adding new autoloads or singletons
