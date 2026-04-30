@@ -108,6 +108,10 @@ function parsePlanPhasesFromToolResult(toolCalls?: { name: string; input: Record
 // In-memory store for chat sessions with conversation history
 interface ExtendedChatSession extends ChatSession {
   conversationHistory: LLMMessage[];
+  // Execution state for long-running tasks
+  fileOperations: Array<{ tool: string; path?: string; result: "success" | "failed"; timestamp: string }>;
+  completedPhases: string[];
+  currentTask: string;
 }
 
 const CHAT_STATE_FILE = "chat-state.json";
@@ -149,7 +153,8 @@ function pruneConversationHistory(history: LLMMessage[]): LLMMessage[] {
   if (totalChars <= MAX_CONTEXT_CHARS) return history;
 
   // Keep recent messages as atomic groups (assistant+tool pairs must not be split)
-  const recentCount = 30;
+  // Increased from 30 to 50 to preserve more context for long-running tasks
+  const recentCount = 50;
   let recent = history.slice(-recentCount);
 
   // If slice starts with tool result, skip it (incomplete pair)
@@ -158,6 +163,29 @@ function pruneConversationHistory(history: LLMMessage[]): LLMMessage[] {
   }
 
   return recent;
+}
+
+/**
+ * Build continuation context for active sessions to preserve execution state.
+ * This helps agents continue long-running tasks without losing context.
+ */
+function buildContinueContext(session: ExtendedChatSession): string {
+  if (session.status !== "active" || session.fileOperations.length === 0) {
+    return "";
+  }
+
+  const writeOps = session.fileOperations.filter((o) => o.tool === "Write");
+  const readOps = session.fileOperations.filter((o) => o.tool === "Read");
+
+  return `CONTINUATION CONTEXT:
+- You are continuing this session after a tool execution loop
+- Files written so far: ${writeOps.map((o) => o.path).filter(Boolean).join(", ") || "none"}
+- Files read so far: ${readOps.map((o) => o.path).filter(Boolean).join(", ") || "none"}
+- Total operations completed: ${session.fileOperations.length}
+- Current phase: ${session.currentTask || "in progress"}
+- Completed phases: ${session.completedPhases.join(", ") || "none"}
+
+Continue executing the plan. Do NOT re-propose the same plan. Update completedPhases and currentTask as you make progress.`;
 }
 
 async function loadChatState(): Promise<ChatState> {
@@ -375,6 +403,9 @@ chatRouter.get("/sessions/producer/:projectId", async (req: Request, res: Respon
     progress: 0,
     spawnedAt: now,
     conversationHistory: [],
+    fileOperations: [],
+    completedPhases: [],
+    currentTask: "",
   };
 
   chatStore.sessions[sessionId] = newSession;
@@ -463,6 +494,9 @@ chatRouter.post("/sessions", async (req: Request, res: Response) => {
     progress: 0,
     spawnedAt: now,
     conversationHistory: [],
+    fileOperations: [],
+    completedPhases: [],
+    currentTask: "",
   };
 
   chatStore.sessions[sessionId] = newSession;
@@ -874,6 +908,9 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
     progress: 0,
     spawnedAt: now,
     conversationHistory: [],
+    fileOperations: [],
+    completedPhases: [],
+    currentTask: "",
   };
 
   chatStore.sessions[sessionId] = newSession;

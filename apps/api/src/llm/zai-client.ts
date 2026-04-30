@@ -381,24 +381,36 @@ export type ProgressCallback = (info: {
   thinking?: string;
 }) => void;
 
+/** Callback to track file operations for long-running task context */
+export type FileOperationCallback = (op: { tool: string; path?: string; result: "success" | "failed" }) => void;
+
 /** Call LLM with tool execution loop */
 export async function callLLMWithTools(
   request: LLMRequest,
   toolExecutor: (name: string, input: Record<string, unknown>) => Promise<string>,
   onProgress?: ProgressCallback,
-  sessionId?: string
+  sessionId?: string,
+  onFileOperation?: FileOperationCallback
 ): Promise<LLMResponse> {
   const config = loadConfig();
   const maxTools = config.MAX_TOOL_CALLS;
+  const checkpointInterval = config.TOOL_CHECKPOINT_INTERVAL || 30;
 
   let iteration = 0;
   let totalTools = 0;
+  let lastCheckpointIteration = 0;
   let messages = [...request.messages];
   let recentToolCalls: Array<{ name: string; inputHash: string }> = [];
   let summarizedThisContext = false;
 
   while (iteration < 200) {
     iteration++;
+
+    // Log checkpoint at intervals
+    if (iteration - lastCheckpointIteration >= checkpointInterval) {
+      lastCheckpointIteration = iteration;
+      logger.info({ iteration, totalTools, event: "checkpoint" }, `Checkpoint at iteration ${iteration}, ${totalTools} total tools`);
+    }
 
     // Check if we need to summarize old messages to stay within context
     if (!summarizedThisContext && countMessageChars(messages) > SUMMARIZE_THRESHOLD) {
@@ -444,6 +456,7 @@ export async function callLLMWithTools(
     for (const tc of response.tool_calls) {
       onProgress?.({ iteration, totalTools, currentTool: tc.name, phase: "executing" });
       const result = await toolExecutor(tc.name, tc.input);
+      onFileOperation?.({ tool: tc.name, result: "success" });
 
       // Special case: AskUserQuestion should stop the loop and return the question
       if (result.startsWith("__ASK_USER_QUESTION__")) {
@@ -495,11 +508,18 @@ export async function callLLMWithTools(
           message: loopCheck.message,
         } as any);
 
-        // Inject warning into context
+        // Inject enhanced warning into context with continuation reminder
         messages.push({ role: "assistant", content: response.content, tool_calls: response.tool_calls });
         messages.push({
           role: "user",
-          content: `[SYSTEM WARNING] ${loopCheck.message}\n\nTry a different approach or use AskUserQuestion to consult the user.`,
+          content: `[SYSTEM WARNING] ${loopCheck.message}
+
+IMPORTANT: If you have been making progress on a task, do NOT restart or re-propose the same plan. Instead:
+1. Summarize what you have already completed
+2. Identify what remains to be done
+3. Continue from where you left off
+
+Use "Now implementing..." to indicate you're continuing work rather than starting over.`,
         });
 
         // Force stop after 25 iterations if still looping

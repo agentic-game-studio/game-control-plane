@@ -193,6 +193,9 @@ export interface InvokeResult {
   usage?: { input_tokens: number; output_tokens: number };
 }
 
+/** Callback to track file operations for long-running task context */
+export type FileOperationCallback = (op: { tool: string; path?: string; result: "success" | "failed" }) => void;
+
 /** Create a progress callback that broadcasts chat:progress events with thinking content */
 export function makeProgressCallback(sessionId: string, progressMsgId: string): ProgressCallback {
   let lastBroadcastProgress = 0;
@@ -230,6 +233,7 @@ async function executeTool(
   agentRole: AgentRole,
   projectContext?: ProjectContext,
   _depth = 0,
+  onFileOperation?: FileOperationCallback,
 ): Promise<string> {
   // Use project's workspacePath if available, otherwise fall back to global config
   const workspaceDir = projectContext?.workspacePath
@@ -247,6 +251,7 @@ async function executeTool(
         if (stat.size > 1_048_576) return `Error: File too large (${Math.round(stat.size / 1024)}KB). Maximum is 1MB.`;
         const content = await fs.readFile(filePath, "utf-8");
         logEntry(sessionId, "info", `[${agentRole}] Read: ${filePath}`, agentRole);
+        onFileOperation?.({ tool: "Read", path: filePath, result: "success" });
         return content;
       }
 
@@ -258,6 +263,7 @@ async function executeTool(
         await fs.mkdir(path.dirname(filePath), { recursive: true });
         await fs.writeFile(filePath, content, "utf-8");
         logEntry(sessionId, "info", `[${agentRole}] Wrote: ${filePath}`, agentRole);
+        onFileOperation?.({ tool: "Write", path: filePath, result: "success" });
         return `Successfully wrote ${content.length} characters to ${filePath}`;
       }
 
@@ -666,6 +672,18 @@ export async function invokeAgent(
       : [];
     const allTools = [...GAME_STUDIO_TOOLS, ...godotTools];
 
+    // Create tool executor that tracks file operations
+    const toolExecutor = async (name: string, input: Record<string, unknown>): Promise<string> => {
+      const result = await executeTool(name, input, sessionId, agentRole, projectContext, _depth);
+      // Track operations for long-running context
+      if (["Read", "Write", "Edit", "Glob", "Grep", "Bash"].includes(name)) {
+        const path = ["Read", "Write", "Edit"].includes(name) ? input.file_path as string : undefined;
+        const success = !result.startsWith("Error:");
+        logEntry(sessionId, "info", `[${agentRole}] File operation: ${name} ${path ?? ""} ${success ? "success" : "failed"}`, agentRole);
+      }
+      return result;
+    };
+
     // Call ZAI API with tools
     const response = await callLLMWithTools(
       {
@@ -675,7 +693,7 @@ export async function invokeAgent(
         systemPrompt,
         model,
       },
-      (name, input) => executeTool(name, input, sessionId, agentRole, projectContext, _depth),
+      toolExecutor,
       onProgress,
       sessionId
     );
@@ -743,6 +761,11 @@ export async function continueConversation(
       : [];
     const allTools = [...GAME_STUDIO_TOOLS, ...godotTools];
 
+    // Create tool executor with file operation tracking
+    const toolExecutor = async (name: string, input: Record<string, unknown>): Promise<string> => {
+      return executeTool(name, input, sessionId, agentRole, projectContext, _depth);
+    };
+
     const response = await callLLMWithTools(
       {
         agentRole,
@@ -751,7 +774,7 @@ export async function continueConversation(
         systemPrompt,
         model,
       },
-      (name, input) => executeTool(name, input, sessionId, agentRole, projectContext, _depth),
+      toolExecutor,
       onProgress,
       sessionId
     );
