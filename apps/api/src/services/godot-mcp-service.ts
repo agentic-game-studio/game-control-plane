@@ -273,7 +273,14 @@ export class GodotMCPService {
     this.stdoutBuffer = lines.pop() ?? "";
 
     for (const line of lines) {
-      if (!line.trim() || !line.startsWith("{")) continue;
+      if (!line.trim()) continue;
+      if (!line.startsWith("{")) {
+        // Log non-JSON output (debug info, etc.)
+        if (line.includes("[MCP]") || line.includes("error") || line.includes("Error")) {
+          logger.info({ line, event: "godot_mcp_stdout" }, `MCP stdout: ${line}`);
+        }
+        continue;
+      }
       try {
         const msg = JSON.parse(line) as MCPResponse;
         if (msg.id && this.pendingRequests.has(msg.id)) {
@@ -281,12 +288,14 @@ export class GodotMCPService {
           clearTimeout(pending.timeout);
           this.pendingRequests.delete(msg.id);
           if (msg.error) {
+            logger.error({ error: msg.error, id: msg.id, event: "godot_mcp_response_error" }, `MCP error response: ${JSON.stringify(msg.error)}`);
             pending.reject(new Error(`${msg.error.code}: ${msg.error.message}`));
           } else {
+            logger.info({ id: msg.id, event: "godot_mcp_response" }, `MCP response received for id: ${msg.id}`);
             pending.resolve(msg.result);
           }
         }
-      } catch {
+      } catch (err) {
         // Not JSON — ignore
       }
     }
@@ -294,16 +303,20 @@ export class GodotMCPService {
 
   /** Send a JSON-RPC request to the MCP server via stdin */
   private async sendRequest(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
-    if (!this.process?.stdin) {
-      throw new Error("MCP server process not running");
+    if (!this.process?.stdin || !this.process?.stdout) {
+      throw new Error("MCP server process not running (stdin/stdout not available)");
     }
 
     const id = randomUUID();
     const request: MCPRequest = { jsonrpc: "2.0", id, method, params };
 
+    // Log the request for debugging
+    logger.info({ method, id, event: "godot_mcp_request" }, `Sending MCP request: ${method}`);
+
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pendingRequests.delete(id);
+        logger.error({ method, id, event: "godot_mcp_timeout" }, `MCP request timed out: ${method}`);
         reject(new Error(`Request '${method}' timed out after ${this.timeout}ms`));
       }, this.timeout);
 
@@ -360,6 +373,9 @@ export class GodotMCPService {
         arguments: params,
       });
 
+      // Log raw result for debugging
+      logger.info({ tool: name, event: "godot_mcp_result" }, `Got result for ${name}: ${String(result).slice(0, 200)}`);
+
       // Format result for LLM consumption
       if (result === undefined || result === null) {
         return JSON.stringify({ success: true });
@@ -387,6 +403,7 @@ export class GodotMCPService {
       return this.rewritePaths(formattedResult);
     } catch (err) {
       const error = err as Error;
+      logger.error({ tool: name, error: error.message, event: "godot_mcp_tool_error" }, `MCP tool error: ${error.message}`);
       return `Error: ${error.message}`;
     }
   }
