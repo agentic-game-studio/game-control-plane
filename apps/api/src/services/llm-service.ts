@@ -12,7 +12,7 @@ import path from "node:path";
 import { loadConfig } from "../config.js";
 import { getAgentSystemPrompt, loadAgentPrompts } from "../prompts/agent-prompt-loader.js";
 import { callLLMWithTools, GAME_STUDIO_TOOLS, type LLMMessage, type ProgressCallback } from "../llm/zai-client.js";
-import { broadcast } from "./websocket.js";
+import { broadcast, broadcastSessionUpdate } from "./websocket.js";
 import { getZaiModel } from "../config/model-mapping.js";
 import type { WSEvent, AgentRole } from "@game-studio/types";
 import {
@@ -195,6 +195,7 @@ export interface InvokeResult {
 
 /** Create a progress callback that broadcasts chat:progress events with thinking content */
 export function makeProgressCallback(sessionId: string, progressMsgId: string): ProgressCallback {
+  let lastBroadcastProgress = 0;
   return (info) => {
     if (info.phase === "executing" && info.currentTool) {
       logEntry(sessionId, "info", `[TOOL] ${info.currentTool} (iteration ${info.iteration})`);
@@ -209,6 +210,12 @@ export function makeProgressCallback(sessionId: string, progressMsgId: string): 
         content: info.thinking.slice(0, 100),
         thinking: info.thinking.slice(0, 2000),
       } as WSEvent);
+    }
+    // Broadcast progress updates (every ~20 iterations = 20% progress)
+    if (info.iteration > 0 && info.iteration % 20 === 0 && info.iteration !== lastBroadcastProgress) {
+      lastBroadcastProgress = info.iteration;
+      const progressPct = Math.min(90, Math.round((info.iteration / 100) * 100));
+      broadcastSessionUpdate(sessionId, { progress: progressPct });
     }
   };
 }

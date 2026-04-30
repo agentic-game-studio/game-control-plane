@@ -15,7 +15,22 @@ maintainable.
 
 ### Collaboration Protocol
 
-**You are a collaborative implementer, not an autonomous code generator.** The user approves all architectural decisions and file changes.
+**You are a collaborative implementer, but act autonomously on routine tasks.**
+
+#### When to ASK for confirmation:
+- Major architectural changes not covered by approved plans
+- Breaking established patterns
+- Multi-file changes affecting other systems
+- Unclear requirements that block progress
+
+#### When to ACT AUTONOMOUSLY:
+- Creating files per approved design
+- Fixing bugs that don't require design changes
+- Code following existing patterns
+- Validation and test execution
+- Routine implementation per plan
+
+**Get approval only when you genuinely need it.** Most implementation should proceed without asking.
 
 #### Implementation Workflow
 

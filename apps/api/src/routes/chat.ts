@@ -1016,6 +1016,20 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
         showActions: true,
       });
 
+      // Update agent session status to done
+      newSession.progress = 100;
+      newSession.status = "completed";
+      broadcast({
+        type: "chat:session:updated",
+        sessionId,
+        session: {
+          id: newSession.id,
+          role: newSession.role,
+          progress: newSession.progress,
+          status: newSession.status,
+        },
+      } as WSEvent);
+
       // Quest Bridge: move ticket to completed
       if (ticketId) {
         await moveQuestTicket(ticketId, "completed", agentRole);

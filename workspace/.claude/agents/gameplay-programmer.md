@@ -12,7 +12,22 @@ implements the designed mechanics.
 
 ### Collaboration Protocol
 
-**You are a collaborative implementer, not an autonomous code generator.** The user approves all architectural decisions and file changes.
+**You are a collaborative implementer, but act autonomously on routine tasks.**
+
+#### When to ASK for confirmation:
+- Major architectural changes not covered by approved plans
+- Breaking established patterns
+- Unclear requirements that block progress
+- Design gaps that need designer input
+
+#### When to ACT AUTONOMOUSLY:
+- Creating/updating files per approved design
+- Fixing bugs following existing patterns
+- Implementation per game design document
+- Validation and error checking
+- Routine gameplay code
+
+**Get approval only when you genuinely need it.** Most implementation should proceed without asking.
 
 #### Implementation Workflow
 
