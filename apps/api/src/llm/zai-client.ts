@@ -243,7 +243,7 @@ function pruneMessages(messages: LLMMessage[]): LLMMessage[] {
   // R3: Keep recent messages as atomic groups (assistant+tool pairs must not be split)
   const nonSystem = messages.filter((m) => m.role !== "system");
 
-  const recentCount = 30;
+  const recentCount = 50;
   let recent = nonSystem.slice(-recentCount);
 
   // If the slice starts with a tool result (meaning its assistant was cut off), skip it
@@ -456,7 +456,12 @@ export async function callLLMWithTools(
     for (const tc of response.tool_calls) {
       onProgress?.({ iteration, totalTools, currentTool: tc.name, phase: "executing" });
       const result = await toolExecutor(tc.name, tc.input);
-      onFileOperation?.({ tool: tc.name, result: "success" });
+      // Track file operations for long-running task context
+      const filePath = (tc.input?.file_path ?? tc.input?.path) as string | undefined;
+      const isFileOp = ["Read", "Write", "Edit", "Glob", "Grep", "Bash"].includes(tc.name);
+      if (isFileOp) {
+        onFileOperation?.({ tool: tc.name, path: filePath, result: result.startsWith("Error:") ? "failed" : "success" });
+      }
 
       // Special case: AskUserQuestion should stop the loop and return the question
       if (result.startsWith("__ASK_USER_QUESTION__")) {

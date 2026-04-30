@@ -11,7 +11,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { loadConfig } from "../config.js";
 import { getAgentSystemPrompt, loadAgentPrompts } from "../prompts/agent-prompt-loader.js";
-import { callLLMWithTools, GAME_STUDIO_TOOLS, type LLMMessage, type ProgressCallback } from "../llm/zai-client.js";
+import { callLLMWithTools, GAME_STUDIO_TOOLS, type LLMMessage, type ProgressCallback, type FileOperationCallback } from "../llm/zai-client.js";
 import { broadcast, broadcastSessionUpdate } from "./websocket.js";
 import { getZaiModel } from "../config/model-mapping.js";
 import type { WSEvent, AgentRole } from "@game-studio/types";
@@ -192,9 +192,6 @@ export interface InvokeResult {
   toolCalls?: { name: string; input: Record<string, unknown> }[];
   usage?: { input_tokens: number; output_tokens: number };
 }
-
-/** Callback to track file operations for long-running task context */
-export type FileOperationCallback = (op: { tool: string; path?: string; result: "success" | "failed" }) => void;
 
 /** Create a progress callback that broadcasts chat:progress events with thinking content */
 export function makeProgressCallback(sessionId: string, progressMsgId: string): ProgressCallback {
@@ -622,6 +619,7 @@ export async function invokeAgent(
   broadcastEvents = true,
   _depth = 0,
   projectContext?: ProjectContext,
+  onFileOperation?: FileOperationCallback,
 ): Promise<InvokeResult> {
   const invocationId = `invoke-${crypto.randomUUID().slice(0, 8)}`;
 
@@ -672,16 +670,8 @@ export async function invokeAgent(
       : [];
     const allTools = [...GAME_STUDIO_TOOLS, ...godotTools];
 
-    // Create tool executor that tracks file operations
     const toolExecutor = async (name: string, input: Record<string, unknown>): Promise<string> => {
-      const result = await executeTool(name, input, sessionId, agentRole, projectContext, _depth);
-      // Track operations for long-running context
-      if (["Read", "Write", "Edit", "Glob", "Grep", "Bash"].includes(name)) {
-        const path = ["Read", "Write", "Edit"].includes(name) ? input.file_path as string : undefined;
-        const success = !result.startsWith("Error:");
-        logEntry(sessionId, "info", `[${agentRole}] File operation: ${name} ${path ?? ""} ${success ? "success" : "failed"}`, agentRole);
-      }
-      return result;
+      return executeTool(name, input, sessionId, agentRole, projectContext, _depth);
     };
 
     // Call ZAI API with tools
@@ -695,7 +685,8 @@ export async function invokeAgent(
       },
       toolExecutor,
       onProgress,
-      sessionId
+      sessionId,
+      onFileOperation
     );
 
     if (broadcastEvents) {
@@ -738,6 +729,7 @@ export async function continueConversation(
   onProgress?: ProgressCallback,
   _depth = 0,
   projectContext?: ProjectContext,
+  onFileOperation?: FileOperationCallback,
 ): Promise<InvokeResult> {
   try {
     // Load agent's system prompt and model tier from MD file
@@ -761,7 +753,6 @@ export async function continueConversation(
       : [];
     const allTools = [...GAME_STUDIO_TOOLS, ...godotTools];
 
-    // Create tool executor with file operation tracking
     const toolExecutor = async (name: string, input: Record<string, unknown>): Promise<string> => {
       return executeTool(name, input, sessionId, agentRole, projectContext, _depth);
     };
@@ -776,7 +767,8 @@ export async function continueConversation(
       },
       toolExecutor,
       onProgress,
-      sessionId
+      sessionId,
+      onFileOperation
     );
 
     return {

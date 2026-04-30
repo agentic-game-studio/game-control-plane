@@ -706,6 +706,24 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
 
     // Call the LLM with progress callback
     const projectContext = await getProjectContextForSession(session);
+
+    // Inject continuation context for active sessions with prior operations
+    const continueCtx = buildContinueContext(session as ExtendedChatSession);
+    if (continueCtx) {
+      session.conversationHistory.push({
+        role: "user",
+        content: continueCtx,
+      });
+    }
+
+    // Track file operations back into session state
+    const onFileOperation = (op: { tool: string; path?: string; result: "success" | "failed" }) => {
+      (session as ExtendedChatSession).fileOperations.push({
+        ...op,
+        timestamp: new Date().toISOString(),
+      });
+    };
+
     const result = await continueConversation(
       agentRole,
       session.conversationHistory,
@@ -713,6 +731,7 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
       onProgress,
       0,
       projectContext,
+      onFileOperation,
     );
 
     // Stop heartbeat
