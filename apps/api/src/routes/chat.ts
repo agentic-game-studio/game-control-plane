@@ -1021,6 +1021,12 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
         false,
         0,
         projectContext,
+        (op) => {
+          newSession.fileOperations.push({ ...op, timestamp: new Date().toISOString() });
+          if (newSession.fileOperations.length > 200) {
+            newSession.fileOperations = newSession.fileOperations.slice(-200);
+          }
+        },
       );
       logger.info({ event: "spawn_invoke_complete", agentRole, contentLength: result.content.length, sessionId }, `Agent ${agentRole} completed with ${result.content.length} chars`);
 
