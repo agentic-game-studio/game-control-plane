@@ -18,6 +18,7 @@ interface ProjectCardProps {
   isSelected?: boolean;
   onClick?: () => void;
   mcpStatus?: MCPStatus | null;
+  onLaunchEditor?: () => void;
 }
 
 const ENGINE_COLORS: Record<ProjectEngine, string> = {
@@ -28,7 +29,7 @@ const ENGINE_COLORS: Record<ProjectEngine, string> = {
   threejs: "bg-[#000000]",
 };
 
-export function ProjectCard({ project, isSelected, onClick, mcpStatus }: ProjectCardProps) {
+export function ProjectCard({ project, isSelected, onClick, mcpStatus, onLaunchEditor }: ProjectCardProps) {
   const isGodot = project.engine === "godot";
 
   // Godot MCP connection status indicator
@@ -49,6 +50,14 @@ export function ProjectCard({ project, isSelected, onClick, mcpStatus }: Project
         <div className="flex items-center gap-1 text-red-500" title={mcpStatus.error || "Godot MCP disconnected"}>
           <span className="w-2 h-2 rounded-full bg-red-500" />
           <span className="material-symbols-outlined text-xs">warning</span>
+          {onLaunchEditor && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onLaunchEditor(); }}
+              className="ml-1 font-[var(--font-label)] text-[9px] font-bold uppercase px-1.5 py-0.5 bg-black text-white hover:bg-red-600 transition-colors"
+            >
+              Launch
+            </button>
+          )}
         </div>
       );
     }
@@ -58,6 +67,14 @@ export function ProjectCard({ project, isSelected, onClick, mcpStatus }: Project
       <div className="flex items-center gap-1 text-yellow-500" title="Waiting for Godot editor to connect">
         <span className="w-2 h-2 rounded-full bg-yellow-500" />
         <span className="material-symbols-outlined text-xs">hourglass_top</span>
+        {onLaunchEditor && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onLaunchEditor(); }}
+            className="ml-1 font-[var(--font-label)] text-[9px] font-bold uppercase px-1.5 py-0.5 bg-black text-white hover:bg-green-600 transition-colors"
+          >
+            Launch
+          </button>
+        )}
       </div>
     );
   };

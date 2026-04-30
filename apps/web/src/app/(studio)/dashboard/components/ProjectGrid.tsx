@@ -19,6 +19,7 @@ interface ProjectGridProps {
   onSelectProject: (project: Project) => void;
   onNewProject: () => void;
   mcpStatuses?: Record<string, MCPStatus>;
+  onLaunchEditor?: (projectId: string) => void;
 }
 
 export function ProjectGrid({
@@ -27,6 +28,7 @@ export function ProjectGrid({
   onSelectProject,
   onNewProject,
   mcpStatuses = {},
+  onLaunchEditor,
 }: ProjectGridProps) {
   const [pendingProject, setPendingProject] = useState<Project | null>(null);
 
@@ -99,6 +101,7 @@ export function ProjectGrid({
             isSelected={project.id === currentProject?.id}
             onClick={() => handleCardClick(project)}
             mcpStatus={mcpStatuses[project.id]}
+            onLaunchEditor={onLaunchEditor ? () => onLaunchEditor(project.id) : undefined}
           />
         ))}
         {/* Empty slot */}

@@ -12,7 +12,7 @@ import type {
 } from "@game-studio/types";
 import type { WSEvent } from "@game-studio/types";
 import { orphanProjectSessions } from "./chat.js";
-import { removeGodotMCPService, installGodotMCPPlugin, isGodotMCPPluginInstalled, isGodotMCPPluginEnabled } from "../services/godot-mcp-service.js";
+import { removeGodotMCPService, installGodotMCPPlugin, isGodotMCPPluginInstalled, isGodotMCPPluginEnabled, launchGodotEditor } from "../services/godot-mcp-service.js";
 import { detectEngineFromWorkspace } from "../services/llm-service.js";
 import { loadConfig } from "../config.js";
 
@@ -423,5 +423,40 @@ dashboardRouter.get("/projects/:id/mcp-health", async (req: Request, res: Respon
     });
   } catch {
     res.status(500).json({ success: false, error: "Failed to check MCP health" });
+  }
+});
+
+// POST /api/dashboard/projects/:id/launch-editor - Launch Godot editor for a project
+dashboardRouter.post("/projects/:id/launch-editor", async (req: Request, res: Response) => {
+  const { id } = req.params;
+
+  try {
+    const data = await readData<DashboardData>("dashboard.json");
+    const project = data.projects.find((p) => p.id === id);
+
+    if (!project) {
+      res.status(404).json({ success: false, error: "Project not found" });
+      return;
+    }
+
+    if (project.engine !== "godot") {
+      res.status(400).json({ success: false, error: "Project is not a Godot project" });
+      return;
+    }
+
+    const config = loadConfig();
+    const projectDir = project.workspacePath
+      ? join(config.WORKSPACE_DIR, project.workspacePath)
+      : null;
+
+    if (!projectDir) {
+      res.status(400).json({ success: false, error: "Project has no workspace path" });
+      return;
+    }
+
+    const result = launchGodotEditor(projectDir);
+    res.json({ success: result.success, data: result });
+  } catch {
+    res.status(500).json({ success: false, error: "Failed to launch editor" });
   }
 });

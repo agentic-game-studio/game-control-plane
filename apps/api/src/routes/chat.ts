@@ -1,5 +1,6 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
+import { join } from "node:path";
 import type { AgentRole, ChatSession, ChatMessage, CreateMessageRequest, CreateChatSessionRequest, DashboardData, Project, ProjectEngine } from "@game-studio/types";
 import type { LLMMessage } from "../llm/zai-client.js";
 import { broadcastEvent, readData, writeData } from "../services/data-store.js";
@@ -9,8 +10,9 @@ import { getAgentSystemPrompt } from "../prompts/agent-prompt-loader.js";
 import type { WSEvent } from "@game-studio/types";
 import { broadcast } from "../services/websocket.js";
 import { startWorkflow, advanceStage, completeWorkflow, cleanupWorkflow, getWorkflow, createQuestTicket, moveQuestTicket } from "../services/quest-bridge.js";
-import { getOrCreateGodotMCPService, removeGodotMCPService, type GodotMCPServiceOptions } from "../services/godot-mcp-service.js";
+import { getOrCreateGodotMCPService, removeGodotMCPService, launchGodotEditor, type GodotMCPServiceOptions } from "../services/godot-mcp-service.js";
 import { logger } from "../utils/logger.js";
+import { loadConfig } from "../config.js";
 
 export const chatRouter: Router = Router();
 
@@ -372,6 +374,18 @@ chatRouter.get("/sessions/producer/:projectId", async (req: Request, res: Respon
     }).catch((err) => {
       logger.error({ projectId, error: err.message, event: "godot_mcp_start_error" }, "Failed to start Godot MCP service");
     });
+
+    // Auto-launch Godot editor
+    if (project.workspacePath) {
+      const config = loadConfig();
+      const projectDir = join(config.WORKSPACE_DIR, project.workspacePath);
+      const launchResult = launchGodotEditor(projectDir);
+      if (launchResult.success) {
+        logger.info({ projectId, pid: launchResult.pid, event: "godot_editor_launched" }, "Godot editor auto-launched");
+      } else {
+        logger.warn({ projectId, error: launchResult.error, event: "godot_editor_launch_failed" }, "Could not auto-launch Godot editor");
+      }
+    }
   }
 
   const sessionId = producerSessionId(projectId);
@@ -914,6 +928,16 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
     }).catch((err) => {
       logger.error({ projectId, role: agentRole, error: err.message, event: "godot_mcp_spawn_error" }, "Failed to start Godot MCP for agent");
     });
+
+    // Auto-launch Godot editor
+    if (project.workspacePath) {
+      const config = loadConfig();
+      const projectDir = join(config.WORKSPACE_DIR, project.workspacePath);
+      const launchResult = launchGodotEditor(projectDir);
+      if (launchResult.success) {
+        logger.info({ projectId, pid: launchResult.pid, event: "godot_editor_launched" }, "Godot editor auto-launched for agent spawn");
+      }
+    }
   }
 
   // Create session for the spawned agent

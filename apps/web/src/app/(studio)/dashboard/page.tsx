@@ -62,6 +62,17 @@ export default function DashboardPage() {
     }
   };
 
+  // Launch Godot editor for a project
+  const launchEditor = async (projectId: string) => {
+    try {
+      await apiFetch<{ success: boolean }>(`/api/dashboard/projects/${projectId}/launch-editor`, {
+        method: "POST",
+      });
+    } catch (err) {
+      console.error("Failed to launch Godot editor:", err);
+    }
+  };
+
   // Check server status on mount and periodically
   useEffect(() => {
     checkServerStatus();
@@ -176,6 +187,7 @@ export default function DashboardPage() {
               onSelectProject={(project) => selectProject(project.id)}
               onNewProject={() => setIsModalOpen(true)}
               mcpStatuses={mcpStatuses}
+              onLaunchEditor={launchEditor}
             />
           </div>
 

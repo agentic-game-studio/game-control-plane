@@ -687,6 +687,63 @@ export function isGodotMCPPluginEnabled(projectDir: string): boolean {
   return content.includes('"Godot MCP Pro"/enable="On"');
 }
 
+// ─── Godot Editor Launch ──────────────────────────────────────────────────
+
+/**
+ * Launch the Godot editor with a specific project.
+ *
+ * Searches for the Godot binary in common locations, then spawns it
+ * as a detached process with --path pointing to the project directory.
+ * The plugin must already be installed and enabled in project.godot
+ * (handled by installGodotMCPPlugin).
+ */
+export function launchGodotEditor(projectDir: string): { success: boolean; pid?: number; error?: string } {
+  const candidates = [
+    // macOS .app bundle
+    "/Applications/Godot.app/Contents/MacOS/Godot",
+    // Homebrew
+    "/usr/local/bin/godot",
+    "/opt/homebrew/bin/godot",
+    // Linux
+    "/usr/bin/godot",
+    "/usr/local/bin/godot",
+    // Snap/Flatpak
+    "/snap/bin/godot",
+  ];
+
+  // Check env var override first (highest priority)
+  let godotBin: string | null = process.env.GODOT_EDITOR_PATH ?? null;
+
+  // Auto-detect if no env override
+  if (!godotBin) {
+    for (const candidate of candidates) {
+      if (existsSync(candidate)) {
+        godotBin = candidate;
+        break;
+      }
+    }
+  }
+
+  if (!godotBin) {
+    return { success: false, error: "Godot editor not found. Set GODOT_EDITOR_PATH env var or install Godot." };
+  }
+
+  try {
+    const proc = spawn(godotBin, ["--path", projectDir], {
+      detached: true,
+      stdio: "ignore",
+    });
+    proc.unref();
+
+    logger.info({ godotBin, projectDir, pid: proc.pid }, "Godot editor launched");
+    return { success: true, pid: proc.pid };
+  } catch (err) {
+    const error = err as Error;
+    logger.error({ error: error.message, godotBin, projectDir }, "Failed to launch Godot editor");
+    return { success: false, error: error.message };
+  }
+}
+
 // ─── Server Auto-Setup ─────────────────────────────────────────────────
 
 import { execSync } from "node:child_process";
