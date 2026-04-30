@@ -12,7 +12,7 @@
  *     → Response read from MCP server stdout
  */
 
-import { spawn, ChildProcess } from "node:child_process";
+import { spawn, execSync, ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { accessSync } from "node:fs";
 import type { LLMTool } from "../llm/zai-client.js";
@@ -721,6 +721,18 @@ export function launchGodotEditor(projectDir: string): { success: boolean; pid?:
       logger.warn({ projectDir, error: installResult.error }, "Could not install/enable Godot MCP plugin before launch");
     }
   }
+
+  // Check if Godot is already running with this project
+  try {
+    const psResult = execSync("pgrep -x Godot || pgrep -f 'Godot.*--path'", { encoding: "utf-8", stdio: ["pipe", "pipe", "ignore"] }).trim();
+    if (psResult) {
+      logger.info({ projectDir, existingPid: psResult.split("\n")[0] }, "Godot editor already running, skipping launch");
+      return { success: true, pid: parseInt(psResult.split("\n")[0], 10) };
+    }
+  } catch {
+    // pgrep returns non-zero when no match — means Godot is not running, proceed to launch
+  }
+
   const candidates = [
     // macOS .app bundle
     "/Applications/Godot.app/Contents/MacOS/Godot",
@@ -768,8 +780,6 @@ export function launchGodotEditor(projectDir: string): { success: boolean; pid?:
 }
 
 // ─── Server Auto-Setup ─────────────────────────────────────────────────
-
-import { execSync } from "node:child_process";
 
 /** Result of server setup attempt */
 export interface SetupServerResult {
