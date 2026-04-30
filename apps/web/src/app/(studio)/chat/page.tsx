@@ -6,6 +6,7 @@ import ChatTabs from "./components/ChatTabs";
 import ChatThread from "./components/ChatThread";
 import CommandInput from "./components/CommandInput";
 import QuestionToolbar from "./components/QuestionToolbar";
+import ProgressSummary from "./components/ProgressSummary";
 import { useCommandRoom } from "@/hooks/useCommandRoom";
 import { ProjectGuard } from "@/components/ProjectGuard";
 import { useProject } from "@/contexts/ProjectContext";
@@ -139,6 +140,10 @@ function ChatPageInner() {
           currentSession={currentSession}
           onSelectSession={selectSession}
           onCloseSession={closeSession}
+        />
+        <ProgressSummary
+          activeAgents={[...sessions.values()].filter(s => s.status === "active" && s.role !== "producer").length}
+          totalProgress={totalProgress}
         />
         {/* Godot MCP Warning Banner */}
         {isGodot && mcpStatus && mcpStatus.status !== "connected" && (
