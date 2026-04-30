@@ -730,8 +730,14 @@ export async function continueConversation(
   _depth = 0,
   projectContext?: ProjectContext,
   onFileOperation?: FileOperationCallback,
+  continuationContext?: string,
 ): Promise<InvokeResult> {
   try {
+    // Inject continuation context temporarily (not persisted to session)
+    const effectiveMessages = continuationContext
+      ? [...messages, { role: "user" as const, content: continuationContext }]
+      : messages;
+
     // Load agent's system prompt and model tier from MD file
     const [rawSystemPrompt, prompts] = await Promise.all([
       getAgentSystemPrompt(agentRole),
@@ -760,7 +766,7 @@ export async function continueConversation(
     const response = await callLLMWithTools(
       {
         agentRole,
-        messages,
+        messages: effectiveMessages,
         tools: allTools,
         systemPrompt,
         model,

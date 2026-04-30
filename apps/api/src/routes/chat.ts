@@ -191,11 +191,16 @@ Continue executing the plan. Do NOT re-propose the same plan. Update completedPh
 async function loadChatState(): Promise<ChatState> {
   try {
     const state = await readData<ChatState>(CHAT_STATE_FILE);
-    // R5: Filter out stale progress messages from crashed sessions
-    for (const session of Object.values(state.sessions)) {
-      (session as ExtendedChatSession).messages = (session as ExtendedChatSession).messages.filter(
-        (m) => m.type !== "progress"
-      );
+    // R5: Filter out stale progress messages + hydrate extended fields
+    for (const [key, s] of Object.entries(state.sessions)) {
+      const session = s as ExtendedChatSession;
+      session.messages = session.messages.filter((m) => m.type !== "progress");
+      // Hydrate fields that may be missing from older persisted sessions
+      if (!session.conversationHistory) session.conversationHistory = [];
+      if (!session.fileOperations) session.fileOperations = [];
+      if (!session.completedPhases) session.completedPhases = [];
+      if (!session.currentTask) session.currentTask = "";
+      state.sessions[key] = session;
     }
     if (migrateLegacyProducer(state)) {
       // Persist the migration so it doesn't run again on next boot.
@@ -559,6 +564,9 @@ chatRouter.post("/sessions/:id/clear", async (req: Request, res: Response) => {
   }
 
   session.conversationHistory = [];
+  (session as ExtendedChatSession).fileOperations = [];
+  (session as ExtendedChatSession).completedPhases = [];
+  (session as ExtendedChatSession).currentTask = "";
   session.progress = 0;
   session.status = "active";
 
@@ -707,21 +715,20 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
     // Call the LLM with progress callback
     const projectContext = await getProjectContextForSession(session);
 
-    // Inject continuation context for active sessions with prior operations
+    // Build continuation context (passed as temp context, not persisted)
     const continueCtx = buildContinueContext(session as ExtendedChatSession);
-    if (continueCtx) {
-      session.conversationHistory.push({
-        role: "user",
-        content: continueCtx,
-      });
-    }
 
     // Track file operations back into session state
     const onFileOperation = (op: { tool: string; path?: string; result: "success" | "failed" }) => {
-      (session as ExtendedChatSession).fileOperations.push({
+      const extSession = session as ExtendedChatSession;
+      extSession.fileOperations.push({
         ...op,
         timestamp: new Date().toISOString(),
       });
+      // Cap at 200 operations to prevent unbounded growth
+      if (extSession.fileOperations.length > 200) {
+        extSession.fileOperations = extSession.fileOperations.slice(-200);
+      }
     };
 
     const result = await continueConversation(
@@ -732,6 +739,7 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
       0,
       projectContext,
       onFileOperation,
+      continueCtx || undefined,
     );
 
     // Stop heartbeat
