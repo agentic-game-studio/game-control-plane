@@ -2,10 +2,22 @@
 
 import type { Project, ProjectEngine } from "@game-studio/types";
 
+interface MCPStatus {
+  status: "not_running" | "connected" | "disconnected";
+  serverRunning?: boolean;
+  godotConnected?: boolean;
+  projectInfo?: {
+    name: string;
+    version: string;
+  };
+  error?: string;
+}
+
 interface ProjectCardProps {
   project: Project;
   isSelected?: boolean;
   onClick?: () => void;
+  mcpStatus?: MCPStatus | null;
 }
 
 const ENGINE_COLORS: Record<ProjectEngine, string> = {
@@ -16,7 +28,40 @@ const ENGINE_COLORS: Record<ProjectEngine, string> = {
   threejs: "bg-[#000000]",
 };
 
-export function ProjectCard({ project, isSelected, onClick }: ProjectCardProps) {
+export function ProjectCard({ project, isSelected, onClick, mcpStatus }: ProjectCardProps) {
+  const isGodot = project.engine === "godot";
+
+  // Godot MCP connection status indicator
+  const getMCPIndicator = () => {
+    if (!isGodot || !mcpStatus) return null;
+
+    if (mcpStatus.status === "connected") {
+      return (
+        <div className="flex items-center gap-1 text-green-600" title={`Connected to ${mcpStatus.projectInfo?.name || "Godot project"}`}>
+          <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+          <span className="material-symbols-outlined text-xs">bolt</span>
+        </div>
+      );
+    }
+
+    if (mcpStatus.status === "disconnected") {
+      return (
+        <div className="flex items-center gap-1 text-red-500" title={mcpStatus.error || "Godot MCP disconnected"}>
+          <span className="w-2 h-2 rounded-full bg-red-500" />
+          <span className="material-symbols-outlined text-xs">warning</span>
+        </div>
+      );
+    }
+
+    // not_running
+    return (
+      <div className="flex items-center gap-1 text-yellow-500" title="Waiting for Godot editor to connect">
+        <span className="w-2 h-2 rounded-full bg-yellow-500" />
+        <span className="material-symbols-outlined text-xs">hourglass_top</span>
+      </div>
+    );
+  };
+
   return (
     <div
       onClick={onClick}
@@ -34,23 +79,26 @@ export function ProjectCard({ project, isSelected, onClick }: ProjectCardProps) 
           : "border-black bg-white shadow-[4px_4px_0_0_rgba(0,0,0,1)] hover:translate-x-[2px] hover:translate-y-[2px] hover:shadow-[2px_2px_0_0_rgba(0,0,0,1)]"
       } ${onClick ? "cursor-pointer" : ""}`}
     >
-      {/* Header: Icon + Name + Engine Tag */}
+      {/* Header: Icon + Name + Engine Tag + MCP Status */}
       <div className="flex items-start gap-3">
         <div className="w-10 h-10 border-2 border-black bg-black flex items-center justify-center text-white shrink-0">
           <span className="material-symbols-outlined">{project.icon}</span>
         </div>
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 flex-wrap">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
             <h3 className="font-[var(--font-terminal)] text-sm font-bold uppercase truncate">
               {project.name}
             </h3>
-            {project.engine && (
-              <span
-                className={`font-[var(--font-terminal)] text-[10px] font-bold uppercase text-white px-2 py-0.5 ${ENGINE_COLORS[project.engine]}`}
-              >
-                {project.engine.toUpperCase()}
-              </span>
-            )}
+            <div className="flex items-center gap-2">
+              {getMCPIndicator()}
+              {project.engine && (
+                <span
+                  className={`font-[var(--font-terminal)] text-[10px] font-bold uppercase text-white px-2 py-0.5 ${ENGINE_COLORS[project.engine]}`}
+                >
+                  {project.engine.toUpperCase()}
+                </span>
+              )}
+            </div>
           </div>
           <p className="font-[var(--font-terminal)] text-xs text-[#737688] line-clamp-2 mt-1">
             {project.description || "No description"}

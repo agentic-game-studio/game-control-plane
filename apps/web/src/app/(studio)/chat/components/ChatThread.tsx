@@ -64,6 +64,18 @@ const TOOL_COLORS: Record<string, string> = {
   AskUserQuestion: "#c13301",
 };
 
+function truncateArg(str: string, maxLen: number): string {
+  // Split at word boundary or path separator for cleaner truncation
+  const splitPoints = str.match(/[/\\. _-]/g) || [];
+  if (str.length <= maxLen) return str;
+  // Try to truncate at last split point before maxLen
+  let cutoff = maxLen;
+  for (let i = maxLen - 1; i > 0; i--) {
+    if (/[/\\. _-]/.test(str[i])) { cutoff = i + 1; break; }
+  }
+  return str.slice(0, cutoff) + '…';
+}
+
 /* ─── Memoized Message Components ─── */
 
 const ImageGallery = memo(function ImageGallery({ images }: { images?: string[] }) {
@@ -222,12 +234,12 @@ const AgentMessage = memo(function AgentMessage({
                     </div>
                     <div className="divide-y divide-[#e1e1ef]">
                       {toolCalls.map((tc, i) => (
-                        <div key={i} className="flex items-center gap-2 px-3 py-1.5">
-                          <span className="material-symbols-outlined text-sm" style={{ color: TOOL_COLORS[tc.name] ?? '#737688' }}>
+                        <div key={i} className="flex items-center gap-2 px-3 py-1.5 min-w-0">
+                          <span className="material-symbols-outlined text-sm shrink-0" style={{ color: TOOL_COLORS[tc.name] ?? '#737688' }}>
                             {TOOL_ICONS[tc.name] ?? 'build'}
                           </span>
-                          <span className="font-[var(--font-terminal)] text-xs flex-1 truncate">
-                            {tc.name} {Object.values(tc.args)[0] ? `· ${String(Object.values(tc.args)[0]).slice(0, 40)}` : ''}
+                          <span className="font-[var(--font-terminal)] text-xs flex-1 min-w-0 truncate">
+                            {tc.name} {Object.values(tc.args)[0] ? `· ${truncateArg(String(Object.values(tc.args)[0]), 100)}` : ''}
                           </span>
                           <span className="font-[var(--font-terminal)] text-[10px] uppercase px-1.5 py-0.5 border border-black bg-[#e7e7f5] text-[#191b25]">
                             {tc.status}

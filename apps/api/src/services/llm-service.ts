@@ -33,6 +33,42 @@ export interface ProjectContext {
   projectId?: string;
 }
 
+/** Detect engine from workspace files */
+export async function detectEngineFromWorkspace(workspacePath: string): Promise<string | null> {
+  const config = loadConfig();
+  const fullPath = path.resolve(config.WORKSPACE_DIR, workspacePath);
+
+  // Check for Godot (project.godot file)
+  try {
+    await fs.access(path.join(fullPath, "project.godot"));
+    return "godot";
+  } catch {
+    // Not a Godot project
+  }
+
+  // Check for Unreal (*.uproject file)
+  try {
+    const entries = await fs.readdir(fullPath, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isFile() && entry.name.endsWith(".uproject")) {
+        return "unreal";
+      }
+    }
+  } catch {
+    // Can't read directory
+  }
+
+  // Check for Unity (Assembly-CSharp.csproj or ProjectSettings/ProjectVersion.txt)
+  try {
+    await fs.access(path.join(fullPath, "ProjectSettings", "ProjectVersion.txt"));
+    return "unity";
+  } catch {
+    // Not Unity
+  }
+
+  return null;
+}
+
 function appendProjectContext(systemPrompt: string, project: ProjectContext): string {
   const base = `${systemPrompt}
 
@@ -99,12 +135,56 @@ function logEntry(sessionId: string, level: string, message: string, agent?: Age
 
 /** Validate that a resolved path stays within the workspace boundary (S1) */
 function safePath(inputPath: string, baseDir: string): string {
-  const resolved = path.resolve(inputPath);
-  const base = path.resolve(baseDir);
-  if (!resolved.startsWith(base + path.sep) && resolved !== base) {
+  const workspaceDir = loadConfig().WORKSPACE_DIR;
+  const resolvedWorkspaceDir = path.resolve(workspaceDir);
+
+  // If the input path is already inside the resolved workspace directory, use it as-is
+  // This handles paths like /Users/.../workspace/godot-test-1/... that are already correct
+  if (inputPath.startsWith(resolvedWorkspaceDir + "/")) {
+    // Verify no path traversal
+    const resolved = path.resolve(inputPath);
+    if (resolved.startsWith(resolvedWorkspaceDir)) {
+      return resolved;
+    }
     throw new Error(`Path outside workspace is not allowed: ${inputPath}`);
   }
-  return resolved;
+
+  // For paths outside workspace, apply normalization
+
+  // Strip leading "./workspace/" or "/workspace/" prefix if present
+  let workingPath = inputPath;
+  const workspacePattern = /^\.?\/?workspace\//;
+  if (workspacePattern.test(inputPath)) {
+    const pathAfterWorkspace = inputPath.replace(workspacePattern, "");
+    workingPath = path.join(workspaceDir, pathAfterWorkspace);
+  }
+
+  // Handle absolute paths to Godot projects that are mirrored in the workspace
+  // Godot returns paths like /Users/choguun/godot-test-1/project.godot
+  const homeDir = process.env.HOME || "";
+  const godotPathMatch = inputPath.match(new RegExp(`^${homeDir.replace("/", "\\/")}\/([^\/]+)(\/.*)?$`));
+  if (godotPathMatch && godotPathMatch[2]) {
+    const projectName = godotPathMatch[1];
+    const relativePath = godotPathMatch[2].substring(1);
+    workingPath = path.join(workspaceDir, projectName, relativePath);
+  }
+
+  // Handle project-relative paths like "godot-test-1/gdd/..."
+  // Resolve relative to WORKSPACE_DIR
+  const normalizedResolved = path.resolve(workingPath);
+  const base = path.resolve(baseDir);
+
+  // Allow paths that resolve to either:
+  // 1. Within the base directory (project workspace)
+  // 2. Within the global workspace directory (for shared files like design docs)
+  if (normalizedResolved.startsWith(base + path.sep) || normalizedResolved === base) {
+    return normalizedResolved;
+  }
+  if (normalizedResolved.startsWith(resolvedWorkspaceDir + path.sep) || normalizedResolved === resolvedWorkspaceDir) {
+    return normalizedResolved;
+  }
+
+  throw new Error(`Path outside workspace is not allowed: ${inputPath}`);
 }
 
 export interface InvokeResult {
@@ -344,12 +424,14 @@ async function executeTool(
         if (isGodotMCPTool(name)) {
           // Use projectId from ProjectContext to lookup the service (shared across sessions)
           const projectId = projectContext?.projectId;
+          logEntry(sessionId, "info", `[${agentRole}] Godot MCP lookup: projectId=${projectId}`, agentRole);
           const godotService = projectId ? getGodotMCPService(projectId) : null;
           if (godotService?.running()) {
             logEntry(sessionId, "info", `[${agentRole}] Godot MCP: ${name}`, agentRole);
             const result = await godotService.executeTool(name, input);
             return result;
           } else {
+            logEntry(sessionId, "info", `[${agentRole}] Godot MCP service not running for projectId=${projectId}`, agentRole);
             return `Error: Godot MCP tool '${name}' called but Godot MCP service is not running for this project. ` +
               `Ensure project engine is "godot" and the Godot editor is running with the MCP plugin enabled.`;
           }

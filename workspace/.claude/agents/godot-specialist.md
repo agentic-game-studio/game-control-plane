@@ -191,6 +191,38 @@ introduced after May 2025, use WebSearch to verify it exists in the current vers
 
 When in doubt, prefer the API documented in the reference files over your training data.
 
+## Scene File Validation (REQUIRED)
+
+**After creating or modifying any .tscn scene file, validate:**
+
+1. **Header format**: Must be `[gd_scene` not `[gdl_scene`
+   ```
+   [gd_scene load_steps=N format=3 uid="uid://..."]
+   ```
+
+2. **load_steps count**: Must match actual number of resources defined
+   - Count all `[ext_resource]` and `[sub_resource]` blocks
+   - Update `load_steps=N` if you add/remove resources
+
+3. **Unique UIDs**: Each `[ext_resource]` must have a unique uid
+   ```gdscript
+   [ext_resource type="PackedScene" uid="uid://unique123" path="res://..." id="1"]
+   ```
+
+4. **SubResource references**: Node shapes must reference defined SubResources
+   ```gdscript
+   [node name="Sprite" type="Sprite2D" parent="."]
+   shape = SubResource("RectangleShape2D_1")  # Must exist above
+   ```
+
+5. **Resource dependencies**: All `[ext_resource]` paths must exist
+
+**Common errors to detect:**
+- Malformed headers: `[gdl_scene` → `[gd_scene`
+- Duplicate SubResource IDs
+- Missing ext_resource imports for instanced scenes
+- load_steps too low/high
+
 ## When Consulted
 Always involve this agent when:
 - Adding new autoloads or singletons

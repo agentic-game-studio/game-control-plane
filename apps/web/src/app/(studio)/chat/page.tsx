@@ -1,11 +1,22 @@
 "use client";
 
+import { useState, useEffect } from "react";
 import AgentTree from "./components/AgentTree";
 import ChatTabs from "./components/ChatTabs";
 import ChatThread from "./components/ChatThread";
 import CommandInput from "./components/CommandInput";
+import QuestionToolbar from "./components/QuestionToolbar";
 import { useCommandRoom } from "@/hooks/useCommandRoom";
 import { ProjectGuard } from "@/components/ProjectGuard";
+import { useProject } from "@/contexts/ProjectContext";
+import { apiFetch } from "@/lib/api";
+
+interface MCPStatus {
+  status: "not_running" | "connected" | "disconnected";
+  serverRunning?: boolean;
+  godotConnected?: boolean;
+  error?: string;
+}
 
 export default function ChatPage() {
   return (
@@ -16,6 +27,40 @@ export default function ChatPage() {
 }
 
 function ChatPageInner() {
+  const { currentProject } = useProject();
+  const [mcpStatus, setMcpStatus] = useState<MCPStatus | null>(null);
+  const isGodot = currentProject?.engine === "godot";
+
+  // Poll MCP health for Godot projects
+  useEffect(() => {
+    console.log("[Chat] useEffect running, currentProject:", currentProject?.id, "engine:", currentProject?.engine);
+
+    if (!currentProject?.id || currentProject?.engine !== "godot") {
+      console.log("[Chat] Not Godot project, skipping MCP check");
+      setMcpStatus(null);
+      return;
+    }
+
+    const checkHealth = async () => {
+      try {
+        console.log("[Chat] Checking MCP health for:", currentProject.id);
+        const result = await apiFetch<{ success: boolean; data: MCPStatus }>(
+          `/api/dashboard/projects/${currentProject.id}/mcp-health`
+        );
+        console.log("[Chat] MCP health result:", JSON.stringify(result.data));
+        setMcpStatus(result.data);
+      } catch (err) {
+        console.error("[Chat] MCP health check failed:", err);
+        setMcpStatus({ status: "disconnected", error: err instanceof Error ? err.message : "Failed to check" });
+      }
+    };
+
+    // Initial check
+    checkHealth();
+    const interval = setInterval(checkHealth, 10000);
+    return () => clearInterval(interval);
+  }, [currentProject?.id, currentProject?.engine]);
+
   const {
     sessions,
     currentSession,
@@ -95,6 +140,22 @@ function ChatPageInner() {
           onSelectSession={selectSession}
           onCloseSession={closeSession}
         />
+        {/* Godot MCP Warning Banner */}
+        {isGodot && mcpStatus && mcpStatus.status !== "connected" && (
+          <div className="flex items-center gap-3 px-4 py-2 bg-yellow-50 border-b-2 border-yellow-400">
+            <span className="material-symbols-outlined text-yellow-600">warning</span>
+            <div className="flex-1">
+              <span className="font-[var(--font-terminal)] text-sm text-yellow-800">
+                {mcpStatus.status === "not_running"
+                  ? "Godot MCP service not started. Open the chat to initialize."
+                  : "Godot MCP not connected. "}
+              </span>
+              <span className="font-[var(--font-terminal)] text-xs text-yellow-700 ml-2">
+                Open your Godot project in the editor with the MCP plugin enabled.
+              </span>
+            </div>
+          </div>
+        )}
         <ChatThread
           messages={currentMessages}
           sessions={sessions}
@@ -108,8 +169,35 @@ function ChatPageInner() {
           onPlanAction={handlePlanAction}
           onSamplePrompt={(prompt) => executeCommand(prompt)}
         />
+        {/* Sticky Question Toolbar */}
+        {(() => {
+          // Find most recent unanswered question
+          const questionMsg = [...currentMessages].reverse().find(
+            (msg) => msg.type === "question" && msg.question
+          );
+          if (!questionMsg?.question) return null;
+
+          // Check if already answered
+          const msgIndex = currentMessages.indexOf(questionMsg);
+          const answerMsg = currentMessages.slice(msgIndex + 1).find(
+            (m) => m.type === "user" && (m.content.startsWith("Selected:") || m.content.startsWith("Additional input:"))
+          );
+          if (answerMsg) return null;
+
+          return (
+            <QuestionToolbar
+              key={questionMsg.question.questionId}
+              questionId={questionMsg.question.questionId}
+              question={questionMsg.question.question}
+              options={questionMsg.question.options}
+              allowMultiple={questionMsg.question.allowMultiple}
+              onAnswer={handleAnswer}
+              disabled={isLoading}
+            />
+          );
+        })()}
       </div>
-      {currentSession === producerSessionId ? (
+      {currentSession ? (
         <CommandInput onSend={executeCommand} isLoading={isLoading} />
       ) : (
         <AgentStatusBar session={sessions.get(currentSession)} onClose={() => closeSession(currentSession)} />

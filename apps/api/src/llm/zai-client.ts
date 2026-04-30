@@ -110,7 +110,7 @@ function truncate(content: string, maxChars: number): string {
 }
 
 const MAX_CONSECUTIVE_SAME_TOOL_CALLS = 4;
-const MAX_REPETITION_WINDOW = 6;
+const MAX_REPETITION_WINDOW = 15;
 
 function hashToolInput(input: Record<string, unknown>): string {
   try {

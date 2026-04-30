@@ -225,7 +225,7 @@ Next.js 15 App Router, Tailwind CSS v4, no UI framework. All pages are client co
 
 | Route | Description |
 |-------|-------------|
-| `/dashboard` | Project management with create/delete modals, activity log, credit summary |
+| `/dashboard` | Project management with create/delete modals, activity log, credit summary, Godot MCP server status + setup button |
 | `/tickets` | Kanban board (project-scoped), 4 columns (Available, Processing, Verify, Archived), create/delete quests |
 | `/assets` | Asset inventory grid (project-scoped), create/delete, Art Bible sidebar with constraints |
 | `/chat` | Board room command page — per-project producer session, sample prompt buttons on empty state |
@@ -342,7 +342,7 @@ pnpm test:e2e          # Playwright E2E test suite (apps/web/e2e/)
 - `apps/api/src/routes/gates.ts` — Real LLM-powered gate execution via executeGate()
 - `apps/api/src/routes/teams.ts` — Real team workflows orchestrated by creative-director
 - `apps/api/src/routes/documents.ts` — Document store routes
-- `apps/api/src/routes/dashboard.ts` — Projects CRUD with WebSocket events
+- `apps/api/src/routes/dashboard.ts` — Projects CRUD with WebSocket events, Godot MCP auto-install, server setup endpoints
 - `apps/api/src/routes/tickets.ts` — Kanban board CRUD
 - `apps/api/src/routes/assets.ts` — Asset inventory + art bible CRUD
 - `apps/api/src/routes/settings.ts` — Config CRUD
@@ -351,11 +351,12 @@ pnpm test:e2e          # Playwright E2E test suite (apps/web/e2e/)
 - `apps/api/src/middleware/request-logger.ts` — HTTP request/response logging middleware
 - `apps/api/src/middleware/auth.ts` — Timing-safe authentication middleware
 - `apps/api/src/services/websocket.ts` — WebSocket broadcast + SSE client tracking
-- `apps/api/src/services/godot-mcp-service.ts` — Godot MCP Pro server lifecycle, stdio JSON-RPC client, 169 tool definitions
+- `apps/api/src/services/godot-mcp-service.ts` — Godot MCP Pro server lifecycle, stdio JSON-RPC client, 169 tool definitions, auto-setup, path rewriting, plugin installation
 - `apps/api/src/services/document-store.ts` — Workspace file scanning, wikilink extraction, backlink computation, fs.watch for real-time updates
 - `apps/api/src/services/data-store.ts` — Async file-based JSON persistence for dashboard, tickets, assets, settings with rate limiting
 - `apps/api/src/services/quest-bridge.ts` — Intercepts Task tool calls to auto-create and track Quest tickets (Available → Processing → Verify → Completed)
 - `apps/web/src/hooks/useCommandRoom.ts` — Chat state management with tool calls, diff, navigate
+- `apps/web/src/hooks/useGodotMCPStatus.ts` — Godot MCP health polling hook
 - `apps/web/src/app/(studio)/chat/components/DiffView.tsx` — Diff rendering component
 - `apps/web/src/lib/api.ts` — WebSocket API client with apiKey auth, debounced reconnect
 - `apps/web/src/lib/format-time.ts` — Shared time formatting utilities
@@ -384,10 +385,11 @@ Agent tool call (e.g. create_scene)
 
 | File | Purpose |
 |------|---------|
-| `services/godot-mcp-service.ts` | MCP server lifecycle, stdio JSON-RPC client, 169 tool definitions |
+| `services/godot-mcp-service.ts` | MCP server lifecycle, stdio JSON-RPC client, 169 tool definitions, auto-setup, path rewriting |
 | `services/llm-service.ts` | Injects Godot MCP tools when `project.engine === "godot"`, routes calls to MCP service |
 | `routes/chat.ts` | Starts MCP service on producer session create (project-keyed) |
-| `routes/dashboard.ts` | Stops MCP service when project deleted |
+| `routes/dashboard.ts` | Stops MCP service when project deleted, auto-installs plugin on project creation |
+| `hooks/useGodotMCPStatus.ts` | Frontend hook for polling MCP health status |
 
 ### How It Works
 
@@ -397,12 +399,42 @@ Agent tool call (e.g. create_scene)
 4. **MCP server** — Spawns `godot-mcp-pro-v1.11.0/server/build/index.js --lite` as a child process with stdio transport
 5. **Godot connection** — The MCP server internally bridges to the Godot editor via WebSocket (ports 6505-6514). The Godot editor must be running with the Godot MCP Pro plugin enabled.
 
+### Auto-Setup & Automation
+
+The platform automates Godot MCP setup:
+
+| Feature | Description |
+|---------|-------------|
+| **Server auto-setup** | Automatically runs `npm install` + `npm run build` if needed |
+| **Plugin auto-install** | Copies `addons/godot_mcp/` to project on creation, enables in `project.godot` |
+| **Path rewriting** | Rewrites absolute paths from Godot (e.g., `/Users/foo/godot-test-1/`) to workspace-relative (`./workspace/godot-test-1/`) |
+| **Health monitoring** | Polls MCP health every 10s, displays status in UI |
+
+### API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/dashboard/server-status` | GET | Check if server is found/installed/built |
+| `/api/dashboard/setup-server` | POST | Trigger server setup manually |
+| `/api/dashboard/projects/:id/plugin-status` | GET | Check plugin installed/enabled |
+| `/api/dashboard/projects/:id/install-plugin` | POST | Install plugin for existing project |
+| `/api/dashboard/projects/:id/mcp-health` | GET | Check MCP connection health |
+
 ### Key Design Decisions
 
 - **Project-keyed** — Service is keyed by `projectId`, shared across all sessions (producer + spawned agents)
 - **Project workspace isolation** — `executeTool()` uses `projectContext.workspacePath` (resolved relative to `WORKSPACE_DIR`) for file operations. Each project has its own directory, preventing cross-project contamination.
 - **Graceful degradation** — Clear error message if Godot not running or MCP plugin not enabled
 - **LITE mode** — Uses `--lite` flag (81 tools) to reduce context overhead. Use `--minimal` (35 tools) or `--full` (169 tools) via `GodotMCPServiceOptions.mode`
+- **Path rewriting** — Detects Godot project directory from MCP responses and rewrites absolute paths to workspace-relative
+
+### Frontend Status Indicators
+
+| Status | Visual | Description |
+|--------|--------|-------------|
+| Connected | Green bolt + green dot | Godot MCP connected |
+| Waiting | Yellow hourglass + yellow dot | Waiting for Godot editor to connect |
+| Disconnected | Red warning + red dot | MCP error or connection failed |
 
 ### Testing
 

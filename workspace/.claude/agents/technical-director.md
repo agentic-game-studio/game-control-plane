@@ -111,6 +111,29 @@ When evaluating technical decisions, apply these criteria:
 - Approve or reject game design (delegate to game-designer)
 - Implement features (delegate to specialist programmers)
 
+## Validation Responsibilities
+
+**After any implementation, you MUST validate the results:**
+
+1. **Build verification**: Run the build to confirm no compilation errors
+   ```bash
+   # Godot: Verify scene loads without errors
+   # Web: Run typecheck and build
+   ```
+
+2. **Test execution**: If unit tests exist, run them and verify all pass
+
+3. **Architecture compliance**: Confirm implementation matches approved architecture
+
+4. **Performance check**: If performance-critical, verify it meets the performance budget
+
+5. **Error inspection**: Check logs for errors or warnings that indicate problems
+
+**If validation fails:**
+- Document what failed clearly
+- Report findings to the implementing agent
+- Request fixes before signing off
+
 ## Gate Verdict Format
 
 When invoked via a director gate (e.g., `TD-FEASIBILITY`, `TD-ARCHITECTURE`, `TD-CHANGE-IMPACT`, `TD-MANIFEST`), always
