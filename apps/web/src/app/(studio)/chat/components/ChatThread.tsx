@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useMemo, memo, useCallback } from "react";
+import { useEffect, useRef, useMemo, memo, useCallback, useState } from "react";
 import type { ChatMessage, AgentSession } from "@/hooks/useCommandRoom";
 import { getAgentIcon } from "@/lib/agent-icons";
 import { renderMarkdown } from "@/lib/markdown";
@@ -75,6 +75,120 @@ function truncateArg(str: string, maxLen: number): string {
   }
   return str.slice(0, cutoff) + '…';
 }
+
+/* ─── Activity Log (collapsible tool calls) ─── */
+
+interface ActivityLogProps {
+  toolCalls: Array<{ name: string; args: Record<string, unknown>; status: string }>;
+  logs?: string[];
+  defaultExpanded?: boolean;
+}
+
+type LogEntry =
+  | { kind: "tool"; name: string; args: Record<string, unknown>; status: string }
+  | { kind: "log"; text: string };
+
+const ActivityLog = memo(function ActivityLog({ toolCalls, logs, defaultExpanded = false }: ActivityLogProps) {
+  const [expanded, setExpanded] = useState(defaultExpanded);
+
+  const entries: LogEntry[] = useMemo(() => {
+    const combined: LogEntry[] = [
+      ...toolCalls.map((tc) => ({ kind: "tool" as const, ...tc })),
+      ...(logs ?? []).map((text) => ({ kind: "log" as const, text })),
+    ];
+    return combined.reverse();
+  }, [toolCalls, logs]);
+
+  const totalCount = toolCalls.length + (logs?.length ?? 0);
+  const previewEntries = entries.slice(0, 3);
+
+  return (
+    <div className="mt-4 border-2 border-black bg-white shadow-[2px_2px_0_0_rgba(0,0,0,1)]">
+      {/* Header bar */}
+      <button
+        onClick={() => setExpanded((e) => !e)}
+        className="w-full px-3 py-1.5 bg-black flex items-center gap-2 hover:bg-[#191b25] transition-colors"
+      >
+        <span className="material-symbols-outlined text-white text-sm">
+          {expanded ? "expand_less" : "expand_more"}
+        </span>
+        <span className="font-[var(--font-label)] text-[10px] uppercase text-white tracking-widest">
+          Activity
+        </span>
+        <span className="ml-auto font-[var(--font-terminal)] text-[10px] text-white/70">
+          {totalCount} {totalCount === 1 ? "entry" : "entries"}
+        </span>
+      </button>
+
+      {/* Collapsed: show 3 latest entries */}
+      {!expanded && previewEntries.length > 0 && (
+        <div className="divide-y divide-[#e1e1ef]">
+          {previewEntries.map((entry, i) => (
+            <div key={i} className="flex items-center gap-2 px-3 py-1.5 min-w-0">
+              {entry.kind === "tool" ? (
+                <>
+                  <span
+                    className="material-symbols-outlined text-sm shrink-0"
+                    style={{ color: TOOL_COLORS[entry.name] ?? "#737688" }}
+                  >
+                    {TOOL_ICONS[entry.name] ?? "build"}
+                  </span>
+                  <span className="font-[var(--font-terminal)] text-xs flex-1 min-w-0 truncate">
+                    {entry.name}{" "}
+                    {Object.values(entry.args)[0]
+                      ? `· ${truncateArg(String(Object.values(entry.args)[0]), 100)}`
+                      : ""}
+                  </span>
+                  <span className="font-[var(--font-terminal)] text-[10px] uppercase px-1.5 py-0.5 border border-black bg-[#e7e7f5] text-[#191b25]">
+                    {entry.status}
+                  </span>
+                </>
+              ) : (
+                <span className="font-[var(--font-terminal)] text-xs text-[#737688] flex-1 min-w-0 truncate">
+                  {entry.text}
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Expanded: all entries in reverse order (newest first) */}
+      {expanded && (
+        <div className="divide-y divide-[#e1e1ef]">
+          {entries.map((entry, i) =>
+            entry.kind === "tool" ? (
+              <div key={i} className="flex items-center gap-2 px-3 py-1.5 min-w-0">
+                <span
+                  className="material-symbols-outlined text-sm shrink-0"
+                  style={{ color: TOOL_COLORS[entry.name] ?? "#737688" }}
+                >
+                  {TOOL_ICONS[entry.name] ?? "build"}
+                </span>
+                <span className="font-[var(--font-terminal)] text-xs flex-1 min-w-0 truncate">
+                  {entry.name}{" "}
+                  {Object.values(entry.args)[0]
+                    ? `· ${truncateArg(String(Object.values(entry.args)[0]), 100)}`
+                    : ""}
+                </span>
+                <span className="font-[var(--font-terminal)] text-[10px] uppercase px-1.5 py-0.5 border border-black bg-[#e7e7f5] text-[#191b25]">
+                  {entry.status}
+                </span>
+              </div>
+            ) : (
+              <div key={i} className="flex items-center gap-2 px-3 py-1.5 min-w-0">
+                <span className="material-symbols-outlined text-sm shrink-0 text-[#a0a0b0]">notes</span>
+                <span className="font-[var(--font-terminal)] text-xs text-[#737688] flex-1 min-w-0 truncate">
+                  {entry.text}
+                </span>
+              </div>
+            )
+          )}
+        </div>
+      )}
+    </div>
+  );
+});
 
 /* ─── Memoized Message Components ─── */
 
@@ -207,10 +321,24 @@ const AgentMessage = memo(function AgentMessage({
             />
             <ImageGallery images={msg.images} />
 
-            {/* Rich progress message */}
+            {/* Rich progress message — conversation flow: activity top, thinking middle, progress bottom */}
             {isProgress && msg.progress !== undefined && (
               <div className="mt-4 border-2 border-black bg-[#f3f2ff] shadow-[2px_2px_0_0_rgba(0,0,0,1)]">
-                <div className="p-2 flex items-center gap-3">
+                {/* Activity log at top (newest first) */}
+                {(toolCalls?.length || msg.logs?.length) ? (
+                  <ActivityLog toolCalls={toolCalls ?? []} logs={msg.logs} defaultExpanded={false} />
+                ) : null}
+
+                {/* Thinking in the middle */}
+                {msg.thinking && (
+                  <div className="border-t-2 border-black px-3 py-2 bg-[#faf8ff]">
+                    <span className="font-[var(--font-label)] text-[10px] uppercase text-[#737688] tracking-widest block mb-1">Thinking</span>
+                    <span className="font-[var(--font-terminal)] text-xs text-[#737688]">{msg.thinking}</span>
+                  </div>
+                )}
+
+                {/* Progress bar at bottom like Claude Code thinking indicator */}
+                <div className="p-2 flex items-center gap-3 border-t-2 border-black">
                   <span className="material-symbols-outlined animate-spin text-sm text-[#0055FF]">sync</span>
                   <div className="flex-1 h-4 border-2 border-black bg-white relative overflow-hidden">
                     <div className="h-full bg-[#0055FF] transition-[width] duration-700 ease-out relative" style={{ width: `${msg.progress}%` }}>
@@ -219,36 +347,6 @@ const AgentMessage = memo(function AgentMessage({
                   </div>
                   <span className="font-[var(--font-terminal)] text-xs font-bold tabular-nums min-w-[3ch] text-right">{msg.progress}%</span>
                 </div>
-
-                {msg.thinking && (
-                  <div className="border-t border-black px-3 py-2 bg-[#faf8ff]">
-                    <span className="font-[var(--font-label)] text-[10px] uppercase text-[#737688] tracking-widest block mb-1">Thinking</span>
-                    <span className="font-[var(--font-terminal)] text-xs text-[#737688]">{msg.thinking}</span>
-                  </div>
-                )}
-
-                {toolCalls && toolCalls.length > 0 && (
-                  <div className="border-t-2 border-black bg-white">
-                    <div className="px-3 py-1 bg-black">
-                      <span className="font-[var(--font-label)] text-[10px] uppercase text-white tracking-widest">Activity</span>
-                    </div>
-                    <div className="divide-y divide-[#e1e1ef]">
-                      {toolCalls.map((tc, i) => (
-                        <div key={i} className="flex items-center gap-2 px-3 py-1.5 min-w-0">
-                          <span className="material-symbols-outlined text-sm shrink-0" style={{ color: TOOL_COLORS[tc.name] ?? '#737688' }}>
-                            {TOOL_ICONS[tc.name] ?? 'build'}
-                          </span>
-                          <span className="font-[var(--font-terminal)] text-xs flex-1 min-w-0 truncate">
-                            {tc.name} {Object.values(tc.args)[0] ? `· ${truncateArg(String(Object.values(tc.args)[0]), 100)}` : ''}
-                          </span>
-                          <span className="font-[var(--font-terminal)] text-[10px] uppercase px-1.5 py-0.5 border border-black bg-[#e7e7f5] text-[#191b25]">
-                            {tc.status}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
               </div>
             )}
 
@@ -260,27 +358,8 @@ const AgentMessage = memo(function AgentMessage({
             )}
 
             {/* Activity log for completed messages */}
-            {!isProgress && toolCalls && toolCalls.length > 0 && (
-              <div className="mt-4 border-2 border-black bg-white shadow-[2px_2px_0_0_rgba(0,0,0,1)]">
-                <div className="px-3 py-1 bg-black">
-                  <span className="font-[var(--font-label)] text-[10px] uppercase text-white tracking-widest">Activity</span>
-                </div>
-                <div className="divide-y divide-[#e1e1ef]">
-                  {toolCalls.map((tc, i) => (
-                    <div key={i} className="flex items-center gap-2 px-3 py-1.5">
-                      <span className="material-symbols-outlined text-sm" style={{ color: TOOL_COLORS[tc.name] ?? '#737688' }}>
-                        {TOOL_ICONS[tc.name] ?? 'build'}
-                      </span>
-                      <span className="font-[var(--font-terminal)] text-xs flex-1 truncate">
-                        {tc.name} {Object.values(tc.args)[0] ? `· ${String(Object.values(tc.args)[0]).slice(0, 40)}` : ''}
-                      </span>
-                      <span className="font-[var(--font-terminal)] text-[10px] uppercase px-1.5 py-0.5 border border-black bg-[#e7e7f5] text-[#191b25]">
-                        {tc.status}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </div>
+            {!isProgress && (toolCalls?.length || msg.logs?.length) && (
+              <ActivityLog toolCalls={toolCalls ?? []} logs={msg.logs} />
             )}
 
             <div className="absolute -right-3 -top-3 opacity-0 group-hover:opacity-100 transition-opacity">

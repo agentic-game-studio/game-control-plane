@@ -24,6 +24,7 @@ import {
   getGodotMCPToolDefinitions,
   type GodotMCPServiceOptions,
 } from "./godot-mcp-service.js";
+import { triggerVerification } from "./verification-service.js";
 
 export interface ProjectContext {
   name: string;
@@ -373,8 +374,9 @@ async function executeTool(
         // Recursively invoke subagent (don't broadcast events — subagent runs inline within parent session)
         const subResult = await invokeAgent(agent, task, sessionId, context, undefined, undefined, false, _depth + 1, undefined, onFileOperation);
 
-        // Quest Bridge: move ticket to QA
+        // Quest Bridge: move ticket to QA and trigger auto-verification
         await moveQuestTicket(ticketId, "qa", agent);
+        triggerVerification(ticket, subResult.content);
 
         return `Subagent ${agent} output:\n${subResult.content}`;
       }

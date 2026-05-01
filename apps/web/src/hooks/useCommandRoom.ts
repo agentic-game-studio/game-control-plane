@@ -38,6 +38,7 @@ export interface ChatMessage {
   progress?: number;
   codeBlock?: string;
   toolCalls?: ToolCall[];
+  logs?: string[];
   diff?: { oldContent: string; newContent: string; filePath: string };
   thinking?: string;
   navigate?: { targetSession: string; label: string };
@@ -79,10 +80,73 @@ export interface FileOp {
 export interface AgentSession {
   role: string;
   messages: ChatMessage[];
-  status: "active" | "done";
+  status: "active" | "done" | "completed";
   progress: number;
   spawnedAt: string;
   fileOps?: FileOp[];
+}
+
+/* ─── localStorage Cache ─── */
+
+const CACHE_VERSION = 1;
+const CACHE_KEY_PREFIX = "chat-cache-v";
+
+interface CachedChatData {
+  version: number;
+  sessions: Array<[string, AgentSession]>;
+  currentSession: string;
+  threadId: string;
+  threadTitle: string;
+  cachedAt: string;
+}
+
+function getCacheKey(projectId: string): string {
+  return `${CACHE_KEY_PREFIX}${CACHE_VERSION}-${projectId}`;
+}
+
+function loadCache(projectId: string): CachedChatData | null {
+  try {
+    const raw = localStorage.getItem(getCacheKey(projectId));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as CachedChatData;
+    if (parsed.version !== CACHE_VERSION) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function saveCache(projectId: string, data: CachedChatData): void {
+  try {
+    localStorage.setItem(getCacheKey(projectId), JSON.stringify(data));
+  } catch {
+    // localStorage may be full — silently fail
+  }
+}
+
+function clearCache(projectId: string): void {
+  try {
+    localStorage.removeItem(getCacheKey(projectId));
+  } catch {
+    // ignore
+  }
+}
+
+/** Cache all messages including progress (with toolCalls + logs for activity persistence) */
+function serializeForCache(sessions: Map<string, AgentSession>): Array<[string, AgentSession]> {
+  const out: Array<[string, AgentSession]> = [];
+  for (const [id, session] of sessions) {
+    // Cap messages per session to last 200 to avoid localStorage quota issues
+    const cappedMessages = session.messages.length > 200
+      ? session.messages.slice(-200)
+      : session.messages;
+    out.push([id, { ...session, messages: cappedMessages }]);
+  }
+  return out;
+}
+
+function deserializeFromCache(entries: Array<[string, AgentSession]>): Map<string, AgentSession> {
+  return new Map(entries);
 }
 
 const GREETINGS: Record<string, string> = {
@@ -363,17 +427,34 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, prod
         }
       }
 
-      // Fallback: add as system message if no progress message or couldn't parse
-      // Deduplicate: skip if same log message already exists in recent messages
+      // Fallback: append to progress message logs instead of creating system message
       const logContent = `[${event.level.toUpperCase()}] ${event.message}`;
-      const recentMessages = session.messages.slice(-10);
-      if (!recentMessages.some((m) => m.type === "system" && m.content === logContent)) {
-        messages.push({ sessionRole: targetSession, msg: {
-          type: "system",
-          sender: "SYSTEM",
-          content: logContent,
-        }});
+      const progressIndex = session.messages.findIndex((m) => m.type === "progress");
+      if (progressIndex !== -1) {
+        const next = new Map(sessions);
+        const progressMsg = session.messages[progressIndex];
+        const existingLogs = progressMsg.logs ?? [];
+        // Deduplicate: skip if same log already in last 10 entries
+        if (!existingLogs.slice(-10).includes(logContent)) {
+          next.set(targetSession, {
+            ...session,
+            messages: session.messages.map((m, idx) =>
+              idx === progressIndex
+                ? { ...m, logs: [...existingLogs, logContent] }
+                : m
+            ),
+          });
+          return { sessions: next, messages };
+        }
+        return { sessions: null, messages };
       }
+
+      // No progress message — add as system message as last resort
+      messages.push({ sessionRole: targetSession, msg: {
+        type: "system",
+        sender: "SYSTEM",
+        content: logContent,
+      }});
       return { sessions: null, messages };
     }
     case "chat:session:deleted": {
@@ -430,12 +511,35 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, prod
       return { sessions: null, messages };
     }
     case "agent:loop:detected": {
+      const logContent = `[LOOP DETECTED] ${event.message}`;
+      const session = sessions.get(event.sessionId);
+      if (session) {
+        const progressIndex = session.messages.findIndex((m) => m.type === "progress");
+        if (progressIndex !== -1) {
+          const next = new Map(sessions);
+          const progressMsg = session.messages[progressIndex];
+          const existingLogs = progressMsg.logs ?? [];
+          if (!existingLogs.slice(-10).includes(logContent)) {
+            next.set(event.sessionId, {
+              ...session,
+              messages: session.messages.map((m, idx) =>
+                idx === progressIndex
+                  ? { ...m, logs: [...existingLogs, logContent] }
+                  : m
+              ),
+            });
+            return { sessions: next, messages };
+          }
+          return { sessions: null, messages };
+        }
+      }
+      // No progress message — add as system message as last resort
       messages.push({
         sessionRole: event.sessionId,
         msg: {
           type: "system",
           sender: "SYSTEM",
-          content: `[LOOP DETECTED] ${event.message}`,
+          content: logContent,
         },
       });
       return { sessions: null, messages };
@@ -462,8 +566,9 @@ function backendSessionToAgentSession(s: BackendSession): AgentSession {
       ...m,
       type: m.type === "progress" && m.progress === 100 ? ("agent" as const) : m.type,
       toolCalls: normalizeToolCalls(m.toolCalls),
+      logs: m.logs,
     })),
-    status: s.status as "active" | "done",
+    status: s.status as "active" | "done" | "completed",
     progress: s.progress,
     spawnedAt: s.spawnedAt,
     fileOps: [],
@@ -487,6 +592,8 @@ export function useCommandRoom() {
   const activityLogRef = useRef<string[]>([]);
   const addSessionMessageRef = useRef<(role: string, msg: Omit<ChatMessage, "id" | "timestamp">) => void | undefined>(undefined);
   const recentApiMessagesRef = useRef<Set<string>>(new Set());
+  // Ref for latest sessions to flush cache on unmount / navigation
+  const latestSessionsRef = useRef<Map<string, AgentSession>>(new Map());
   // F2: Ref for currentSession to avoid stale closures in async callbacks
   const currentSessionRef = useRef(currentSession);
   currentSessionRef.current = currentSession;
@@ -512,6 +619,24 @@ export function useCommandRoom() {
     }
     return out;
   }, [allSessions, allSessionProjectIds, currentProjectId, producerSessionId]);
+  latestSessionsRef.current = sessions;
+
+  // Flush cache immediately on page unload to avoid losing recent messages
+  useEffect(() => {
+    if (!currentProjectId) return;
+    const handler = () => {
+      saveCache(currentProjectId, {
+        version: CACHE_VERSION,
+        sessions: serializeForCache(sessions),
+        currentSession,
+        threadId,
+        threadTitle,
+        cachedAt: new Date().toISOString(),
+      });
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [currentProjectId, sessions, currentSession, threadId, threadTitle]);
 
   // Fetch all sessions and ensure the producer session for the current
   // project exists (lazy-create via the dedicated endpoint).
@@ -520,6 +645,24 @@ export function useCommandRoom() {
       setInitialized(true);
       return;
     }
+
+    // Try loading from cache first for instant render
+    const cached = loadCache(currentProjectId);
+    if (cached) {
+      const sessionMap = deserializeFromCache(cached.sessions);
+      setAllSessions(sessionMap);
+      // Reconstruct project ID map: all cached sessions belong to current project
+      const projectIdMap = new Map<string, string | null>();
+      for (const id of sessionMap.keys()) {
+        projectIdMap.set(id, currentProjectId);
+      }
+      setAllSessionProjectIds(projectIdMap);
+      setCurrentSession(cached.currentSession);
+      setThreadId(cached.threadId);
+      setThreadTitle(cached.threadTitle);
+      setInitialized(true); // Show cached data immediately
+    }
+
     let cancelled = false;
     const init = async () => {
       try {
@@ -539,6 +682,44 @@ export function useCommandRoom() {
         sessionMap.set(producerSession.id, backendSessionToAgentSession(producerSession));
         projectIdMap.set(producerSession.id, producerSession.projectId ?? null);
 
+        // Merge: backend wins for most data, but preserve active progress
+        // messages with their toolCalls + logs from cache
+        const cached = loadCache(currentProjectId);
+        if (cached) {
+          const cachedMap = deserializeFromCache(cached.sessions);
+          for (const [id, backendSession] of sessionMap) {
+            const cachedSession = cachedMap.get(id);
+            if (cachedSession && backendSession.status !== "done" && backendSession.status !== "completed") {
+              // Session still active — preserve cached progress messages
+              const cachedProgressMsgs = cachedSession.messages.filter((m) => m.type === "progress");
+              if (cachedProgressMsgs.length > 0) {
+                const mergedMessages = [...backendSession.messages];
+                for (const pm of cachedProgressMsgs) {
+                  const existingIdx = mergedMessages.findIndex((m) => m.id === pm.id);
+                  if (existingIdx === -1) {
+                    // Cached progress not in backend — append it
+                    mergedMessages.push(pm);
+                  } else {
+                    // Backend has the progress msg but without toolCalls/logs
+                    // (they're frontend-only state). Merge them in.
+                    const existing = mergedMessages[existingIdx];
+                    mergedMessages[existingIdx] = {
+                      ...existing,
+                      toolCalls: pm.toolCalls?.length
+                        ? [...(pm.toolCalls ?? [])]
+                        : existing.toolCalls,
+                      logs: pm.logs?.length
+                        ? [...(pm.logs ?? [])]
+                        : existing.logs,
+                    };
+                  }
+                }
+                sessionMap.set(id, { ...backendSession, messages: mergedMessages });
+              }
+            }
+          }
+        }
+
         setAllSessions(sessionMap);
         setAllSessionProjectIds(projectIdMap);
         setCurrentSession(producerSession.id);
@@ -547,6 +728,7 @@ export function useCommandRoom() {
       } catch (error) {
         if (cancelled) return;
         console.error("Failed to fetch chat sessions:", error);
+        // If API fails and we have no cached data, we're already initialized with empty state
       } finally {
         if (!cancelled) setInitialized(true);
       }
@@ -557,6 +739,36 @@ export function useCommandRoom() {
       cancelled = true;
     };
   }, [currentProjectId]);
+
+  // Debounced cache save — serialize all messages including progress with toolCalls + logs
+  useEffect(() => {
+    if (!currentProjectId || !initialized) return;
+
+    const timeout = setTimeout(() => {
+      saveCache(currentProjectId, {
+        version: CACHE_VERSION,
+        sessions: serializeForCache(sessions),
+        currentSession,
+        threadId,
+        threadTitle,
+        cachedAt: new Date().toISOString(),
+      });
+    }, 500);
+
+    return () => {
+      clearTimeout(timeout);
+      // Flush latest state on unmount / navigation (Next.js client-side nav
+      // doesn't fire beforeunload, so we save via ref in cleanup)
+      saveCache(currentProjectId, {
+        version: CACHE_VERSION,
+        sessions: serializeForCache(latestSessionsRef.current),
+        currentSession: currentSessionRef.current,
+        threadId,
+        threadTitle,
+        cachedAt: new Date().toISOString(),
+      });
+    };
+  }, [sessions, currentSession, threadId, threadTitle, currentProjectId, initialized]);
 
   const addSessionMessage = useCallback((sessionRole: string, msg: Omit<ChatMessage, "id" | "timestamp">) => {
     setAllSessions((prev) => {
@@ -850,6 +1062,10 @@ export function useCommandRoom() {
             }
             return next;
           });
+          // Clear localStorage cache when chat is cleared
+          if (currentProjectId) {
+            clearCache(currentProjectId);
+          }
           addSessionMessage(targetSession, { type: "system", sender: "SYSTEM", content: "Chat cleared." });
           return;
         }
