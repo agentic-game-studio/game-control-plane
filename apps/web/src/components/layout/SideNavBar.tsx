@@ -6,6 +6,15 @@ import { useState, useEffect } from "react";
 import { apiFetch } from "@/lib/api";
 import type { DashboardData } from "@game-studio/types";
 
+/** Hidden from sidebar only; pages remain reachable by URL */
+const SIDEBAR_HIDDEN_HREFS = new Set([
+  "/agents",
+  "/skills",
+  "/teams",
+  "/gates",
+  "/sessions",
+]);
+
 const navItems = [
   { href: "/dashboard", icon: "dashboard", label: "Dashboard", fill: false },
   { href: "/chat", icon: "chat", label: "Comms", fill: false },
@@ -53,7 +62,7 @@ export default function SideNavBar() {
 
       {/* Navigation Items */}
       <div className="flex-1 overflow-y-auto py-4">
-        {navItems.map((item) => {
+        {navItems.filter((item) => !SIDEBAR_HIDDEN_HREFS.has(item.href)).map((item) => {
           const isActive = pathname === item.href || pathname?.startsWith(item.href + "/");
           return (
             <Link

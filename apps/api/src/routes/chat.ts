@@ -10,6 +10,7 @@ import { getAgentSystemPrompt } from "../prompts/agent-prompt-loader.js";
 import type { WSEvent } from "@game-studio/types";
 import { broadcast } from "../services/websocket.js";
 import { startWorkflow, advanceStage, completeWorkflow, cleanupWorkflow, getWorkflow, createQuestTicket, moveQuestTicket } from "../services/quest-bridge.js";
+import { triggerVerification } from "../services/verification-service.js";
 import { getOrCreateGodotMCPService, removeGodotMCPService, launchGodotEditor, type GodotMCPServiceOptions } from "../services/godot-mcp-service.js";
 import { logger } from "../utils/logger.js";
 import { loadConfig } from "../config.js";
@@ -196,7 +197,11 @@ async function loadChatState(): Promise<ChatState> {
     // R5: Filter out stale progress messages + hydrate extended fields
     for (const [key, s] of Object.entries(state.sessions)) {
       const session = s as ExtendedChatSession;
-      session.messages = session.messages.filter((m) => m.type !== "progress");
+      // Only filter progress for completed/done sessions (crash recovery cleanup).
+      // Keep progress for active sessions so they can resume with accumulated toolCalls.
+      if (session.status === "completed" || session.status === "done") {
+        session.messages = session.messages.filter((m) => m.type !== "progress");
+      }
       // Hydrate fields that may be missing from older persisted sessions
       if (!session.conversationHistory) session.conversationHistory = [];
       if (!session.fileOperations) session.fileOperations = [];
@@ -769,8 +774,11 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
     } as WSEvent);
 
     // Remove the progress placeholder before adding the real response
+    // Capture toolCalls first so they survive into the assistant message
     const progressIndex = session.messages.findIndex((m) => m.id === progressMsgId);
+    let progressToolCalls: ChatMessage["toolCalls"] = undefined;
     if (progressIndex !== -1) {
+      progressToolCalls = session.messages[progressIndex].toolCalls;
       session.messages.splice(progressIndex, 1);
     }
 
@@ -826,11 +834,16 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
       timestamp: new Date().toISOString(),
       showActions: false,
       progress: 100,
-      toolCalls: result.toolCalls?.map((tc) => ({
-        tool: tc.name,
-        args: tc.input,
-        status: "success",
-      })),
+      toolCalls: (result.toolCalls?.length || progressToolCalls?.length)
+        ? [
+            ...(progressToolCalls ?? []),
+            ...(result.toolCalls?.map((tc) => ({
+              tool: tc.name,
+              args: tc.input,
+              status: "success" as const,
+            })) ?? []),
+          ]
+        : undefined,
       question: questionData ?? undefined,
       planPhases: planPhases ?? undefined,
     };
@@ -1025,9 +1038,10 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
 
     // Quest Bridge: create ticket for spawned agent task
     let ticketId: string | undefined;
+    let agentTicket: import("@game-studio/types").Ticket | undefined;
     if (task) {
-      const ticket = await createQuestTicket(sessionId, task.slice(0, 80), agentRole, task, "AGENT", "spawn");
-      ticketId = ticket.id;
+      agentTicket = await createQuestTicket(sessionId, task.slice(0, 80), agentRole, task, "AGENT", "spawn");
+      ticketId = agentTicket.id;
       await moveQuestTicket(ticketId, "in_progress", agentRole);
     }
 
@@ -1059,9 +1073,13 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
         logger.warn({ event: "spawn_empty_content", agentRole, sessionId }, `Agent ${agentRole} returned empty content`);
       }
 
-      // Remove progress placeholder
+      // Remove progress placeholder, preserving toolCalls
       const idx = newSession.messages.findIndex((m) => m.id === progressMsgId);
-      if (idx !== -1) newSession.messages.splice(idx, 1);
+      let spawnProgressToolCalls: ChatMessage["toolCalls"] = undefined;
+      if (idx !== -1) {
+        spawnProgressToolCalls = newSession.messages[idx].toolCalls;
+        newSession.messages.splice(idx, 1);
+      }
 
       // Use placeholder if content is empty
       const effectiveContent = (result.content && result.content.trim() !== "")
@@ -1076,11 +1094,16 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
         timestamp: new Date().toISOString(),
         showActions: true,
         progress: 100,
-        toolCalls: result.toolCalls?.map((tc) => ({
-          tool: tc.name,
-          args: tc.input,
-          status: "success",
-        })),
+        toolCalls: (result.toolCalls?.length || spawnProgressToolCalls?.length)
+          ? [
+              ...(spawnProgressToolCalls ?? []),
+              ...(result.toolCalls?.map((tc) => ({
+                tool: tc.name,
+                args: tc.input,
+                status: "success" as const,
+              })) ?? []),
+            ]
+          : undefined,
       };
 
       newSession.messages.push(responseMessage);
@@ -1124,9 +1147,12 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
         },
       } as WSEvent);
 
-      // Quest Bridge: move ticket to completed
+      // Quest Bridge: move ticket to verify for auto-verification
       if (ticketId) {
-        await moveQuestTicket(ticketId, "completed", agentRole);
+        await moveQuestTicket(ticketId, "qa", agentRole);
+        if (agentTicket) {
+          triggerVerification(agentTicket, result.content);
+        }
       }
     } catch (err: unknown) {
       const error = err as Error;

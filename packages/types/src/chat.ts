@@ -83,6 +83,7 @@ export interface ChatMessage {
   codeBlock?: CodeBlock;
   diffBlocks?: DiffBlock[];
   toolCalls?: ToolCall[];
+  logs?: string[];
   thinking?: string;
   navigate?: NavigateAction;
   images?: string[];
