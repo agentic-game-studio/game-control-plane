@@ -1,0 +1,182 @@
+# Asset Generation Presets
+# -----------------------
+# Batch-generate game assets via: python asset-pipeline.py --presets presets.yaml
+# Each entry maps to AssetPreset fields.
+# Reference: AssetType = "3d" | "2d" | "vfx" | "audio" | "texture"
+#            AssetCategory = "prop" | "character" | "env" | "weapon" | "ui" | "tex" | "sfx" | "music"
+
+presets:
+  # ── UI Icons ──────────────────────────────────────────────
+  - name: "health-potion"
+    prompt: >
+      Game asset design, stylized magic health potion bottle,
+      red glowing liquid inside, cork stopper, heart motif,
+      clean vector art style, thick outlines, centered,
+      flat white background, vibrant colors, UI friendly.
+    type: "2d"
+    category: "ui"
+    width: 512
+    height: 512
+    steps: 4
+    remove_bg: true
+    tags: ["potion", "health", "consumable", "icon"]
+
+  - name: "mana-potion"
+    prompt: >
+      Game asset design, stylized magic mana potion bottle,
+      blue glowing liquid inside, crystal stopper, star motif,
+      clean vector art style, thick outlines, centered,
+      flat white background, vibrant colors, UI friendly.
+    type: "2d"
+    category: "ui"
+    width: 512
+    height: 512
+    steps: 4
+    remove_bg: true
+    tags: ["potion", "mana", "consumable", "icon"]
+
+  - name: "gold-coin"
+    prompt: >
+      Game asset design, single gold coin, fantasy RPG style,
+      shiny metallic surface, embossed star on face,
+      clean vector art style, thick outlines, centered,
+      flat white background, vibrant colors, UI friendly.
+    type: "2d"
+    category: "ui"
+    width: 256
+    height: 256
+    steps: 4
+    remove_bg: true
+    tags: ["currency", "gold", "icon"]
+
+  # ── Characters ────────────────────────────────────────────
+  - name: "goblin-warrior-spritesheet"
+    prompt: >
+      Character sprite sheet, 2D platformer pixel art style,
+      tiny goblin warrior, walk cycle animation, multiple frames in a row,
+      front view, side view, back view, clear grid layout,
+      flat white background, vibrant pixel colors.
+    type: "2d"
+    category: "character"
+    width: 1024
+    height: 560
+    steps: 4
+    remove_bg: true
+    sprite_sheet: true
+    sprite_cols: 5
+    sprite_rows: 2
+    tags: ["goblin", "enemy", "warrior", "spritesheet", "platformer"]
+
+  - name: "player-character-idle"
+    prompt: >
+      Character sprite, 2D platformer style, young knight hero,
+      standing idle pose, side view, small cape, sword on back,
+      clean outlines, centered in frame,
+      flat white background, vibrant colors.
+    type: "2d"
+    category: "character"
+    width: 256
+    height: 256
+    steps: 4
+    remove_bg: true
+    grid_size: 128
+    tags: ["player", "knight", "hero", "idle"]
+
+  # ── Environment Textures ──────────────────────────────────
+  - name: "cobblestone-path"
+    prompt: >
+      Game texture design, seamless rough grey cobblestone pathway,
+      moss between stones, top-down view, evenly distributed flat lighting,
+      detailed texture, no shadows, 4k.
+    type: "texture"
+    category: "tex"
+    width: 1024
+    height: 1024
+    steps: 4
+    remove_bg: false
+    tags: ["cobblestone", "path", "ground", "seamless", "tileable"]
+
+  - name: "grass-tile"
+    prompt: >
+      Game texture design, seamless lush green grass tile,
+      top-down view, small flowers scattered, flat lighting,
+      detailed texture, no shadows, 4k.
+    type: "texture"
+    category: "tex"
+    width: 512
+    height: 512
+    steps: 4
+    remove_bg: false
+    tags: ["grass", "ground", "seamless", "tileable"]
+
+  - name: "stone-wall"
+    prompt: >
+      Game texture design, seamless dark stone brick wall,
+      mortar between bricks, side view, dungeon style,
+      detailed texture, no shadows, 4k.
+    type: "texture"
+    category: "tex"
+    width: 512
+    height: 512
+    steps: 4
+    remove_bg: false
+    tags: ["wall", "stone", "dungeon", "seamless", "tileable"]
+
+  # ── Props ─────────────────────────────────────────────────
+  - name: "treasure-chest"
+    prompt: >
+      Game asset design, fantasy treasure chest, wooden with gold trim,
+      closed lid with lock, slightly open revealing gold glow,
+      clean vector art style, thick outlines, centered,
+      flat white background, vibrant colors.
+    type: "2d"
+    category: "prop"
+    width: 256
+    height: 256
+    steps: 4
+    remove_bg: true
+    grid_size: 128
+    tags: ["chest", "treasure", "loot", "interactive"]
+
+  - name: "wooden-door"
+    prompt: >
+      Game asset design, medieval wooden door with iron hinges,
+      arched top, planks with metal studs,
+      clean vector art style, thick outlines, centered,
+      flat white background, vibrant colors.
+    type: "2d"
+    category: "prop"
+    width: 256
+    height: 512
+    steps: 4
+    remove_bg: true
+    tags: ["door", "entrance", "interactive", "medieval"]
+
+  # ── Weapons ───────────────────────────────────────────────
+  - name: "iron-sword"
+    prompt: >
+      Game asset design, fantasy iron sword, straight blade,
+      leather-wrapped handle, simple crossguard,
+      clean vector art style, thick outlines, centered diagonal,
+      flat white background, vibrant colors.
+    type: "2d"
+    category: "weapon"
+    width: 256
+    height: 256
+    steps: 4
+    remove_bg: true
+    tags: ["sword", "weapon", "melee", "iron"]
+
+  # ── VFX ───────────────────────────────────────────────────
+  - name: "heal-effect"
+    prompt: >
+      Game VFX sprite, healing magic effect, green and golden sparkles,
+      circular burst pattern, floating hearts and crosses,
+      transparent background, glowing particles, centered.
+    type: "vfx"
+    category: "prop"
+    width: 256
+    height: 256
+    steps: 4
+    remove_bg: true
+    tags: ["vfx", "heal", "particles", "effect"]

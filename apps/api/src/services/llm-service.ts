@@ -13,8 +13,9 @@ import { loadConfig } from "../config.js";
 import { getAgentSystemPrompt, loadAgentPrompts } from "../prompts/agent-prompt-loader.js";
 import { callLLMWithTools, GAME_STUDIO_TOOLS, type LLMMessage, type ProgressCallback, type FileOperationCallback } from "../llm/zai-client.js";
 import { broadcast, broadcastSessionUpdate } from "./websocket.js";
+import { readData, writeData, broadcastEvent } from "./data-store.js";
 import { getZaiModel } from "../config/model-mapping.js";
-import type { WSEvent, AgentRole } from "@game-studio/types";
+import type { WSEvent, AgentRole, GameAsset, AssetsData, AssetGenerationMeta } from "@game-studio/types";
 import {
   GodotMCPService,
   getGodotMCPService,
@@ -427,6 +428,124 @@ async function executeTool(
           title,
           phases,
         });
+      }
+
+      case "GenerateAsset": {
+        const assetPrompt = input.prompt as string;
+        const assetName = input.name as string;
+        if (!assetPrompt || !assetName) return "Error: prompt and name are required";
+
+        logEntry(sessionId, "info", `[${agentRole}] Generating asset: ${assetName}`, agentRole);
+
+        const { execFile: execFileTool } = await import("node:child_process");
+        const { promisify: promisifyTool } = await import("node:util");
+        const execFileAsyncTool = promisifyTool(execFileTool);
+
+        // Resolve Python binary with pipeline dependencies (Pillow, rembg, etc.)
+        const PYTHON_BIN = process.env.PIPELINE_PYTHON ?? "/usr/local/bin/python3";
+
+        const config = loadConfig();
+        const scriptDir = path.resolve(process.cwd(), "..", "..", "scripts", "asset-pipeline");
+        const workspaceDir = path.resolve(config.WORKSPACE_DIR);
+        const outputDir = projectContext?.workspacePath
+          ? path.join(workspaceDir, projectContext.workspacePath, "assets")
+          : path.join(workspaceDir, "assets");
+
+        const genArgs = [
+          path.join(scriptDir, "asset-pipeline.py"),
+          "--prompt", assetPrompt,
+          "--name", assetName,
+          "--type", (input.type as string) ?? "2d",
+          "--category", (input.category as string) ?? "prop",
+          "--width", String(input.width ?? 512),
+          "--height", String(input.height ?? 512),
+          "--steps", String(input.steps ?? 4),
+          "--output-dir", outputDir,
+          "--workspace-dir", workspaceDir,
+        ];
+
+        if (input.seed) genArgs.push("--seed", String(input.seed));
+        if (input.removeBg === false) genArgs.push("--no-remove-bg");
+        if (input.negativePrompt) genArgs.push("--negative-prompt", input.negativePrompt as string);
+        if (input.gridSize) genArgs.push("--grid-size", String(input.gridSize));
+        if (input.spriteSheet) genArgs.push("--sprite-sheet");
+        if (input.spriteCols) genArgs.push("--sprite-cols", String(input.spriteCols));
+        if (input.spriteRows) genArgs.push("--sprite-rows", String(input.spriteRows));
+        const tags = input.tags as string[] | undefined;
+        if (tags?.length) genArgs.push("--tags", ...tags);
+
+        // Also handle batch mode via presets
+        if (input.presetsFile) {
+          genArgs.length = 0; // reset
+          genArgs.push(
+            path.join(scriptDir, "asset-pipeline.py"),
+            "--presets", input.presetsFile as string,
+            "--output-dir", outputDir,
+            "--workspace-dir", workspaceDir,
+          );
+        }
+
+        try {
+          const { stdout, stderr } = await execFileAsyncTool(PYTHON_BIN, genArgs, {
+            cwd: scriptDir,
+            timeout: 600_000,
+            maxBuffer: 10 * 1024 * 1024,
+          });
+
+          // Parse the manifest to get result details
+          const manifestPath = path.join(outputDir, "asset-manifest.json");
+          let manifestInfo = "";
+          const isBatch = !!input.presetsFile;
+          try {
+            const raw = await fs.readFile(manifestPath, "utf-8");
+            const manifest: Record<string, unknown>[] = JSON.parse(raw);
+            const entries = isBatch ? manifest : manifest.length > 0 ? [manifest[manifest.length - 1]] : [];
+
+            if (entries.length > 0) {
+              const data = await readData<AssetsData>("assets.json");
+              const existingIds = new Set(data.assets.map((a: GameAsset) => a.id));
+              const registered: string[] = [];
+
+              for (const entry of entries) {
+                if (existingIds.has(entry.id as string)) continue;
+                const newAsset: GameAsset = {
+                  id: entry.id as string,
+                  filename: entry.filename as string,
+                  type: entry.type as GameAsset["type"],
+                  category: entry.category as GameAsset["category"],
+                  sizeBytes: (entry.sizeBytes as number) ?? 0,
+                  tags: (entry.tags as string[]) ?? [],
+                  path: entry.path as string | undefined,
+                  rawPath: entry.rawPath as string | undefined,
+                  thumbnailPath: entry.thumbnailPath as string | undefined,
+                  generatedWith: entry.generatedWith as AssetGenerationMeta | undefined,
+                  createdAt: entry.createdAt as string,
+                  updatedAt: entry.updatedAt as string,
+                };
+                data.assets.push(newAsset);
+                existingIds.add(newAsset.id);
+                registered.push(newAsset.filename);
+                broadcastEvent({ type: "asset:created", asset: newAsset } as WSEvent);
+              }
+
+              if (registered.length > 0) {
+                await writeData("assets.json", data);
+                manifestInfo = isBatch
+                  ? `\nBatch generated ${registered.length} assets: ${registered.join(", ")}`
+                  : `\nGenerated: ${registered[0]} (${entries[0].type}/${entries[0].category})\nPath: ${entries[0].path}`;
+                manifestInfo += "\nRegistered in asset inventory with full generation metadata.";
+              }
+            }
+          } catch {
+            // manifest may not exist
+          }
+
+          logEntry(sessionId, "info", `[${agentRole}] Asset generated: ${assetName}`, agentRole);
+          return `Asset generation complete.${manifestInfo}\n\nLog:\n${stdout.slice(-500)}${stderr ? `\nStderr: ${stderr.slice(-200)}` : ""}`;
+        } catch (genError: unknown) {
+          const err = genError as { message?: string; stderr?: string };
+          return `Error: Asset generation failed: ${err.stderr || err.message}`;
+        }
       }
 
       default:

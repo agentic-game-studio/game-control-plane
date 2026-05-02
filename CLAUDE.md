@@ -34,11 +34,17 @@ game-control-plane/
 │   ├── skills/           # 67 skill definitions (9 team skills)
 │   ├── config/           # Zod schemas + GDD/ADR templates
 │   └── state/            # File-based session store
+├── scripts/
+│   └── asset-pipeline/   # AI asset generation pipeline (Python)
+│       ├── asset-pipeline.py  # 7-step pipeline: mflux → rembg → post-process → manifest
+│       └── presets.yaml       # 12 batch presets (UI, characters, textures, props, weapons, VFX)
 └── workspace/            # Gitignored — game development directory
     ├── design/gdd/       # Game Design Documents
     ├── docs/architecture/ # Architecture Decision Records
     ├── docs/narrative/   # Narrative documents (world lore, etc.)
-    └── production/        # Session state + logs
+    ├── production/        # Session state + logs
+    └── godot-test-1/     # Godot test project
+        └── assets/       # Generated assets (raw, processed, ui, character, prop, weapon, tex, thumbnails)
 ```
 
 ## Architecture
@@ -330,6 +336,27 @@ pnpm generate          # Both validations
 pnpm test:e2e          # Playwright E2E test suite (apps/web/e2e/)
 ```
 
+### Asset Pipeline (direct CLI)
+
+```bash
+# Single asset
+/usr/local/bin/python3 scripts/asset-pipeline/asset-pipeline.py \
+  --prompt "health potion" --name "health-potion" \
+  --type 2d --category ui --width 512 --height 512 \
+  --output-dir workspace/godot-test-1/assets \
+  --workspace-dir workspace/godot-test-1
+
+# Batch all 12 presets
+/usr/local/bin/python3 scripts/asset-pipeline/asset-pipeline.py \
+  --presets scripts/asset-pipeline/presets.yaml \
+  --output-dir workspace/godot-test-1/assets \
+  --workspace-dir workspace/godot-test-1
+
+# Dry-run preview
+/usr/local/bin/python3 scripts/asset-pipeline/asset-pipeline.py \
+  --presets scripts/asset-pipeline/presets.yaml --dry-run
+```
+
 ## Key Files
 
 - `apps/api/src/llm/zai-client.ts` — LLM client with tool loop, retry, pruning
@@ -344,7 +371,7 @@ pnpm test:e2e          # Playwright E2E test suite (apps/web/e2e/)
 - `apps/api/src/routes/documents.ts` — Document store routes
 - `apps/api/src/routes/dashboard.ts` — Projects CRUD with WebSocket events, Godot MCP auto-install, server setup endpoints
 - `apps/api/src/routes/tickets.ts` — Kanban board CRUD
-- `apps/api/src/routes/assets.ts` — Asset inventory + art bible CRUD
+- `apps/api/src/routes/assets.ts` — Asset inventory + art bible CRUD + generation pipeline (PYTHON_BIN, thumbnail serving, path traversal protection)
 - `apps/api/src/routes/settings.ts` — Config CRUD
 - `apps/api/src/routes/chat.ts` — Session management + diff API
 - `apps/api/src/utils/logger.ts` — Pino logger with console + file transport (pino, pino-pretty, pino-file-transport)
@@ -363,7 +390,169 @@ pnpm test:e2e          # Playwright E2E test suite (apps/web/e2e/)
 - `packages/types/src/api.ts` — WSEvent union type (all real-time event types)
 - `packages/types/src/document.ts` — DocumentEntry, DocumentDetail, GraphData types
 - `packages/types/src/chat.ts` — ChatMessage, ToolCall, DiffBlock types
+- `packages/types/src/assets.ts` — AssetType, AssetCategory, GameAsset, AssetGenerationMeta, ArtBibleConfig types
 - `packages/state/src/session-store.ts` — File-based session persistence
+- `scripts/asset-pipeline/asset-pipeline.py` — 7-step asset generation pipeline (mflux → rembg → post-process → manifest)
+- `scripts/asset-pipeline/presets.yaml` — 12 batch generation presets (UI, characters, textures, props, weapons, VFX)
+
+## Asset Generation Pipeline
+
+Automated game asset generation pipeline using local AI (FLUX.2 Klein on Apple Silicon via mflux), background removal (rembg), and Godot-ready post-processing.
+
+### Architecture
+
+```
+mflux-generate-flux2 (FLUX.2-klein-4b, MLX on Apple Silicon)
+  → Raw PNG (workspace/<project>/assets/raw/)
+    → rembg (U2-Net saliency, removes background)
+      → Processed PNG (assets/processed/)
+        → Post-processing (alpha-trim, grid-pad, sprite-sheet slice)
+          → Final asset (assets/<category>/)
+            → Thumbnail (assets/thumbnails/)
+            → Godot .import (Nearest filter for pixel art)
+            → asset-manifest.json (registered in inventory API)
+```
+
+### Pipeline Script
+
+**File**: `scripts/asset-pipeline/asset-pipeline.py` (729 lines, Python 3.12)
+
+7-step pipeline per asset:
+1. **Generate** — `mflux-generate-flux2` with prompt, dimensions, steps, seed
+2. **Remove background** — rembg (U2-Net) with PIL alpha-extraction fallback
+3. **Alpha-trim** — crop to content bounding box
+4. **Grid-pad** — center sprite within target tile size (e.g. 128x128)
+5. **Sprite-sheet slice** — smart bounding-box detection via alpha gaps, falls back to grid-based (cols/rows)
+6. **Thumbnail** — 128x128 centered on transparent canvas
+7. **Godot .import** — Nearest-neighbour filter override for pixel art
+
+### Usage
+
+```bash
+# Single asset
+python3 scripts/asset-pipeline/asset-pipeline.py \
+  --prompt "magic health potion bottle, red glowing liquid" \
+  --type 2d --category ui --width 512 --height 512 --steps 4 \
+  --output-dir workspace/godot-test-1/assets \
+  --workspace-dir workspace/godot-test-1
+
+# Batch from presets YAML (12 presets defined)
+python3 scripts/asset-pipeline/asset-pipeline.py \
+  --presets scripts/asset-pipeline/presets.yaml \
+  --output-dir workspace/godot-test-1/assets \
+  --workspace-dir workspace/godot-test-1
+
+# Dry-run (preview without executing)
+python3 scripts/asset-pipeline/asset-pipeline.py \
+  --presets scripts/asset-pipeline/presets.yaml --dry-run
+
+# Via API
+curl -X POST http://localhost:3001/api/assets/generate \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: $API_KEY" \
+  -d '{"prompt":"health potion","name":"health-potion","type":"2d","category":"ui","workspacePath":"godot-test-1"}'
+
+# Via API — batch from presets
+curl -X POST http://localhost:3001/api/assets/generate \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: $API_KEY" \
+  -d '{"presetsFile":"presets.yaml","workspacePath":"godot-test-1"}'
+```
+
+### Presets (12 batch presets)
+
+Defined in `scripts/asset-pipeline/presets.yaml`:
+
+| Category | Presets |
+|----------|---------|
+| UI Icons | health-potion, mana-potion, gold-coin |
+| Characters | goblin-warrior-spritesheet, player-character-idle |
+| Textures | cobblestone-path, grass-tile, stone-wall |
+| Props | treasure-chest, wooden-door |
+| Weapons | iron-sword |
+| VFX | heal-effect |
+
+Each preset defines: name, prompt, type, category, dimensions, steps, remove_bg, tags, and optional sprite_sheet/grid_size settings.
+
+### Directory Structure (output)
+
+```
+workspace/<project>/assets/
+├── raw/              # Original AI-generated PNGs
+├── processed/        # Background-removed PNGs
+├── ui/               # UI icon assets (final)
+├── character/        # Character sprites + frame dirs
+├── prop/             # Props (treasure chest, door, etc.)
+├── weapon/           # Weapons (sword, etc.)
+├── tex/              # Seamless textures (no bg removal)
+├── thumbnails/       # 128x128 preview thumbnails
+└── asset-manifest.json  # Inventory registry (merged on each run)
+```
+
+### API Integration
+
+**Backend routes** (`apps/api/src/routes/assets.ts`):
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/assets` | GET | List all assets (reads manifest from workspace) |
+| `/api/assets/generate` | POST | Trigger single or batch generation |
+| `/api/assets/generate/presets` | GET | List available presets from presets.yaml |
+| `/api/assets/:id` | GET/DELETE | Get or delete a specific asset |
+| `/api/assets/:id/thumbnail` | GET | Serve thumbnail image (auth bypass for `<img>` tags) |
+| `/api/assets/art-bible` | GET/PATCH | Art bible configuration |
+
+**Generation request body** (`GenerateAssetRequest`):
+- Single: `{ prompt, name, type?, category?, width?, height?, steps?, removeBg?, workspacePath }`
+- Batch: `{ presetsFile: "presets.yaml", workspacePath }`
+
+**PYTHON_BIN**: Must use `/usr/local/bin/python3` (Python.org 3.12 with Pillow, rembg). Controlled by `PIPELINE_PYTHON` env var or hardcoded default. Do NOT use `/opt/homebrew/bin/python3` (Homebrew 3.14, no packages).
+
+**Thumbnail auth bypass**: Routes matching `/api/assets/{id}/thumbnail` skip auth middleware because `<img>` tags cannot send `x-api-key` headers. Thumbnails are low-sensitivity derived images.
+
+**Path traversal protection**: Thumbnail route validates `thumbAbsPath.startsWith(workspaceDir + "/")` to prevent prefix-based directory escape (e.g. `/workspace-evil` matching `/workspace`).
+
+### TypeScript Types
+
+**File**: `packages/types/src/assets.ts`
+
+- `AssetType`: `"3d" | "2d" | "vfx" | "audio" | "texture"`
+- `AssetCategory`: `"prop" | "character" | "env" | "weapon" | "ui" | "tex" | "sfx" | "music"`
+- `AssetGenerationMeta`: tool, model, prompt, width, height, steps, seed?, negativePrompt?
+- `GameAsset`: id, filename, type, category, sizeBytes, tags, createdAt, updatedAt, path?, rawPath?, thumbnailPath?, generatedWith?
+- `ArtBibleConfig`: baseTextureRes, maxPolycount, enforcePalette, strictOrthographic, snapToGrid, gridSize
+
+### LLM Tool Integration
+
+The `GenerateAsset` tool in `apps/api/src/services/llm-service.ts` allows the Producer agent to generate assets via natural language:
+
+- Agent calls `GenerateAsset` with prompt + parameters
+- Backend invokes the pipeline script with correct Python binary and workspace paths
+- Manifest paths stored workspace-relative via `--workspace-dir` flag
+- Result includes generation metadata, file paths, and elapsed time
+
+### WebSocket Events
+
+Pipeline broadcasts these events via WebSocket:
+- `asset:generated` — New asset created (includes manifest entry)
+- `asset:registered` — Asset registered in inventory
+- `asset:deleted` — Asset removed
+
+### Key Implementation Details
+
+- **Model**: `flux2-klein-4b` only (4B parameters, 15GB cached at `~/.cache/huggingface/`). The 9B model is gated and returns 403 even with HF_TOKEN — do not use.
+- **Binary**: `mflux-generate-flux2` at `~/.local/bin/`
+- **Sprite-sheet slicing**: Smart alpha-gap detection tries to find natural content boundaries first. Falls back to uniform grid (cols x rows) if no gaps found.
+- **Manifest merging**: Each pipeline run merges new entries into existing `asset-manifest.json` by ID dedup.
+- **Godot import**: Auto-generates `.import` files with `texture_filter/s=true` (Nearest filter) so pixel art stays crisp.
+
+### Known Limitations / Future Work
+
+- `PYTHON_BIN` duplicated between `assets.ts` and `llm-service.ts` — should extract to shared config
+- No file locking on manifest read/write (potential race condition with concurrent generations)
+- `--manifest-only` flag in CLI is dead code (declared but not implemented)
+- No model selector in GenerateAssetModal UI
+- No concurrent generation queue (parallel requests may conflict on manifest)
 
 ## Godot MCP Pro Integration
 

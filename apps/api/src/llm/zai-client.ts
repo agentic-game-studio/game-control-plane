@@ -691,6 +691,37 @@ export const GAME_STUDIO_TOOLS: LLMTool[] = [
       required: ["planId", "title", "phases"],
     },
   },
+  {
+    name: "GenerateAsset",
+    description:
+      "Generate a 2D game asset image using AI (mflux/FLUX2 Klein on Apple Silicon). " +
+      "The pipeline: AI image generation -> background removal -> post-processing -> Godot-ready PNG. " +
+      "Returns the file path and auto-registers in the asset inventory. " +
+      "Use for: UI icons, character sprites, props, textures, VFX sprites. " +
+      "For sprite sheets, set spriteSheet=true with cols/rows.",
+    input_schema: {
+      type: "object",
+      properties: {
+        prompt: { type: "string", description: "Detailed image generation prompt describing the game asset" },
+        name: { type: "string", description: "Asset name, slug-safe (e.g. 'health-potion')" },
+        type: { type: "string", description: "Asset type: 2d, 3d, vfx, audio, texture (default: 2d)" },
+        category: { type: "string", description: "Category: prop, character, env, weapon, ui, tex, sfx, music (default: prop)" },
+        width: { type: "number", description: "Image width in pixels (default: 512)" },
+        height: { type: "number", description: "Image height in pixels (default: 512)" },
+        steps: { type: "number", description: "Generation steps, higher=more quality (default: 4)" },
+        seed: { type: "number", description: "Random seed for reproducibility (optional)" },
+        removeBg: { type: "boolean", description: "Remove background for transparent PNG (default: true)" },
+        negativePrompt: { type: "string", description: "What to avoid in generation (optional)" },
+        gridSize: { type: "number", description: "Pad to grid tile size e.g. 128 for 128x128 (optional)" },
+        spriteSheet: { type: "boolean", description: "Enable sprite-sheet auto-slicing (default: false)" },
+        spriteCols: { type: "number", description: "Columns in sprite sheet (default: 1)" },
+        spriteRows: { type: "number", description: "Rows in sprite sheet (default: 1)" },
+        tags: { type: "array", items: { type: "string" }, description: "Tags for asset inventory" },
+        presetsFile: { type: "string", description: "YAML presets filename for batch generation (e.g. 'presets.yaml')" },
+      },
+      required: ["prompt", "name"],
+    },
+  },
 ];
 
 /** Pre-load agent prompts on module init */
