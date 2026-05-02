@@ -86,14 +86,28 @@ export interface AgentSession {
   fileOps?: FileOp[];
 }
 
+export interface SubagentInfo {
+  id: string;
+  role: string;
+  parentSessionId: string;
+  ticketId: string;
+  task: string;
+  status: "active" | "completed" | "failed";
+  output?: string;
+  error?: string;
+  spawnedAt: string;
+}
+
 /* ─── localStorage Cache ─── */
 
-const CACHE_VERSION = 1;
+const CACHE_VERSION = 2;
 const CACHE_KEY_PREFIX = "chat-cache-v";
 
 interface CachedChatData {
   version: number;
   sessions: Array<[string, AgentSession]>;
+  /** Task-tool subagents — no chat session row; persisted so sidebar survives navigation */
+  subagents?: Array<[string, SubagentInfo]>;
   currentSession: string;
   threadId: string;
   threadTitle: string;
@@ -149,6 +163,19 @@ function deserializeFromCache(entries: Array<[string, AgentSession]>): Map<strin
   return new Map(entries);
 }
 
+function subagentsForProjectParents(
+  subagents: Map<string, SubagentInfo>,
+  allowedParentSessionIds: Set<string>
+): Array<[string, SubagentInfo]> {
+  const out: Array<[string, SubagentInfo]> = [];
+  for (const [id, sa] of subagents) {
+    if (allowedParentSessionIds.has(sa.parentSessionId)) {
+      out.push([id, sa]);
+    }
+  }
+  return out;
+}
+
 const GREETINGS: Record<string, string> = {
   "creative-director": "I'm the Creative Director. I oversee the artistic vision and ensure all creative elements align. What would you like to explore?",
   "technical-director": "Technical Director online. I manage the technical architecture and engineering pipeline. What system needs attention?",
@@ -181,18 +208,120 @@ function isProducerSession(id: string): boolean {
   return id === "producer" || id.startsWith("producer-");
 }
 
+function longerText(a?: string, b?: string): string | undefined {
+  const al = a?.length ?? 0;
+  const bl = b?.length ?? 0;
+  if (bl > al) return b;
+  return a ?? b;
+}
+
+function pickLongerArray<T>(a?: T[], b?: T[]): T[] | undefined {
+  const la = a?.length ?? 0;
+  const lb = b?.length ?? 0;
+  if (lb > la) return b;
+  return a ?? b;
+}
+
+/** Same logical message from API + cache — keep streaming fields from whichever copy is richer. */
+function mergeRicherChatMessage(server: ChatMessage, cached: ChatMessage): ChatMessage {
+  if (server.id !== cached.id || server.type !== cached.type) {
+    return new Date(server.timestamp).getTime() >= new Date(cached.timestamp).getTime() ? server : cached;
+  }
+  const out: ChatMessage = { ...server };
+  if (server.type === "progress") {
+    out.thinking = longerText(server.thinking, cached.thinking);
+    out.content = longerText(server.content, cached.content) ?? out.content;
+    out.progress = Math.max(server.progress ?? 0, cached.progress ?? 0);
+    out.toolCalls = pickLongerArray(server.toolCalls, cached.toolCalls) ?? out.toolCalls;
+    out.logs = pickLongerArray(server.logs, cached.logs) ?? out.logs;
+    out.timestamp =
+      new Date(server.timestamp) >= new Date(cached.timestamp) ? server.timestamp : cached.timestamp;
+    return out;
+  }
+  out.content = longerText(server.content, cached.content) ?? out.content;
+  out.timestamp =
+    new Date(server.timestamp) >= new Date(cached.timestamp) ? server.timestamp : cached.timestamp;
+  return out;
+}
+
+/** Optimistic UI uses uid(); API uses msg-<uuid> — collapse same logical user/system/welcome line after merge. */
+function semanticDedupeKey(m: ChatMessage): string | null {
+  if (m.type === "user" || m.type === "system" || m.type === "welcome") {
+    return `${m.type}:${m.sender}:${(m.content ?? "").trim()}`;
+  }
+  return null;
+}
+
+function preferDuplicateByBackendSource(a: ChatMessage, b: ChatMessage, backendIds: Set<string>): ChatMessage {
+  const aBack = backendIds.has(a.id);
+  const bBack = backendIds.has(b.id);
+  if (aBack && !bBack) return a;
+  if (!aBack && bBack) return b;
+  return new Date(a.timestamp).getTime() <= new Date(b.timestamp).getTime() ? a : b;
+}
+
+function dedupeSemanticDuplicateMessages(sorted: ChatMessage[], backendIds: Set<string>): ChatMessage[] {
+  const keyToWinner = new Map<string, ChatMessage>();
+  for (const m of sorted) {
+    const k = semanticDedupeKey(m);
+    if (!k) continue;
+    const cur = keyToWinner.get(k);
+    keyToWinner.set(k, cur ? preferDuplicateByBackendSource(cur, m, backendIds) : m);
+  }
+
+  const out: ChatMessage[] = [];
+  const emitted = new Set<string>();
+
+  for (const m of sorted) {
+    const k = semanticDedupeKey(m);
+    if (!k) {
+      out.push(m);
+      continue;
+    }
+    const win = keyToWinner.get(k)!;
+    if (m.id !== win.id) continue;
+    if (emitted.has(k)) continue;
+    emitted.add(k);
+    out.push(win);
+  }
+  return out;
+}
+
+/**
+ * When returning to Comms after navigation, API payloads can lag behind localStorage
+ * (thinking, logs, system lines not persisted yet). Union by message id and sort by time.
+ */
+function mergeCachedMessagesIntoBackendSession(
+  backendMessages: ChatMessage[],
+  cachedMessages: ChatMessage[]
+): ChatMessage[] {
+  const backendIds = new Set(backendMessages.map((m) => m.id));
+  const byId = new Map<string, ChatMessage>();
+  for (const m of backendMessages) {
+    byId.set(m.id, { ...m });
+  }
+  for (const cm of cachedMessages) {
+    const existing = byId.get(cm.id);
+    byId.set(cm.id, existing ? mergeRicherChatMessage(existing, cm) : { ...cm });
+  }
+  const sorted = [...byId.values()].sort(
+    (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+  );
+  return dedupeSemanticDuplicateMessages(sorted, backendIds);
+}
+
 function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, producerSessionId: string, recentApiMessages?: Set<string>): WSHandlerResult {
   const messages: WSHandlerResult["messages"] = [];
   switch (event.type) {
     case "agent:spawned": {
-      const role = event.agent;
-      if (sessions.has(role)) return { sessions: null, messages };
+      const sid = event.sessionId;
+      if (sessions.has(sid)) return { sessions: null, messages };
       const next = new Map(sessions);
-      next.set(role, {
-        role,
+      next.set(sid, {
+        role: event.agent,
         messages: [
-          { id: uid(), type: "system", sender: "SYSTEM", content: `${role.toUpperCase()} session initialized.`, timestamp: timestamp() },
-          { id: uid(), type: "progress", sender: role, content: "Initializing...", timestamp: timestamp(), progress: 0 },
+          { id: uid(), type: "system", sender: "SYSTEM", content: `${event.agent.toUpperCase()} session initialized.`, timestamp: timestamp() },
+          { id: uid(), type: "progress", sender: event.agent, content: "Initializing...", timestamp: timestamp(), progress: 0 },
         ],
         status: "active",
         progress: 0,
@@ -201,6 +330,20 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, prod
       });
       // Producer "<role> spawned at ..." is appended by backend /spawn
       // handler and arrives via chat:message — no local push here.
+      return { sessions: next, messages };
+    }
+    case "chat:session:created": {
+      const sid = event.session.id;
+      if (sessions.has(sid)) return { sessions: null, messages };
+      const next = new Map(sessions);
+      next.set(sid, {
+        role: event.session.role,
+        messages: (event.session.messages as ChatMessage[]) ?? [],
+        status: (event.session.status as "active" | "done") ?? "active",
+        progress: event.session.progress ?? 0,
+        spawnedAt: event.session.spawnedAt ?? timestamp(),
+        fileOps: [],
+      });
       return { sessions: next, messages };
     }
     case "agent:completed": {
@@ -588,12 +731,14 @@ export function useCommandRoom() {
   const [threadTitle, setThreadTitle] = useState("Board Room");
   const [initialized, setInitialized] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [subagents, setSubagents] = useState<Map<string, SubagentInfo>>(new Map());
   const lastSpawnedRef = useRef<string | null>(null);
   const activityLogRef = useRef<string[]>([]);
   const addSessionMessageRef = useRef<(role: string, msg: Omit<ChatMessage, "id" | "timestamp">) => void | undefined>(undefined);
   const recentApiMessagesRef = useRef<Set<string>>(new Set());
   // Ref for latest sessions to flush cache on unmount / navigation
   const latestSessionsRef = useRef<Map<string, AgentSession>>(new Map());
+  const latestSubagentsRef = useRef<Map<string, SubagentInfo>>(new Map());
   // F2: Ref for currentSession to avoid stale closures in async callbacks
   const currentSessionRef = useRef(currentSession);
   currentSessionRef.current = currentSession;
@@ -620,14 +765,17 @@ export function useCommandRoom() {
     return out;
   }, [allSessions, allSessionProjectIds, currentProjectId, producerSessionId]);
   latestSessionsRef.current = sessions;
+  latestSubagentsRef.current = subagents;
 
   // Flush cache immediately on page unload to avoid losing recent messages
   useEffect(() => {
     if (!currentProjectId) return;
     const handler = () => {
+      const sess = latestSessionsRef.current;
       saveCache(currentProjectId, {
         version: CACHE_VERSION,
-        sessions: serializeForCache(sessions),
+        sessions: serializeForCache(sess),
+        subagents: subagentsForProjectParents(latestSubagentsRef.current, new Set(sess.keys())),
         currentSession,
         threadId,
         threadTitle,
@@ -660,6 +808,10 @@ export function useCommandRoom() {
       setCurrentSession(cached.currentSession);
       setThreadId(cached.threadId);
       setThreadTitle(cached.threadTitle);
+      if (cached.subagents?.length) {
+        const allowedParents = new Set(sessionMap.keys());
+        setSubagents(new Map(subagentsForProjectParents(new Map(cached.subagents), allowedParents)));
+      }
       setInitialized(true); // Show cached data immediately
     }
 
@@ -682,49 +834,44 @@ export function useCommandRoom() {
         sessionMap.set(producerSession.id, backendSessionToAgentSession(producerSession));
         projectIdMap.set(producerSession.id, producerSession.projectId ?? null);
 
-        // Merge: backend wins for most data, but preserve active progress
-        // messages with their toolCalls + logs from cache
-        const cached = loadCache(currentProjectId);
-        if (cached) {
-          const cachedMap = deserializeFromCache(cached.sessions);
+        // Merge: for active sessions, union cached messages with API by id so streaming
+        // fields (thinking, logs, toolCalls) and lines not yet persisted survive navigation.
+        const cachedForMerge = loadCache(currentProjectId);
+        if (cachedForMerge) {
+          const cachedMap = deserializeFromCache(cachedForMerge.sessions);
           for (const [id, backendSession] of sessionMap) {
             const cachedSession = cachedMap.get(id);
             if (cachedSession && backendSession.status !== "done" && backendSession.status !== "completed") {
-              // Session still active — preserve cached progress messages
-              const cachedProgressMsgs = cachedSession.messages.filter((m) => m.type === "progress");
-              if (cachedProgressMsgs.length > 0) {
-                const mergedMessages = [...backendSession.messages];
-                for (const pm of cachedProgressMsgs) {
-                  const existingIdx = mergedMessages.findIndex((m) => m.id === pm.id);
-                  if (existingIdx === -1) {
-                    // Cached progress not in backend — append it
-                    mergedMessages.push(pm);
-                  } else {
-                    // Backend has the progress msg but without toolCalls/logs
-                    // (they're frontend-only state). Merge them in.
-                    const existing = mergedMessages[existingIdx];
-                    mergedMessages[existingIdx] = {
-                      ...existing,
-                      toolCalls: pm.toolCalls?.length
-                        ? [...(pm.toolCalls ?? [])]
-                        : existing.toolCalls,
-                      logs: pm.logs?.length
-                        ? [...(pm.logs ?? [])]
-                        : existing.logs,
-                    };
-                  }
-                }
-                sessionMap.set(id, { ...backendSession, messages: mergedMessages });
-              }
+              const mergedMessages = mergeCachedMessagesIntoBackendSession(
+                backendSession.messages,
+                cachedSession.messages
+              );
+              sessionMap.set(id, { ...backendSession, messages: mergedMessages });
             }
           }
         }
 
         setAllSessions(sessionMap);
         setAllSessionProjectIds(projectIdMap);
-        setCurrentSession(producerSession.id);
+        const restoredTab =
+          cachedForMerge?.currentSession && sessionMap.has(cachedForMerge.currentSession)
+            ? cachedForMerge.currentSession
+            : producerSession.id;
+        setCurrentSession(restoredTab);
         setThreadId(`#${Math.floor(Math.random() * 9000 + 1000)}`);
         setThreadTitle("BOARD_ROOM");
+
+        if (cachedForMerge?.subagents?.length) {
+          const allowedParents = new Set(sessionMap.keys());
+          const fromCache = subagentsForProjectParents(new Map(cachedForMerge.subagents), allowedParents);
+          setSubagents((prev) => {
+            const next = new Map(prev);
+            for (const [id, sa] of fromCache) {
+              if (!next.has(id)) next.set(id, sa);
+            }
+            return next;
+          });
+        }
       } catch (error) {
         if (cancelled) return;
         console.error("Failed to fetch chat sessions:", error);
@@ -748,6 +895,7 @@ export function useCommandRoom() {
       saveCache(currentProjectId, {
         version: CACHE_VERSION,
         sessions: serializeForCache(sessions),
+        subagents: subagentsForProjectParents(subagents, new Set(sessions.keys())),
         currentSession,
         threadId,
         threadTitle,
@@ -759,16 +907,18 @@ export function useCommandRoom() {
       clearTimeout(timeout);
       // Flush latest state on unmount / navigation (Next.js client-side nav
       // doesn't fire beforeunload, so we save via ref in cleanup)
+      const sess = latestSessionsRef.current;
       saveCache(currentProjectId, {
         version: CACHE_VERSION,
-        sessions: serializeForCache(latestSessionsRef.current),
+        sessions: serializeForCache(sess),
+        subagents: subagentsForProjectParents(latestSubagentsRef.current, new Set(sess.keys())),
         currentSession: currentSessionRef.current,
         threadId,
         threadTitle,
         cachedAt: new Date().toISOString(),
       });
     };
-  }, [sessions, currentSession, threadId, threadTitle, currentProjectId, initialized]);
+  }, [sessions, subagents, currentSession, threadId, threadTitle, currentProjectId, initialized]);
 
   const addSessionMessage = useCallback((sessionRole: string, msg: Omit<ChatMessage, "id" | "timestamp">) => {
     setAllSessions((prev) => {
@@ -799,6 +949,78 @@ export function useCommandRoom() {
 
   // WebSocket integration — use functional update to avoid stale closure
   const onWSEvent = useCallback((event: WSEvent) => {
+    // Specialist chat sessions — avoid brief filter gap before chat:session:created arrives
+    if (event.type === "agent:spawned") {
+      const pid = event.projectId;
+      if (pid) {
+        setAllSessionProjectIds((prev) => {
+          const next = new Map(prev);
+          next.set(event.sessionId, pid);
+          return next;
+        });
+      }
+    }
+
+    // Handle subagent events separately (they don't create full sessions)
+    switch (event.type) {
+      case "subagent:spawned": {
+        setSubagents((prev) => {
+          const next = new Map(prev);
+          next.set(event.ticketId, {
+            id: event.ticketId,
+            role: event.agentRole,
+            parentSessionId: event.parentSessionId,
+            ticketId: event.ticketId,
+            task: event.task,
+            status: "active",
+            spawnedAt: timestamp(),
+          });
+          return next;
+        });
+        break;
+      }
+      case "subagent:completed": {
+        setSubagents((prev) => {
+          const existing = prev.get(event.ticketId);
+          if (!existing) return prev;
+          const next = new Map(prev);
+          next.set(event.ticketId, {
+            ...existing,
+            status: "completed",
+            output: event.output,
+          });
+          return next;
+        });
+        break;
+      }
+      case "subagent:failed": {
+        setSubagents((prev) => {
+          const existing = prev.get(event.ticketId);
+          if (!existing) return prev;
+          const next = new Map(prev);
+          next.set(event.ticketId, {
+            ...existing,
+            status: "failed",
+            error: event.error,
+          });
+          return next;
+        });
+        break;
+      }
+    }
+
+    // Handle chat:session:created to update projectId mapping (for sessions created by other clients or after refresh)
+    if (event.type === "chat:session:created" && event.session?.id) {
+      const sid = event.session.id;
+      const pid = event.session.projectId ?? null;
+      setAllSessionProjectIds((prev) => {
+        if (prev.get(sid) === pid) return prev;
+        const next = new Map(prev);
+        next.set(sid, pid);
+        return next;
+      });
+    }
+
     setAllSessions((prevSessions) => {
       const updated = handleWSEvent(event, prevSessions, producerSessionIdRef.current, recentApiMessagesRef.current);
       // Process any messages that were generated by the handler
@@ -847,6 +1069,12 @@ export function useCommandRoom() {
         spawnedAt: timestamp(),
         fileOps: [],
       });
+      return next;
+    });
+    // Also map the new session to the current project so it passes the session filter
+    setAllSessionProjectIds((prev) => {
+      const next = new Map(prev);
+      next.set(r, projectId);
       return next;
     });
 
@@ -1267,6 +1495,38 @@ Agents: 3 active`,
     setCurrentSession((current) => (current === role ? producerSessionIdRef.current : current));
   }, []);
 
+  /** Close a director consultation session and forward summary to producer */
+  const closeConsultation = useCallback(async (sessionId: string, summary?: string) => {
+    try {
+      const result = await apiFetch<{ success: boolean; summary?: string }>(
+        `/api/chat/sessions/${sessionId}/close`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ summary }),
+        }
+      );
+
+      // Switch back to producer if this was the current session
+      // The WebSocket chat:session:deleted event will remove the session from the map
+      setCurrentSession((current) =>
+        current === sessionId ? producerSessionIdRef.current : current
+      );
+
+      return result;
+    } catch (err) {
+      // 404 = session already gone — treat as success
+      if (err instanceof Error && (err.message.includes("404") || err.message.includes("Session not found"))) {
+        setCurrentSession((current) =>
+          current === sessionId ? producerSessionIdRef.current : current
+        );
+        return { success: true, summary: "Already closed" };
+      }
+      console.error("Failed to close consultation:", err);
+      throw err;
+    }
+  }, []);
+
   // Derived state — memoized to avoid unnecessary re-renders
   const currentMessages = useMemo(() => sessions.get(currentSession)?.messages ?? [], [sessions, currentSession]);
   const totalProgress = useMemo(() => {
@@ -1276,8 +1536,18 @@ Agents: 3 active`,
       : 0;
   }, [sessions]);
 
+  const visibleSubagents = useMemo(() => {
+    const allowedParents = new Set(sessions.keys());
+    const out = new Map<string, SubagentInfo>();
+    for (const [id, sa] of subagents) {
+      if (allowedParents.has(sa.parentSessionId)) out.set(id, sa);
+    }
+    return out;
+  }, [subagents, sessions]);
+
   return {
     sessions,
+    subagents: visibleSubagents,
     currentSession,
     currentMessages,
     threadId,
@@ -1287,6 +1557,7 @@ Agents: 3 active`,
     selectSession: setCurrentSession,
     approveAgent,
     closeSession,
+    closeConsultation,
     initialized,
     connected,
     isLoading,

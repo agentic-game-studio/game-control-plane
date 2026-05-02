@@ -722,6 +722,28 @@ export const GAME_STUDIO_TOOLS: LLMTool[] = [
       required: ["prompt", "name"],
     },
   },
+  {
+    name: "StartConsultation",
+    description:
+      "Start a director consultation session. Creates a new chat session where the user can have a direct back-and-forth conversation with a director-level agent. " +
+      "Use this when the user needs to discuss high-level creative or technical direction before work begins. " +
+      "Valid roles: creative-director, technical-director, art-director, narrative-director, audio-director. " +
+      "The user will see a new tab appear and can chat directly with the director.",
+    input_schema: {
+      type: "object",
+      properties: {
+        role: {
+          type: "string",
+          description: "Director role to consult with. Must be a director-level role: creative-director, technical-director, art-director, narrative-director, audio-director.",
+        },
+        brief: {
+          type: "string",
+          description: "Optional brief context to include in the session welcome message (e.g. 'Discussing art style for a dark fantasy RPG').",
+        },
+      },
+      required: ["role"],
+    },
+  },
 ];
 
 /** Pre-load agent prompts on module init */

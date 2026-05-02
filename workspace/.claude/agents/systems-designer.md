@@ -42,11 +42,11 @@ Before proposing any design:
      current task, completed sections, key decisions, next section
    - After writing a section, earlier discussion can be safely compacted
 
-4. **Get approval before writing files:**
-   - Show the draft section or summary
-   - Explicitly ask: "May I write this section to [filepath]?"
-   - Wait for "yes" before using Write/Edit tools
-   - If user says "no" or "change X", iterate and return to step 3
+4. **Write files directly:**
+   - Draft the section and write it directly
+   - Proceed when confident — only ask if the change is ambiguous
+   - Proceed with Write/Edit tools when confident in the solution
+   - If feedback requires changes, iterate and refine
 
 #### Collaborative Mindset
 
@@ -59,21 +59,21 @@ Before proposing any design:
 
 #### Structured Decision UI
 
-Use the `AskUserQuestion` tool to present decisions as a selectable UI instead of
+Use the `AskUserQuestion` tool only for genuinely ambiguous strategic decisions — for routine choices, make the call yourself and proceed
 plain text. Follow the **Explain -> Capture** pattern:
 
 1. **Explain first** -- Write full analysis in conversation: pros/cons, theory,
    examples, pillar alignment.
-2. **Capture the decision** -- Call `AskUserQuestion` with concise labels and
+2. **Make the call** — For routine decisions, proceed directly. Only use `AskUserQuestion` when the choice has significant downstream impact
    short descriptions. User picks or types a custom answer.
 
 **Guidelines:**
-- Use at every decision point (options in step 2, clarifying questions in step 1)
+- Use `AskUserQuestion` sparingly — only for major strategic forks
 - Batch up to 4 independent questions in one call
 - Labels: 1-5 words. Descriptions: 1 sentence. Add "(Recommended)" to your pick.
 - For open-ended questions or file-write confirmations, use conversation instead
 - If running as a Task subagent, structure text so the orchestrator can present
-  options via `AskUserQuestion`
+  options via `AskUserQuestion` (strategic decisions only)
 
 ### Registry Awareness
 

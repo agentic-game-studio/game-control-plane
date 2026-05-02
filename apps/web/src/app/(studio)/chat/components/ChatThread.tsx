@@ -103,7 +103,7 @@ const ActivityLog = memo(function ActivityLog({ toolCalls, logs, defaultExpanded
   const previewEntries = entries.slice(0, 3);
 
   return (
-    <div className="mt-4 border-2 border-black bg-white shadow-[2px_2px_0_0_rgba(0,0,0,1)]">
+    <div className="mt-4 border-2 border-black bg-white shadow-[2px_2px_0_0_rgba(0,0,0,1)] min-w-0 max-w-full">
       {/* Header bar */}
       <button
         onClick={() => setExpanded((e) => !e)}
@@ -195,9 +195,9 @@ const ActivityLog = memo(function ActivityLog({ toolCalls, logs, defaultExpanded
 const ImageGallery = memo(function ImageGallery({ images }: { images?: string[] }) {
   if (!images || images.length === 0) return null;
   return (
-    <div className="flex flex-col gap-2 mt-3">
-      {images.map((src, i) => (
-        <div key={i} className="border-2 border-black shadow-[2px_2px_0_0_rgba(0,0,0,1)] overflow-hidden inline-block">
+      <div className="flex flex-col gap-2 mt-3 max-w-full min-w-0">
+        {images.map((src, i) => (
+          <div key={i} className="border-2 border-black shadow-[2px_2px_0_0_rgba(0,0,0,1)] overflow-hidden max-w-full">
           <img src={src} alt={`Attachment ${i + 1}`} className="max-w-full max-h-64 object-contain" loading="lazy" />
         </div>
       ))}
@@ -296,11 +296,11 @@ const AgentMessage = memo(function AgentMessage({
   const renderedContent = useMemo(() => cachedRenderMarkdown(msg.content), [msg.content]);
 
   return (
-    <div className="flex gap-4 w-full max-w-4xl self-start">
+    <div className="flex gap-4 w-full max-w-4xl min-w-0 self-start">
       <div className="w-12 h-12 shrink-0 border-2 border-black bg-[#0055FF] flex justify-center items-center text-white shadow-[2px_2px_0_0_rgba(0,0,0,1)] relative z-10">
         <span className="material-symbols-outlined">{icon}</span>
       </div>
-      <div className="flex-1">
+      <div className="flex-1 min-w-0">
         <div className="flex items-baseline gap-3 mb-1 ml-2">
           <span className="font-[var(--font-label)] text-xs font-bold uppercase">{label}</span>
           <span className="font-[var(--font-terminal)] text-[10px] text-[#737688]">{formatTime(msg.timestamp)}</span>
@@ -308,22 +308,22 @@ const AgentMessage = memo(function AgentMessage({
         <div className="relative group">
           <div className="absolute left-[-10px] top-4 w-0 h-0 border-y-[6px] border-y-transparent border-r-[10px] border-r-black z-0" />
           <div className="absolute left-[-6px] top-[18px] w-0 h-0 border-y-[4px] border-y-transparent border-r-[8px] border-r-white z-10" />
-          <div className="border-2 border-black bg-white p-4 shadow-[4px_4px_0_0_rgba(0,0,0,1)] relative z-10">
+          <div className="border-2 border-black bg-white p-4 shadow-[4px_4px_0_0_rgba(0,0,0,1)] relative z-10 min-w-0">
             {msg.codeBlock && (
-              <div className="bg-[#e1e1ef] border-2 border-black p-3 font-[var(--font-terminal)] text-sm mb-4">
+              <div className="bg-[#e1e1ef] border-2 border-black p-3 font-[var(--font-terminal)] text-sm mb-4 max-w-full overflow-x-auto">
                 <span className="text-[#df2b31] block mb-1">// Code Output</span>
-                <code className="whitespace-pre-wrap">{msg.codeBlock}</code>
+                <code className="block whitespace-pre-wrap break-words">{msg.codeBlock}</code>
               </div>
             )}
             <div
-              className="font-[var(--font-terminal)] text-base prose prose-sm max-w-none"
+              className="font-[var(--font-terminal)] text-base prose prose-sm max-w-none min-w-0 break-words [overflow-wrap:anywhere] [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_code]:break-words"
               dangerouslySetInnerHTML={{ __html: renderedContent }}
             />
             <ImageGallery images={msg.images} />
 
             {/* Rich progress message — conversation flow: activity top, thinking middle, progress bottom */}
             {isProgress && msg.progress !== undefined && (
-              <div className="mt-4 border-2 border-black bg-[#f3f2ff] shadow-[2px_2px_0_0_rgba(0,0,0,1)]">
+              <div className="mt-4 border-2 border-black bg-[#f3f2ff] shadow-[2px_2px_0_0_rgba(0,0,0,1)] min-w-0">
                 {/* Activity log at top (newest first) */}
                 {(toolCalls?.length || msg.logs?.length) ? (
                   <ActivityLog toolCalls={toolCalls ?? []} logs={msg.logs} defaultExpanded={false} />
@@ -331,29 +331,29 @@ const AgentMessage = memo(function AgentMessage({
 
                 {/* Thinking in the middle */}
                 {msg.thinking && (
-                  <div className="border-t-2 border-black px-3 py-2 bg-[#faf8ff]">
+                  <div className="border-t-2 border-black px-3 py-2 bg-[#faf8ff] min-w-0">
                     <span className="font-[var(--font-label)] text-[10px] uppercase text-[#737688] tracking-widest block mb-1">Thinking</span>
-                    <span className="font-[var(--font-terminal)] text-xs text-[#737688]">{msg.thinking}</span>
+                    <span className="font-[var(--font-terminal)] text-xs text-[#737688] break-words [overflow-wrap:anywhere]">{msg.thinking}</span>
                   </div>
                 )}
 
                 {/* Progress bar at bottom like Claude Code thinking indicator */}
-                <div className="p-2 flex items-center gap-3 border-t-2 border-black">
-                  <span className="material-symbols-outlined animate-spin text-sm text-[#0055FF]">sync</span>
-                  <div className="flex-1 h-4 border-2 border-black bg-white relative overflow-hidden">
+                <div className="p-2 flex items-center gap-3 border-t-2 border-black min-w-0">
+                  <span className="material-symbols-outlined animate-spin text-sm text-[#0055FF] shrink-0">sync</span>
+                  <div className="flex-1 min-w-0 h-4 border-2 border-black bg-white relative overflow-hidden">
                     <div className="h-full bg-[#0055FF] transition-[width] duration-700 ease-out relative" style={{ width: `${msg.progress}%` }}>
                       <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent animate-shimmer" />
                     </div>
                   </div>
-                  <span className="font-[var(--font-terminal)] text-xs font-bold tabular-nums min-w-[3ch] text-right">{msg.progress}%</span>
+                  <span className="font-[var(--font-terminal)] text-xs font-bold tabular-nums min-w-[3ch] shrink-0 text-right">{msg.progress}%</span>
                 </div>
               </div>
             )}
 
             {!isProgress && msg.thinking && (
-              <div className="mt-3 border border-[#e1e1ef] bg-[#faf8ff] p-2">
+              <div className="mt-3 border border-[#e1e1ef] bg-[#faf8ff] p-2 min-w-0">
                 <span className="font-[var(--font-label)] text-[10px] uppercase text-[#737688] tracking-widest block mb-1">Thinking</span>
-                <span className="font-[var(--font-terminal)] text-xs text-[#737688]">{msg.thinking}</span>
+                <span className="font-[var(--font-terminal)] text-xs text-[#737688] break-words [overflow-wrap:anywhere]">{msg.thinking}</span>
               </div>
             )}
 
@@ -416,9 +416,9 @@ const UserMessage = memo(function UserMessage({ msg }: { msg: ChatMessage }) {
   const renderedContent = useMemo(() => cachedRenderMarkdown(msg.content), [msg.content]);
 
   return (
-    <div className="flex gap-4 w-full max-w-3xl self-end flex-row-reverse mt-4">
+    <div className="flex gap-4 w-full max-w-3xl min-w-0 self-end flex-row-reverse mt-4">
       <div className="w-12 h-12 shrink-0 border-2 border-black bg-black relative z-10 shadow-[-2px_2px_0_0_rgba(0,85,255,1)]" />
-      <div className="flex-1 flex flex-col items-end">
+      <div className="flex-1 flex flex-col items-end min-w-0">
         <div className="flex items-baseline gap-3 mb-1 mr-2 flex-row-reverse">
           <span className="font-[var(--font-label)] text-xs font-bold uppercase text-[#0055FF]">DIRECTOR (YOU)</span>
           <span className="font-[var(--font-terminal)] text-[10px] text-[#737688]">{formatTime(msg.timestamp)}</span>
@@ -426,9 +426,9 @@ const UserMessage = memo(function UserMessage({ msg }: { msg: ChatMessage }) {
         <div className="relative group">
           <div className="absolute right-[-10px] top-4 w-0 h-0 border-y-[6px] border-y-transparent border-l-[10px] border-l-black z-0" />
           <div className="absolute right-[-6px] top-[18px] w-0 h-0 border-y-[4px] border-y-transparent border-l-[8px] border-l-[#dce1ff] z-10" />
-          <div className="border-2 border-black bg-[#dce1ff] p-3 shadow-[-4px_4px_0_0_rgba(0,0,0,1)] relative z-10 text-right">
+          <div className="border-2 border-black bg-[#dce1ff] p-3 shadow-[-4px_4px_0_0_rgba(0,0,0,1)] relative z-10 text-right min-w-0 max-w-full">
             <div
-              className="font-[var(--font-terminal)] text-base prose prose-sm max-w-none"
+              className="font-[var(--font-terminal)] text-base prose prose-sm max-w-none min-w-0 break-words [overflow-wrap:anywhere] [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_code]:break-words"
               dangerouslySetInnerHTML={{ __html: renderedContent }}
             />
             <ImageGallery images={msg.images} />
@@ -446,11 +446,11 @@ const DiffMessage = memo(function DiffMessage({ msg, onNavigate }: { msg: ChatMe
   if (!msg.diff) return null;
 
   return (
-    <div className="flex gap-4 w-full max-w-4xl self-start">
+    <div className="flex gap-4 w-full max-w-4xl min-w-0 self-start">
       <div className="w-12 h-12 shrink-0 border-2 border-black bg-[#0055FF] flex justify-center items-center text-white shadow-[2px_2px_0_0_rgba(0,0,0,1)] relative z-10">
         <span className="material-symbols-outlined">{icon}</span>
       </div>
-      <div className="flex-1">
+      <div className="flex-1 min-w-0">
         <div className="flex items-baseline gap-3 mb-1 ml-2">
           <span className="font-[var(--font-label)] text-xs font-bold uppercase">{label}</span>
           <span className="font-[var(--font-terminal)] text-[10px] text-[#737688]">{formatTime(msg.timestamp)}</span>
@@ -551,7 +551,7 @@ export default function ChatThread({ messages, sessions, threadId, threadTitle, 
       </div>
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto p-6 flex flex-col gap-6 pb-32">
+      <div className="flex-1 overflow-y-auto p-6 flex flex-col gap-6 pb-32 min-w-0">
         {messages.map((msg) => {
           switch (msg.type) {
             case "system":

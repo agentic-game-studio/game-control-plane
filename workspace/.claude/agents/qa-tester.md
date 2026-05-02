@@ -42,11 +42,11 @@ Before writing any code:
    - If rules/hooks flag issues, fix them and explain what was wrong
    - If a deviation from the design doc is necessary (technical constraint), explicitly call it out
 
-5. **Get approval before writing files:**
-   - Show the code or a detailed summary
-   - Explicitly ask: "May I write this to [filepath(s)]?"
-   - For multi-file changes, list all affected files
-   - Wait for "yes" before using Write/Edit tools
+5. **Write files directly:**
+   - Write the code using Write/Edit tools
+   - Proceed when confident — only ask if the change is ambiguous
+   - For multi-file changes, note all affected files in your summary
+   - Proceed with Write/Edit tools when confident in the solution
 
 6. **Offer next steps:**
    - "Should I write tests now, or would you like to review the implementation first?"

@@ -372,8 +372,39 @@ async function executeTool(
         const ticketId = ticket.id;
         await moveQuestTicket(ticketId, "in_progress", agent);
 
+        // Broadcast subagent spawn so frontend sidebar can show it
+        broadcast({
+          type: "subagent:spawned",
+          agentRole: agent,
+          parentSessionId: sessionId,
+          ticketId,
+          task: task.slice(0, 80),
+        } as WSEvent);
+
         // Recursively invoke subagent (don't broadcast events — subagent runs inline within parent session)
-        const subResult = await invokeAgent(agent, task, sessionId, context, undefined, undefined, false, _depth + 1, undefined, onFileOperation);
+        let subResult: InvokeResult;
+        try {
+          subResult = await invokeAgent(agent, task, sessionId, context, undefined, undefined, false, _depth + 1, undefined, onFileOperation);
+        } catch (err) {
+          const errorMsg = err instanceof Error ? err.message : "Unknown error";
+          broadcast({
+            type: "subagent:failed",
+            agentRole: agent,
+            parentSessionId: sessionId,
+            ticketId,
+            error: errorMsg,
+          } as WSEvent);
+          throw err;
+        }
+
+        // Broadcast subagent completion
+        broadcast({
+          type: "subagent:completed",
+          agentRole: agent,
+          parentSessionId: sessionId,
+          ticketId,
+          output: subResult.content.slice(0, 200),
+        } as WSEvent);
 
         // Quest Bridge: move ticket to QA and trigger auto-verification
         await moveQuestTicket(ticketId, "qa", agent);
@@ -548,6 +579,95 @@ async function executeTool(
           const err = genError as { message?: string; stderr?: string };
           return `Error: Asset generation failed: ${err.stderr || err.message}`;
         }
+      }
+
+      case "StartConsultation": {
+        const role = input.role as string;
+        const brief = input.brief as string | undefined;
+
+        if (!role) return "Error: role is required";
+
+        const directorRoles = ["creative-director", "technical-director", "art-director", "narrative-director", "audio-director"];
+        if (!directorRoles.includes(role)) {
+          return `Error: '${role}' is not a director-level role. Valid roles: ${directorRoles.join(", ")}`;
+        }
+
+        const projectId = projectContext?.projectId;
+        if (!projectId) {
+          return "Error: StartConsultation requires a project context. Ensure this is called within a project session.";
+        }
+
+        // Lazy import to avoid circular dependency (chat.ts imports from llm-service.ts)
+        const chatModule = await import("../routes/chat.js");
+        await chatModule.chatStoreReady;
+        const store = chatModule.chatStore;
+
+        const sessionId = `consultation-${role.toLowerCase().replace(/\s+/g, "-")}`;
+
+        // Check if session already exists
+        if (store.sessions[sessionId]) {
+          return `${role} consultation session is already active (${sessionId}). The user can switch to that tab.`;
+        }
+
+        // Load agent system prompt for welcome message
+        let welcomeContent = `${role} consultation session initialized.`;
+        try {
+          const systemPrompt = await getAgentSystemPrompt(role as AgentRole);
+          welcomeContent = systemPrompt.split("\n")[0] ?? welcomeContent;
+        } catch {
+          // Use default
+        }
+
+        const now = new Date().toISOString();
+        const newSession = {
+          id: sessionId,
+          role,
+          projectId,
+          messages: [
+            {
+              id: `msg-${crypto.randomUUID().slice(0, 8)}`,
+              type: "system" as const,
+              sender: "SYSTEM",
+              content: brief ? `${welcomeContent}\n\n**Brief:** ${brief}` : welcomeContent,
+              timestamp: now,
+              showActions: false,
+            },
+          ],
+          status: "active" as const,
+          progress: 0,
+          spawnedAt: now,
+          conversationHistory: [],
+          fileOperations: [],
+          completedPhases: [],
+          currentTask: "",
+        };
+
+        // Atomic check-and-set to prevent concurrent creation of same session
+        if (store.sessions[sessionId]) {
+          return `${role} consultation session was just created by another process (${sessionId}).`;
+        }
+        store.sessions[sessionId] = newSession;
+
+        broadcast({
+          type: "chat:session:created",
+          session: {
+            id: newSession.id,
+            role: newSession.role,
+            projectId: newSession.projectId,
+            messages: newSession.messages,
+            status: newSession.status,
+            progress: newSession.progress,
+            spawnedAt: newSession.spawnedAt,
+          },
+        });
+
+        // Persist state
+        const { writeData } = await import("../services/data-store.js");
+        await writeData("chat-state.json", store);
+
+        logEntry(sessionId, "info", `[${agentRole}] Started consultation: ${role}`, agentRole);
+
+        return `${role} consultation session started (${sessionId}). The user can now switch to the ${role} tab to chat directly.`;
       }
 
       default:
