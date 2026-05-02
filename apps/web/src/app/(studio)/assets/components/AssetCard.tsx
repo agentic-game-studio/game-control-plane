@@ -3,6 +3,8 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import type { GameAsset, AssetType, AssetCategory } from "@game-studio/types";
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
+
 const TYPE_ICONS: Record<AssetType, string> = {
   "3d": "view_in_ar",
   "2d": "image",
@@ -48,6 +50,7 @@ export function AssetCard({ asset, onDelete }: AssetCardProps) {
     x: number;
     y: number;
   } | null>(null);
+  const [imgError, setImgError] = useState(false);
   const cardRef = useRef<HTMLDivElement>(null);
 
   const handleContextMenu = useCallback(
@@ -70,14 +73,20 @@ export function AssetCard({ asset, onDelete }: AssetCardProps) {
   }, [contextMenu]);
 
   const handleCopyPath = useCallback(() => {
-    const path = `assets/${asset.type}/${asset.filename}`;
-    navigator.clipboard.writeText(path).catch(() => {});
+    const p = asset.path ?? `assets/${asset.type}/${asset.filename}`;
+    navigator.clipboard.writeText(p).catch(() => {});
     closeContextMenu();
   }, [asset, closeContextMenu]);
 
   const handleOpenLocation = useCallback(() => {
     closeContextMenu();
   }, [closeContextMenu]);
+
+  // Build thumbnail URL: if the asset has a thumbnailPath, serve it via the API
+  const thumbnailSrc =
+    asset.thumbnailPath && !imgError
+      ? `${API_BASE}/api/assets/${asset.id}/thumbnail`
+      : null;
 
   return (
     <>
@@ -88,9 +97,27 @@ export function AssetCard({ asset, onDelete }: AssetCardProps) {
       >
         {/* Thumbnail Area */}
         <div className="aspect-square border-b-2 border-black bg-[#e1e1ef] relative overflow-hidden flex items-center justify-center p-4">
-          <span className="material-symbols-outlined text-6xl text-[#737688] select-none">
-            {TYPE_ICONS[asset.type]}
-          </span>
+          {thumbnailSrc ? (
+            <img
+              src={thumbnailSrc}
+              alt={asset.filename}
+              onError={() => setImgError(true)}
+              className="w-full h-full object-contain"
+              style={{ imageRendering: "pixelated" }}
+            />
+          ) : (
+            <span className="material-symbols-outlined text-6xl text-[#737688] select-none">
+              {TYPE_ICONS[asset.type]}
+            </span>
+          )}
+
+          {/* AI Generated Badge */}
+          {asset.generatedWith && (
+            <div className="absolute top-2 left-2 border-2 border-black bg-[#0055FF] text-white px-1.5 py-0.5 font-[var(--font-label)] text-[10px] uppercase font-bold flex items-center gap-1">
+              <span className="material-symbols-outlined text-xs">auto_awesome</span>
+              AI
+            </div>
+          )}
 
           {/* Type Badge */}
           <div className="absolute top-2 right-2 border-2 border-black bg-white px-1.5 py-0.5 font-[var(--font-label)] text-[10px] uppercase font-bold">
@@ -129,6 +156,12 @@ export function AssetCard({ asset, onDelete }: AssetCardProps) {
               {asset.category}
             </span>
           </div>
+          {/* Generation metadata summary */}
+          {asset.generatedWith && (
+            <div className="font-[var(--font-terminal)] text-[10px] text-[#737688] truncate">
+              {asset.generatedWith.model} &middot; {asset.generatedWith.width}x{asset.generatedWith.height} &middot; {asset.generatedWith.steps} steps
+            </div>
+          )}
         </div>
       </div>
 

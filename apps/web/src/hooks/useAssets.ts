@@ -124,6 +124,55 @@ export function useAssets() {
     []
   );
 
+  const generateAsset = useCallback(
+    async (params: {
+      prompt: string;
+      name: string;
+      type?: string;
+      category?: string;
+      width?: number;
+      height?: number;
+      steps?: number;
+      seed?: number;
+      removeBg?: boolean;
+      negativePrompt?: string;
+      gridSize?: number;
+      spriteSheet?: boolean;
+      spriteCols?: number;
+      spriteRows?: number;
+      tags?: string[];
+      workspacePath?: string;
+    }) => {
+      const result = await apiFetch<{ asset: GameAsset | null; log: string }>(
+        "/api/assets/generate",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(params),
+        }
+      );
+      await fetchAssets();
+      return result;
+    },
+    [fetchAssets]
+  );
+
+  const generateAssetBatch = useCallback(
+    async (presetsFile: string, workspacePath?: string) => {
+      const result = await apiFetch<{ generated: GameAsset[]; log: string }>(
+        "/api/assets/generate",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ presetsFile, workspacePath }),
+        }
+      );
+      await fetchAssets();
+      return result;
+    },
+    [fetchAssets]
+  );
+
   const retry = useCallback(() => {
     setLoading(true);
     fetchAssets();
@@ -138,5 +187,7 @@ export function useAssets() {
     updateAsset,
     deleteAsset,
     updateArtBible,
+    generateAsset,
+    generateAssetBatch,
   };
 }

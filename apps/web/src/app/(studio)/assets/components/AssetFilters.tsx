@@ -28,7 +28,7 @@ interface AssetFiltersProps {
   sortBy: SortOption;
   onSortChange: (sort: SortOption) => void;
   onCraftAsset: () => void;
-  canCraft: boolean;
+  onGenerateAsset: () => void;
 }
 
 export function AssetFilters({
@@ -39,13 +39,13 @@ export function AssetFilters({
   sortBy,
   onSortChange,
   onCraftAsset,
-  canCraft,
+  onGenerateAsset,
 }: AssetFiltersProps) {
   const [searchValue, setSearchValue] = useState(searchQuery);
 
   return (
     <div className="flex flex-col gap-4">
-      {/* Top Row: Search + Sort + New */}
+      {/* Top Row: Search + Sort + Actions */}
       <div className="flex flex-col sm:flex-row gap-3 items-stretch sm:items-center">
         <div className="flex-1 flex items-center gap-2 border-2 border-black bg-white px-3 py-2 focus-within:ring-2 ring-[#0055FF] ring-offset-2 ring-offset-white transition-all">
           <span className="material-symbols-outlined text-[#737688]">search</span>
@@ -79,25 +79,23 @@ export function AssetFilters({
           </span>
         </div>
 
-        <div className="relative">
-          <button
-            onClick={onCraftAsset}
-            disabled={!canCraft}
-            className={`border-2 border-black font-[var(--font-label)] text-xs font-bold uppercase px-6 py-3 transition-all flex items-center justify-center gap-2 shrink-0 ${
-              canCraft
-                ? "bg-[#0055FF] text-white hover:bg-black active:translate-x-[2px] active:translate-y-[2px]"
-                : "bg-[#f3f2ff] text-[#737688] cursor-not-allowed"
-            }`}
-          >
-            <span className="material-symbols-outlined text-sm">add</span>
-            Craft Asset
-          </button>
-          {!canCraft && (
-            <span className="absolute -bottom-6 left-0 right-0 text-center font-[var(--font-terminal)] text-[10px] text-[#737688] uppercase whitespace-nowrap">
-              Locked
-            </span>
-          )}
-        </div>
+        {/* Generate Asset (AI) button */}
+        <button
+          onClick={onGenerateAsset}
+          className="border-2 border-black bg-[#0055FF] text-white font-[var(--font-label)] text-xs font-bold uppercase px-6 py-3 transition-all flex items-center justify-center gap-2 shrink-0 hover:bg-black active:translate-x-[2px] active:translate-y-[2px]"
+        >
+          <span className="material-symbols-outlined text-sm">auto_awesome</span>
+          Generate
+        </button>
+
+        {/* Craft Asset (manual) button */}
+        <button
+          onClick={onCraftAsset}
+          className="border-2 border-black bg-white text-black font-[var(--font-label)] text-xs font-bold uppercase px-6 py-3 transition-all flex items-center justify-center gap-2 shrink-0 hover:bg-[#f3f2ff] active:translate-x-[2px] active:translate-y-[2px]"
+        >
+          <span className="material-symbols-outlined text-sm">add</span>
+          Manual
+        </button>
       </div>
 
       {/* Category Tabs */}

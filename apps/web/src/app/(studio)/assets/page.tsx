@@ -1,13 +1,16 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useCallback } from "react";
 import { useAssets } from "@/hooks/useAssets";
 import { useSettings } from "@/hooks/useSettings";
+import { useProject } from "@/contexts/ProjectContext";
 import { DataLoader } from "@/components/DataLoader";
 import { ProjectGuard } from "@/components/ProjectGuard";
 import { AssetCard } from "./components/AssetCard";
 import { AssetFilters, type SortOption } from "./components/AssetFilters";
 import { NewAssetModal } from "./components/NewAssetModal";
+import { GenerateAssetModal } from "./components/GenerateAssetModal";
+import { apiFetch } from "@/lib/api";
 import type { AssetType } from "@game-studio/types";
 
 const GRID_SLOTS = 10;
@@ -21,6 +24,8 @@ export default function AssetsPage() {
 }
 
 function AssetsPageInner() {
+  const { currentProject } = useProject();
+
   const {
     data,
     loading,
@@ -28,6 +33,8 @@ function AssetsPageInner() {
     retry,
     createAsset,
     deleteAsset,
+    generateAsset,
+    generateAssetBatch,
   } = useAssets();
 
   const { data: settings } = useSettings();
@@ -35,10 +42,25 @@ function AssetsPageInner() {
   const [activeType, setActiveType] = useState<AssetType | "all">("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [sortBy, setSortBy] = useState<SortOption>("newest");
-  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isManualModalOpen, setIsManualModalOpen] = useState(false);
+  const [isGenerateModalOpen, setIsGenerateModalOpen] = useState(false);
+  const [availablePresets, setAvailablePresets] = useState<string[]>([]);
 
-  // Craft Asset temporarily locked
-  const canCraft = false;
+  // Fetch available presets when the generate modal opens
+  useEffect(() => {
+    if (isGenerateModalOpen) {
+      apiFetch<string[]>("/api/assets/generate/presets")
+        .then((data) => setAvailablePresets(data))
+        .catch(() => setAvailablePresets([]));
+    }
+  }, [isGenerateModalOpen]);
+
+  const handleBatchGenerate = useCallback(
+    async (presetsFile: string, workspacePath?: string) => {
+      return generateAssetBatch(presetsFile, workspacePath);
+    },
+    [generateAssetBatch]
+  );
 
   const filteredAssets = useMemo(() => {
     let result = [...data.assets];
@@ -119,8 +141,8 @@ function AssetsPageInner() {
             onSearchChange={setSearchQuery}
             sortBy={sortBy}
             onSortChange={setSortBy}
-            onCraftAsset={() => setIsModalOpen(true)}
-            canCraft={canCraft}
+            onCraftAsset={() => setIsManualModalOpen(true)}
+            onGenerateAsset={() => setIsGenerateModalOpen(true)}
           />
 
           {/* Grid */}
@@ -151,11 +173,21 @@ function AssetsPageInner() {
         </div>
       </DataLoader>
 
-      {/* Craft Asset Modal */}
+      {/* Manual Asset Modal */}
       <NewAssetModal
-        isOpen={isModalOpen}
-        onClose={() => setIsModalOpen(false)}
+        isOpen={isManualModalOpen}
+        onClose={() => setIsManualModalOpen(false)}
         onSubmit={createAsset}
+      />
+
+      {/* AI Generate Asset Modal */}
+      <GenerateAssetModal
+        isOpen={isGenerateModalOpen}
+        onClose={() => setIsGenerateModalOpen(false)}
+        workspacePath={currentProject?.workspacePath ?? undefined}
+        onGenerate={generateAsset}
+        onBatchGenerate={handleBatchGenerate}
+        availablePresets={availablePresets}
       />
     </div>
   );

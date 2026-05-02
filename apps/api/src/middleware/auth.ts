@@ -13,6 +13,9 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
   // Skip auth for health check
   if (req.path === "/health") return next();
 
+  // Skip auth for thumbnail image serving — <img> tags cannot send custom headers
+  if (req.path.match(/^\/api\/assets\/[^/]+\/thumbnail$/)) return next();
+
   const config = loadConfig();
   const apiKey = req.headers["x-api-key"] as string | undefined;
 
