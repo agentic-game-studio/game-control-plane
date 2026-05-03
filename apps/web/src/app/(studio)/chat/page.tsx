@@ -7,6 +7,7 @@ import ChatThread from "./components/ChatThread";
 import CommandInput from "./components/CommandInput";
 import QuestionToolbar from "./components/QuestionToolbar";
 import ProgressSummary from "./components/ProgressSummary";
+import SubagentDrawer from "./components/SubagentDrawer";
 import { useCommandRoom } from "@/hooks/useCommandRoom";
 import { ProjectGuard } from "@/components/ProjectGuard";
 import { useProject } from "@/contexts/ProjectContext";
@@ -30,6 +31,7 @@ export default function ChatPage() {
 function ChatPageInner() {
   const { currentProject } = useProject();
   const [mcpStatus, setMcpStatus] = useState<MCPStatus | null>(null);
+  const [selectedSubagentId, setSelectedSubagentId] = useState<string | null>(null);
   const isGodot = currentProject?.engine === "godot";
 
   // Poll MCP health for Godot projects
@@ -64,6 +66,7 @@ function ChatPageInner() {
 
   const {
     sessions,
+    subagents,
     currentSession,
     currentMessages,
     threadId,
@@ -73,6 +76,7 @@ function ChatPageInner() {
     selectSession,
     approveAgent,
     closeSession,
+    closeConsultation,
     initialized,
     connected,
     isLoading,
@@ -91,6 +95,14 @@ function ChatPageInner() {
 
   const handleNavigate = (targetSession: string) => {
     selectSession(targetSession);
+  };
+
+  const handleCloseSession = (sessionId: string) => {
+    if (sessionId.startsWith("consultation-")) {
+      closeConsultation(sessionId);
+    } else {
+      closeSession(sessionId);
+    }
   };
 
   const handleAnswer = (questionId: string, selected: string[], customInput?: string) => {
@@ -129,21 +141,32 @@ function ChatPageInner() {
     <div className="flex h-full overflow-hidden relative">
       <AgentTree
         sessions={sessions}
+        subagents={subagents}
         currentSession={currentSession}
         totalProgress={totalProgress}
         onSelectSession={selectSession}
-        onCloseSession={closeSession}
+        onCloseSession={handleCloseSession}
+        onSelectSubagent={(sa) => setSelectedSubagentId(sa.id)}
+      />
+      {/* Subagent Detail Drawer */}
+      <SubagentDrawer
+        subagent={selectedSubagentId ? subagents.get(selectedSubagentId) ?? null : null}
+        onClose={() => setSelectedSubagentId(null)}
+        onGotoParent={(sessionId) => {
+          selectSession(sessionId);
+          setSelectedSubagentId(null);
+        }}
       />
       <div className="flex-1 flex flex-col min-w-0 min-h-0">
         <ChatTabs
           sessions={sessions}
           currentSession={currentSession}
           onSelectSession={selectSession}
-          onCloseSession={closeSession}
+          onCloseSession={handleCloseSession}
         />
         <ProgressSummary
           activeAgents={[...sessions.values()].filter(s => s.status === "active" && s.role !== "producer").length}
-          totalProgress={totalProgress}
+          producerSessionId={producerSessionId || null}
         />
         {/* Godot MCP Warning Banner */}
         {isGodot && mcpStatus && mcpStatus.status !== "connected" && (
@@ -161,6 +184,37 @@ function ChatPageInner() {
             </div>
           </div>
         )}
+        {/* Director Consultation Close Banner */}
+        {(() => {
+          const directorRoles = ["creative-director", "technical-director", "art-director", "narrative-director", "audio-director"];
+          const currentRole = sessions.get(currentSession)?.role;
+          if (!currentRole || !directorRoles.includes(currentRole)) return null;
+          const roleLabel = currentRole.replace(/-/g, " ").toUpperCase();
+          return (
+            <div className="flex items-center gap-3 px-4 py-2 bg-[#0055FF] border-b-2 border-black text-white">
+              <span className="material-symbols-outlined">chat</span>
+              <div className="flex-1">
+                <span className="font-[var(--font-terminal)] text-xs font-bold uppercase">
+                  {roleLabel} CONSULTATION
+                </span>
+                <span className="font-[var(--font-terminal)] text-[10px] ml-2 opacity-80">
+                  Chat directly with the director. Close when satisfied.
+                </span>
+              </div>
+              <button
+                onClick={() => {
+                  if (confirm(`Close ${roleLabel} consultation and send summary back to Producer?`)) {
+                    closeConsultation(currentSession);
+                  }
+                }}
+                className="flex items-center gap-1 border-2 border-white bg-white text-[#0055FF] px-3 py-1 font-[var(--font-label)] text-[10px] font-bold uppercase hover:bg-black hover:text-white hover:border-black transition-colors"
+              >
+                <span className="material-symbols-outlined text-sm">check_circle</span>
+                Close & Return
+              </button>
+            </div>
+          );
+        })()}
         <ChatThread
           messages={currentMessages}
           sessions={sessions}
@@ -205,7 +259,7 @@ function ChatPageInner() {
       {currentSession ? (
         <CommandInput onSend={executeCommand} isLoading={isLoading} />
       ) : (
-        <AgentStatusBar session={sessions.get(currentSession)} onClose={() => closeSession(currentSession)} />
+        <AgentStatusBar session={sessions.get(currentSession)} onClose={() => handleCloseSession(currentSession)} />
       )}
     </div>
   );

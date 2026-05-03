@@ -11,7 +11,7 @@ import type { ChatSession, ChatMessage } from "./chat.js";
 
 /** WebSocket event types for real-time frontend updates */
 export type WSEvent =
-  | { type: "agent:spawned"; agentId: string; agent: AgentRole; sessionId: string }
+  | { type: "agent:spawned"; agentId: string; agent: AgentRole; sessionId: string; projectId?: string | null }
   | { type: "agent:completed"; agentId: string; output: string; sessionId: string }
   | { type: "agent:failed"; agentId: string; error: string; sessionId: string }
   | { type: "gate:verdict"; result: GateResult; sessionId: string }
@@ -43,6 +43,9 @@ export type WSEvent =
   | { type: "workflow:stage"; sessionId: string; workflowId: string; stage: WorkflowStage; ticketId?: string; agentRole?: string }
   | { type: "workflow:complete"; sessionId: string; workflowId: string; success: boolean }
   | { type: "quest:linked"; sessionId: string; ticketId: string; agentRole: string }
+  | { type: "subagent:spawned"; agentRole: AgentRole; parentSessionId: string; ticketId: string; task: string }
+  | { type: "subagent:completed"; agentRole: AgentRole; parentSessionId: string; ticketId: string; output: string }
+  | { type: "subagent:failed"; agentRole: AgentRole; parentSessionId: string; ticketId: string; error: string }
   | { type: "error"; error: string; sessionId?: string };
 
 /** API request/response types */

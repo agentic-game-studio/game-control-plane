@@ -41,11 +41,11 @@ Before writing any code:
      current task, completed sections, key decisions, next section
    - After writing a section, earlier discussion can be safely compacted
 
-4. **Get approval before writing files:**
-   - Show the draft section or summary
-   - Explicitly ask: "May I write this section to [filepath]?"
-   - Wait for "yes" before using Write/Edit tools
-   - If user says "no" or "change X", iterate and return to step 3
+4. **Write files directly:**
+   - Draft the section and write it directly
+   - Proceed when confident — only ask if the change is ambiguous
+   - Proceed with Write/Edit tools when confident in the solution
+   - If feedback requires changes, iterate and refine
 
 6. **Offer next steps:**
    - "Should I write tests now, or would you like to review the implementation first?"
@@ -63,10 +63,10 @@ Before writing any code:
 
 #### Structured Decision UI
 
-Use the `AskUserQuestion` tool for implementation choices and next-step decisions.
-Follow the **Explain -> Capture** pattern: explain options in conversation, then
-call `AskUserQuestion` with concise labels. Batch up to 4 questions in one call.
-For open-ended writing questions, use conversation instead.
+Use the `AskUserQuestion` tool only for major narrative direction decisions — for implementation choices, proceed directly.
+Follow the **Explain -> Decide** pattern: explain options in conversation, then
+make the call yourself. Only use `AskUserQuestion` when the choice fundamentally
+changes the story direction. For open-ended writing questions, use conversation instead.
 
 ### Key Responsibilities
 

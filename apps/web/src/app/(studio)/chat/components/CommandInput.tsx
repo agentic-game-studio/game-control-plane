@@ -148,18 +148,11 @@ export default function CommandInput({ onSend, isLoading }: CommandInputProps) {
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
               disabled={isLoading}
-              className={`w-full h-12 border-2 border-black bg-white p-3 pr-10 font-[var(--font-terminal)] text-base focus:outline-none focus:ring-2 focus:ring-[#0055FF] resize-none ${
+              className={`w-full h-12 border-2 border-black bg-white p-3 font-[var(--font-terminal)] text-base focus:outline-none focus:ring-2 focus:ring-[#0055FF] resize-none ${
                 isLoading ? "opacity-50 cursor-not-allowed bg-[#f3f2ff]" : ""
               }`}
               placeholder={isLoading ? "Processing..." : "Enter command or reply..."}
             />
-            <div className="absolute right-3 top-3 text-[#737688]">
-              {isLoading ? (
-                <span className="animate-spin block w-4 h-4 border-2 border-black border-t-transparent rounded-full" />
-              ) : (
-                <span className="animate-pulse block w-2 h-4 bg-black" />
-              )}
-            </div>
 
             {/* Slash command hints */}
             {showHints && filteredCommands.length > 0 && (
@@ -196,7 +189,9 @@ export default function CommandInput({ onSend, isLoading }: CommandInputProps) {
                 : "bg-black text-white hover:bg-[#0055FF] shadow-[2px_2px_0_0_rgba(0,85,255,1)]"
             }`}
           >
-            <span className="material-symbols-outlined text-sm">
+            <span
+              className={`material-symbols-outlined text-sm ${isLoading ? "animate-spin" : ""}`}
+            >
               {isLoading ? "sync" : "send"}
             </span>
             {isLoading ? "WORKING..." : "EXECUTE"}

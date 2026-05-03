@@ -3,14 +3,16 @@
 import { useState, useMemo } from "react";
 import { AGENT_TREE, getAgentIcon } from "@/lib/agent-icons";
 import type { AgentTreeNode } from "@/lib/agent-icons";
-import type { AgentSession } from "@/hooks/useCommandRoom";
+import type { AgentSession, SubagentInfo } from "@/hooks/useCommandRoom";
 
 interface AgentTreeProps {
   sessions: Map<string, AgentSession>;
+  subagents: Map<string, SubagentInfo>;
   currentSession: string;
   totalProgress: number;
   onSelectSession: (sessionId: string) => void;
   onCloseSession?: (sessionId: string) => void;
+  onSelectSubagent?: (subagent: SubagentInfo) => void;
 }
 
 /* ─── Hierarchy Tree ─── */
@@ -173,9 +175,42 @@ function BackgroundTaskCard({ id, session, onSelect, onClose }: { id: string; se
   );
 }
 
+/* ─── Subagent Card ─── */
+
+function SubagentCard({ subagent, onSelect }: { subagent: SubagentInfo; onSelect?: (subagent: SubagentInfo) => void }) {
+  const icon = getAgentIcon(subagent.role);
+  const label = subagent.role.replace(/-/g, "_").toUpperCase();
+  const isDone = subagent.status === "completed";
+  const isFailed = subagent.status === "failed";
+
+  return (
+    <div
+      onClick={() => onSelect?.(subagent)}
+      className={`border-2 border-black p-2 relative cursor-pointer ${isDone ? "bg-[#e7f5ec] opacity-80" : isFailed ? "bg-[#f5e7e7] opacity-80" : "bg-white hover:bg-[#f3f2ff]"} transition-colors`}
+      title={subagent.task}
+    >
+      <div className="flex items-center gap-2">
+        <div className={`w-6 h-6 border-2 border-black flex items-center justify-center ${isDone ? "bg-[#2ECC71] text-white" : isFailed ? "bg-[#df2b31] text-white" : "bg-[#ededfb] text-black"}`}>
+          <span className="material-symbols-outlined" style={{ fontSize: 12 }}>{icon}</span>
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="font-[var(--font-label)] text-[10px] font-bold uppercase truncate">{label}</div>
+          <div className="flex items-center gap-1">
+            <span className={`w-1.5 h-1.5 border border-black ${isDone ? "bg-[#2ECC71]" : isFailed ? "bg-[#df2b31]" : "bg-[#0055FF] animate-pulse"}`} />
+            <span className="font-[var(--font-terminal)] text-[8px] uppercase text-[#737688]">
+              {isDone ? "Done" : isFailed ? "Failed" : "Active"}
+            </span>
+          </div>
+        </div>
+      </div>
+      <div className="font-[var(--font-terminal)] text-[8px] text-[#737688] truncate mt-1">{subagent.task}</div>
+    </div>
+  );
+}
+
 /* ─── Main Sidebar ─── */
 
-export default function AgentTree({ sessions, currentSession, totalProgress, onSelectSession, onCloseSession }: AgentTreeProps) {
+export default function AgentTree({ sessions, subagents, currentSession, totalProgress, onSelectSession, onCloseSession, onSelectSubagent }: AgentTreeProps) {
   const [showHierarchy, setShowHierarchy] = useState(false);
   const entries = useMemo(() => [...sessions.entries()], [sessions]);
   const producerEntry = useMemo(() => entries.find(([, s]) => s.role === "producer"), [entries]);
@@ -186,6 +221,12 @@ export default function AgentTree({ sessions, currentSession, totalProgress, onS
       .filter(([, s]) => s.role !== "producer" && s.status === "active")
       .map(([, s]) => s.role),
     [entries]);
+
+  const activeSubagents = useMemo(() =>
+    [...subagents.values()].filter((sa) => sa.status === "active"),
+    [subagents]);
+
+  const totalActive = activeRoles.length + activeSubagents.length;
 
   // Background tasks (all non-producer sessions, with their session id)
   const backgroundTasks = useMemo(() =>
@@ -260,6 +301,24 @@ export default function AgentTree({ sessions, currentSession, totalProgress, onS
           </div>
         )}
 
+        {/* Subagent Tasks */}
+        {subagents.size > 0 && (
+          <div className="px-4 pb-2">
+            <span className="font-[var(--font-label)] text-[10px] uppercase text-[#434656] tracking-widest block mb-2">
+              Subagent Tasks ({subagents.size})
+            </span>
+            <div className="space-y-2">
+              {[...subagents.values()].map((sa) => (
+                <SubagentCard
+                  key={sa.id}
+                  subagent={sa}
+                  onSelect={onSelectSubagent}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Hierarchy Tree (toggleable) */}
         {showHierarchy && (
           <div className="px-4 pb-8 border-t-2 border-black pt-3">
@@ -277,12 +336,15 @@ export default function AgentTree({ sessions, currentSession, totalProgress, onS
 
       {/* Status Panel */}
       <div className="border-t-2 border-black bg-[#f3f2ff] p-4 shrink-0">
-        {activeRoles.length > 0 ? (
+        {totalActive > 0 ? (
           <>
             <div className="flex items-center gap-2 mb-2">
               <span className="w-2 h-2 bg-[#0055FF] border border-black inline-block" />
               <span className="font-[var(--font-label)] text-xs uppercase font-bold">
-                Active: {activeRoles.length}
+                Active: {totalActive}
+                {activeSubagents.length > 0 && (
+                  <span className="font-normal opacity-70 ml-1">({activeSubagents.length} sub)</span>
+                )}
               </span>
             </div>
             <div className="w-full h-2 border-2 border-black bg-white">

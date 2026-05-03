@@ -228,13 +228,14 @@ async function loadChatState(): Promise<ChatState> {
 }
 
 let chatStore: ChatState;
-loadChatState().then((state) => { chatStore = state; });
+const chatStoreReady = loadChatState().then((state) => { chatStore = state; });
+export { chatStoreReady };
 
 async function saveChatState(): Promise<void> {
   await writeData(CHAT_STATE_FILE, chatStore);
 }
 
-function producerSessionId(projectId: string): string {
+export function producerSessionId(projectId: string): string {
   return `producer-${projectId}`;
 }
 
@@ -299,7 +300,7 @@ async function updateProjectEngine(projectId: string, engine: ProjectEngine): Pr
  * events (spawn, completion) on the producer session so they survive
  * page navigation.
  */
-async function appendMessage(sessionId: string, msg: ChatMessage): Promise<void> {
+export async function appendMessage(sessionId: string, msg: ChatMessage): Promise<void> {
   const session = chatStore.sessions[sessionId];
   if (!session) return;
   session.messages.push(msg);
@@ -318,6 +319,7 @@ async function appendMessage(sessionId: string, msg: ChatMessage): Promise<void>
  * project-scoped UI.
  */
 export async function orphanProjectSessions(projectId: string): Promise<number> {
+  await chatStoreReady;
   let orphaned = 0;
   for (const session of Object.values(chatStore.sessions)) {
     if (session.projectId === projectId) {
@@ -571,6 +573,148 @@ chatRouter.delete("/sessions/:id", async (req: Request, res: Response) => {
   await saveChatState();
   res.json({ success: true });
 });
+
+// POST /api/chat/sessions/:id/close — Close a consultation session and forward summary to producer
+chatRouter.post("/sessions/:id/close", async (req: Request, res: Response) => {
+  const id = String(req.params.id);
+  const { summary } = req.body as { summary?: string };
+
+  const session = chatStore.sessions[id];
+  if (!session) {
+    res.status(404).json({ success: false, error: "Session not found" });
+    return;
+  }
+
+  // Prevent closing producer sessions
+  if (id === "producer" || id.startsWith("producer-")) {
+    res.status(400).json({ success: false, error: "Cannot close producer session via this endpoint" });
+    return;
+  }
+
+  // Restrict to consultation sessions only — this endpoint is not for regular spawned agents
+  if (!id.startsWith("consultation-")) {
+    res.status(400).json({ success: false, error: "This endpoint can only close consultation sessions" });
+    return;
+  }
+
+  const projectId = session.projectId;
+  if (!projectId) {
+    res.status(400).json({ success: false, error: "Session has no associated project" });
+    return;
+  }
+
+  // Verify producer session exists before we try to append
+  const pid = producerSessionId(projectId);
+  if (!chatStore.sessions[pid]) {
+    res.status(400).json({ success: false, error: "Producer session not found" });
+    return;
+  }
+
+  // Generate summary if not provided: collect last 3 agent/system messages
+  // (skip the initial welcome system message which contains "consultation session initialized")
+  let finalSummary = summary;
+  if (!finalSummary) {
+    const assistantMessages = session.messages
+      .filter((m) => (m.type === "agent" || m.type === "system") && !m.content.includes("consultation session initialized"))
+      .slice(-3);
+    if (assistantMessages.length > 0) {
+      finalSummary = assistantMessages.map((m) => m.content).join("\n\n---\n\n");
+    } else {
+      finalSummary = "No summary available.";
+    }
+  }
+
+  // Post summary to producer session
+  const roleDisplay = session.role.replace(/-/g, " ").toUpperCase();
+  await appendMessage(pid, {
+    id: `msg-${crypto.randomUUID().slice(0, 8)}`,
+    type: "agent",
+    sender: session.role,
+    content: `[${roleDisplay} CONSULTATION COMPLETE]\n\n${finalSummary}`,
+    timestamp: new Date().toISOString(),
+    showActions: false,
+  });
+
+  // Delete the consultation session after forwarding summary
+  delete chatStore.sessions[id];
+
+  broadcast({
+    type: "chat:session:deleted",
+    sessionId: id,
+  } as WSEvent);
+
+  await saveChatState();
+  res.json({ success: true, summary: finalSummary });
+});
+
+// POST /api/chat/sessions/consultation/test-create — Test helper: create a consultation session
+// Only available when ENABLE_TEST_ENDPOINTS is set. Used by E2E tests to create
+// consultation sessions without invoking the LLM.
+if (process.env.ENABLE_TEST_ENDPOINTS === "true") {
+  chatRouter.post("/sessions/consultation/test-create", async (req: Request, res: Response) => {
+    const { role, projectId, brief } = req.body as { role?: string; projectId?: string; brief?: string };
+
+    if (!role || !projectId) {
+      res.status(400).json({ success: false, error: "role and projectId are required" });
+      return;
+    }
+
+    const project = await getProjectById(projectId);
+    if (!project) {
+      res.status(404).json({ success: false, error: "Project not found" });
+      return;
+    }
+
+    const sessionId = `consultation-${role.toLowerCase().replace(/\s+/g, "-")}`;
+
+    if (chatStore.sessions[sessionId]) {
+      res.status(409).json({ success: false, error: `Consultation session ${sessionId} already exists` });
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const newSession: ExtendedChatSession = {
+      id: sessionId,
+      role,
+      projectId,
+      messages: [
+        {
+          id: `msg-${crypto.randomUUID().slice(0, 8)}`,
+          type: "system" as const,
+          sender: "SYSTEM",
+          content: brief ? `${role} consultation session initialized.\n\n**Brief:** ${brief}` : `${role} consultation session initialized.`,
+          timestamp: now,
+          showActions: false,
+        },
+      ],
+      status: "active" as const,
+      progress: 0,
+      spawnedAt: now,
+      conversationHistory: [],
+      fileOperations: [],
+      completedPhases: [],
+      currentTask: "",
+    };
+
+    chatStore.sessions[sessionId] = newSession;
+    await saveChatState();
+
+    broadcast({
+      type: "chat:session:created",
+      session: {
+        id: newSession.id,
+        role: newSession.role,
+        projectId: newSession.projectId,
+        messages: newSession.messages,
+        status: newSession.status,
+        progress: newSession.progress,
+        spawnedAt: newSession.spawnedAt,
+      },
+    } as WSEvent);
+
+    res.status(201).json({ success: true, data: newSession });
+  });
+}
 
 // POST /api/chat/sessions/:id/clear — Clear all messages in a session
 chatRouter.post("/sessions/:id/clear", async (req: Request, res: Response) => {
@@ -983,7 +1127,8 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
     type: "agent:spawned",
     agentId: invocationId,
     agent: agentRole,
-    sessionId: sessionId,
+    sessionId,
+    projectId,
   } as WSEvent);
 
   broadcast({
