@@ -4,7 +4,7 @@ import { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "./useWebSocket";
 import { useProject } from "@/contexts/ProjectContext";
-import type { WSEvent } from "@game-studio/types";
+import type { WSEvent, ContextUsage } from "@game-studio/types";
 
 export interface DiffBlock {
   filePath: string;
@@ -100,7 +100,7 @@ export interface SubagentInfo {
 
 /* ─── localStorage Cache ─── */
 
-const CACHE_VERSION = 2;
+const CACHE_VERSION = 3;
 const CACHE_KEY_PREFIX = "chat-cache-v";
 
 interface CachedChatData {
@@ -118,8 +118,27 @@ function getCacheKey(projectId: string): string {
   return `${CACHE_KEY_PREFIX}${CACHE_VERSION}-${projectId}`;
 }
 
+function purgeStaleCacheKeys(): void {
+  try {
+    if (localStorage.getItem("chat-cache-purged-v3")) return;
+    const keysToRemove: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && (key.startsWith("chat-cache-v") || key.startsWith("chat-sub-"))) {
+        keysToRemove.push(key);
+      }
+    }
+    keysToRemove.forEach((k) => localStorage.removeItem(k));
+    if (keysToRemove.length > 0) {
+      console.log("[Cache] Purged", keysToRemove.length, "stale keys");
+    }
+    localStorage.setItem("chat-cache-purged-v3", "1");
+  } catch { /* ignore */ }
+}
+
 function loadCache(projectId: string): CachedChatData | null {
   try {
+    purgeStaleCacheKeys();
     const raw = localStorage.getItem(getCacheKey(projectId));
     if (!raw) return null;
     const parsed = JSON.parse(raw) as CachedChatData;
@@ -732,6 +751,9 @@ export function useCommandRoom() {
   const [initialized, setInitialized] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [subagents, setSubagents] = useState<Map<string, SubagentInfo>>(new Map());
+  const [contextUsageMap, setContextUsageMap] = useState<Map<string, ContextUsage>>(new Map());
+  const [contextPressure, setContextPressure] = useState<Map<string, number>>(new Map());
+  const [compactingSessionId, setCompactingSessionId] = useState<string | null>(null);
   const lastSpawnedRef = useRef<string | null>(null);
   const activityLogRef = useRef<string[]>([]);
   const addSessionMessageRef = useRef<(role: string, msg: Omit<ChatMessage, "id" | "timestamp">) => void | undefined>(undefined);
@@ -1007,6 +1029,36 @@ export function useCommandRoom() {
         });
         break;
       }
+    }
+
+    // Handle chat:context — real-time token usage from API
+    if (event.type === "chat:context") {
+      setContextUsageMap((prev) => {
+        const next = new Map(prev);
+        next.set(event.sessionId, event.contextUsage);
+        return next;
+      });
+    }
+
+    // Handle chat:context-pressure — context window filling up
+    if (event.type === "chat:context-pressure") {
+      setContextPressure((prev) => {
+        const next = new Map(prev);
+        next.set(event.sessionId, event.fillPercent);
+        return next;
+      });
+    }
+
+    // Handle chat:session:compacted — session compacted into new generation
+    if (event.type === "chat:session:compacted") {
+      // Switch to the new session
+      setCurrentSession(event.newSession.id);
+      // Clear pressure for the old session
+      setContextPressure((prev) => {
+        const next = new Map(prev);
+        next.delete(event.oldSessionId);
+        return next;
+      });
     }
 
     // Handle chat:session:created to update projectId mapping (for sessions created by other clients or after refresh)
@@ -1324,19 +1376,37 @@ You can also use: spawn <agent>, approve, done <agent>`,
         }
         case "cost": {
           addSessionMessage(producerSessionIdRef.current, { type: "user", sender: "DIRECTOR", content: trimmed });
-          addSessionMessage(producerSessionIdRef.current, {
-            type: "agent",
-            sender: "producer",
-            content: `Token Usage Estimates:
-━━━━━━━━━━━━━━━━━━━━━━━
-Input:  ~12,500 tokens ($0.09)
-Output: ~8,200 tokens ($0.24)
-Tools:  ~45 calls ($0.18)
-━━━━━━━━━━━━━━━━━━━━━━━
-Total:  ~$0.51 USD
-Agents: 3 active`,
-            showActions: false,
-          });
+          const usage = contextUsageMap.get(producerSessionIdRef.current);
+          if (usage) {
+            const pct = Math.round((usage.lastInputTokens / usage.contextWindowTokens) * 100);
+            addSessionMessage(producerSessionIdRef.current, {
+              type: "agent",
+              sender: "producer",
+              content: `Token Usage (API-reported):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Last Input:    ${usage.lastInputTokens.toLocaleString()} tokens
+Last Output:   ${usage.lastOutputTokens.toLocaleString()} tokens
+Cumulative In: ${usage.cumulativeInputTokens.toLocaleString()} tokens
+Cumulative Out:${usage.cumulativeOutputTokens.toLocaleString()} tokens
+Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.contextWindowTokens.toLocaleString()})
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+              showActions: false,
+            });
+          } else {
+            addSessionMessage(producerSessionIdRef.current, {
+              type: "agent",
+              sender: "producer",
+              content: "No token usage data yet. Send a message to start tracking.",
+              showActions: false,
+            });
+          }
+          return;
+        }
+        case "compact": {
+          const sid = producerSessionIdRef.current;
+          if (!sid) return;
+          addSessionMessage(sid, { type: "user", sender: "DIRECTOR", content: trimmed });
+          compactSession(sid);
           return;
         }
         case "diff": {
@@ -1425,6 +1495,16 @@ Agents: 3 active`,
 
     setIsLoading(true);
 
+    // Safety timeout — unlock input after 5 minutes even if LLM loop hangs
+    const loadingTimeout = setTimeout(() => {
+      setIsLoading(false);
+      addSessionMessage(session, {
+        type: "system",
+        sender: "SYSTEM",
+        content: "Response is still processing in the background. You can send another message.",
+      });
+    }, 5 * 60 * 1000);
+
     // Call real API for current session
     apiFetch<{ userMessage: ChatMessage; assistantMessage?: ChatMessage; errorMessage?: ChatMessage }>(
       `/api/chat/sessions/${session}/messages`,
@@ -1440,6 +1520,7 @@ Agents: 3 active`,
       }
     )
       .then((result) => {
+        clearTimeout(loadingTimeout);
         setIsLoading(false);
         if (result.assistantMessage) {
           const msgType = result.assistantMessage.type as ChatMessage["type"];
@@ -1471,6 +1552,7 @@ Agents: 3 active`,
         }
       })
       .catch((error) => {
+        clearTimeout(loadingTimeout);
         setIsLoading(false);
         console.error("Failed to send message:", error);
         addSessionMessage(session, {
@@ -1545,11 +1627,46 @@ Agents: 3 active`,
     return out;
   }, [subagents, sessions]);
 
+  const compactSession = useCallback(async (sessionId: string) => {
+    console.log("[Compact] Requested for sessionId:", sessionId, "producerRef:", producerSessionIdRef.current);
+    setCompactingSessionId(sessionId);
+    addSessionMessage(producerSessionIdRef.current, {
+      type: "system",
+      sender: "SYSTEM",
+      content: "Compacting session...",
+    });
+    try {
+      const result = await apiFetch<{ session: { id: string; generation?: number }; oldSessionId: string }>(
+        `/api/chat/sessions/${encodeURIComponent(sessionId)}/compact`,
+        { method: "POST" },
+      );
+      if (result.session) {
+        addSessionMessage(result.session.id, {
+          type: "system",
+          sender: "SYSTEM",
+          content: `Session compacted to generation ${result.session.generation ?? 2}. Context reset.`,
+        });
+      }
+    } catch (err) {
+      addSessionMessage(producerSessionIdRef.current, {
+        type: "system",
+        sender: "SYSTEM",
+        content: `Compact failed: ${(err as Error).message}`,
+      });
+    } finally {
+      setCompactingSessionId(null);
+    }
+  }, []);
+
   return {
     sessions,
     subagents: visibleSubagents,
     currentSession,
     currentMessages,
+    contextUsageMap,
+    contextPressure,
+    compactSession,
+    compactingSessionId,
     threadId,
     threadTitle,
     totalProgress,
