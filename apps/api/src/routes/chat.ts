@@ -1,7 +1,7 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
 import { join } from "node:path";
-import type { AgentRole, ChatSession, ChatMessage, CreateMessageRequest, CreateChatSessionRequest, DashboardData, Project, ProjectEngine } from "@game-studio/types";
+import type { AgentRole, ChatSession, ChatMessage, CreateMessageRequest, CreateChatSessionRequest, ContextUsage, DashboardData, Project, ProjectEngine } from "@game-studio/types";
 import type { LLMMessage } from "../llm/zai-client.js";
 import { broadcastEvent, readData, writeData } from "../services/data-store.js";
 import { invokeAgent, continueConversation, type ProjectContext, detectEngineFromWorkspace } from "../services/llm-service.js";
@@ -14,6 +14,7 @@ import { triggerVerification } from "../services/verification-service.js";
 import { getOrCreateGodotMCPService, removeGodotMCPService, launchGodotEditor, type GodotMCPServiceOptions } from "../services/godot-mcp-service.js";
 import { logger } from "../utils/logger.js";
 import { loadConfig } from "../config.js";
+import { getModelContextWindow, getZaiModel, MAX_CONTEXT_TOKENS, CHARS_PER_TOKEN_ESTIMATE } from "../config/model-mapping.js";
 
 export const chatRouter: Router = Router();
 
@@ -115,6 +116,9 @@ interface ExtendedChatSession extends ChatSession {
   fileOperations: Array<{ tool: string; path?: string; result: "success" | "failed"; timestamp: string }>;
   completedPhases: string[];
   currentTask: string;
+  // Token tracking
+  cumulativeInputTokens: number;
+  cumulativeOutputTokens: number;
 }
 
 const CHAT_STATE_FILE = "chat-state.json";
@@ -145,15 +149,17 @@ function migrateLegacyProducer(state: ChatState): boolean {
   return true;
 }
 
-/** Prune conversation history to stay within context limits */
-const MAX_CONTEXT_CHARS = 500_000;
-
+/** Prune conversation history to stay within context limits (token-aware) */
 function pruneConversationHistory(history: LLMMessage[]): LLMMessage[] {
-  const totalChars = history.reduce(
-    (sum, m) => sum + (typeof m.content === "string" ? m.content.length : 0),
-    0
+  if (!history || history.length === 0) return history;
+
+  const estTokens = Math.ceil(
+    history.reduce(
+      (sum, m) => sum + (typeof m.content === "string" ? m.content.length : 0),
+      0
+    ) / CHARS_PER_TOKEN_ESTIMATE
   );
-  if (totalChars <= MAX_CONTEXT_CHARS) return history;
+  if (estTokens <= MAX_CONTEXT_TOKENS) return history;
 
   // Keep recent messages as atomic groups (assistant+tool pairs must not be split)
   // Increased from 30 to 50 to preserve more context for long-running tasks
@@ -207,6 +213,8 @@ async function loadChatState(): Promise<ChatState> {
       if (!session.fileOperations) session.fileOperations = [];
       if (!session.completedPhases) session.completedPhases = [];
       if (!session.currentTask) session.currentTask = "";
+      if (session.cumulativeInputTokens === undefined) session.cumulativeInputTokens = 0;
+      if (session.cumulativeOutputTokens === undefined) session.cumulativeOutputTokens = 0;
       state.sessions[key] = session;
     }
     if (migrateLegacyProducer(state)) {
@@ -312,6 +320,42 @@ export async function appendMessage(sessionId: string, msg: ChatMessage): Promis
   } as WSEvent);
 }
 
+/** Update token usage on a session and broadcast to frontend */
+function updateSessionTokenUsage(
+  session: ExtendedChatSession,
+  usage: { input_tokens: number; output_tokens: number },
+  model: string,
+): void {
+  session.cumulativeInputTokens += usage.input_tokens;
+  session.cumulativeOutputTokens += usage.output_tokens;
+
+  const contextUsage: ContextUsage = {
+    lastInputTokens: usage.input_tokens,
+    lastOutputTokens: usage.output_tokens,
+    cumulativeInputTokens: session.cumulativeInputTokens,
+    cumulativeOutputTokens: session.cumulativeOutputTokens,
+    contextWindowTokens: getModelContextWindow(model),
+    lastUpdated: new Date().toISOString(),
+  };
+  session.contextUsage = contextUsage;
+
+  broadcast({
+    type: "chat:context",
+    sessionId: session.id,
+    contextUsage,
+  } as WSEvent);
+
+  // Context pressure detection
+  const fillPercent = Math.round((usage.input_tokens / contextUsage.contextWindowTokens) * 100);
+  if (fillPercent >= 80) {
+    broadcast({
+      type: "chat:context-pressure",
+      sessionId: session.id,
+      fillPercent,
+    } as WSEvent);
+  }
+}
+
 /**
  * Orphan all chat sessions associated with the given project. Sets
  * projectId to null on each matching session and persists the chat
@@ -350,6 +394,7 @@ chatRouter.get("/sessions", (_req: Request, res: Response) => {
     status: s.status,
     progress: s.progress,
     spawnedAt: s.spawnedAt,
+    contextUsage: s.contextUsage,
   }));
   res.json({ success: true, data: { sessions: sessionsData, currentSessionId: chatStore.currentSessionId } });
 });
@@ -397,8 +442,29 @@ chatRouter.get("/sessions/producer/:projectId", async (req: Request, res: Respon
 
   const sessionId = producerSessionId(projectId);
   const existing = chatStore.sessions[sessionId];
-  if (existing) {
-    res.json({ success: true, data: existing });
+
+  // Resolve latest generation if the base session was compacted
+  let activeSession = existing;
+  if (activeSession && (activeSession.status as string) === "compacted") {
+    let gen = activeSession.generation ?? 1;
+    while (true) {
+      const nextId = `${sessionId}-g${gen + 1}`;
+      const next = chatStore.sessions[nextId];
+      if (!next) break;
+      activeSession = next;
+      gen = next.generation ?? gen + 1;
+      if ((activeSession.status as string) !== "compacted") break;
+    }
+  }
+
+  if (activeSession && (activeSession.status as string) !== "compacted") {
+    res.json({ success: true, data: activeSession });
+    return;
+  }
+
+  // If the base session exists but was compacted and no generation found, fall through to create
+  if (activeSession) {
+    res.json({ success: true, data: activeSession });
     return;
   }
 
@@ -432,6 +498,9 @@ chatRouter.get("/sessions/producer/:projectId", async (req: Request, res: Respon
     fileOperations: [],
     completedPhases: [],
     currentTask: "",
+    cumulativeInputTokens: 0,
+    cumulativeOutputTokens: 0,
+    generation: 1,
   };
 
   chatStore.sessions[sessionId] = newSession;
@@ -523,6 +592,8 @@ chatRouter.post("/sessions", async (req: Request, res: Response) => {
     fileOperations: [],
     completedPhases: [],
     currentTask: "",
+    cumulativeInputTokens: 0,
+    cumulativeOutputTokens: 0,
   };
 
   chatStore.sessions[sessionId] = newSession;
@@ -694,6 +765,8 @@ if (process.env.ENABLE_TEST_ENDPOINTS === "true") {
       fileOperations: [],
       completedPhases: [],
       currentTask: "",
+      cumulativeInputTokens: 0,
+      cumulativeOutputTokens: 0,
     };
 
     chatStore.sessions[sessionId] = newSession;
@@ -730,6 +803,9 @@ chatRouter.post("/sessions/:id/clear", async (req: Request, res: Response) => {
   (session as ExtendedChatSession).fileOperations = [];
   (session as ExtendedChatSession).completedPhases = [];
   (session as ExtendedChatSession).currentTask = "";
+  (session as ExtendedChatSession).cumulativeInputTokens = 0;
+  (session as ExtendedChatSession).cumulativeOutputTokens = 0;
+  session.contextUsage = undefined;
   session.progress = 0;
   session.status = "active";
 
@@ -774,6 +850,160 @@ chatRouter.post("/sessions/:id/clear", async (req: Request, res: Response) => {
 
   await saveChatState();
   res.json({ success: true });
+});
+
+// POST /api/chat/sessions/:id/compact — Compact session into new generation
+chatRouter.post("/sessions/:id/compact", async (req: Request, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const session = chatStore.sessions[id];
+
+    if (!session) {
+      logger.warn({ requestedId: id, availableIds: Object.keys(chatStore.sessions).slice(0, 10) }, "Compact: session not found");
+      res.status(404).json({ error: "Session not found" });
+      return;
+    }
+
+    if (session.conversationHistory.length < 4) {
+      res.status(400).json({ error: "Not enough history to compact" });
+      return;
+    }
+
+    // Build summary from conversation history
+    const conversationText = session.conversationHistory
+      .map((m: LLMMessage) => `${m.role}: ${typeof m.content === "string" ? m.content.slice(0, 3000) : JSON.stringify(m.content).slice(0, 3000)}`)
+      .join("\n\n");
+
+    const summaryPrompt = `Summarize this agent conversation session concisely.
+Structure your summary with these sections:
+
+## Key Decisions
+- Important decisions made and their rationale
+
+## Active Tasks
+- What was being worked on, current progress, what remains
+
+## Code & File State
+- Key files created/modified, important code patterns
+
+## Context
+- Project context, constraints, dependencies
+
+Remove: greetings, small talk, verbose explanations, repeated content.
+Keep: specific facts, numbers, file paths, function names, architecture decisions.
+
+Conversation (${session.conversationHistory.length} messages):
+${conversationText}
+
+Max 4000 characters. Respond ONLY with the summary.`;
+
+    const config = loadConfig();
+    const summaryResponse = await fetch(`${config.ZAI_BASE_URL}/v1/messages`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": config.ZAI_API_KEY,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "glm-4.7-flash",
+        max_tokens: 2048,
+        messages: [{ role: "user", content: summaryPrompt }],
+      }),
+    });
+
+    let summaryText = "";
+    if (summaryResponse.ok) {
+      const data = await summaryResponse.json() as {
+        content?: Array<{ type: string; text?: string }>;
+      };
+      summaryText = data.content?.find((c) => c.type === "text")?.text ?? "";
+    } else {
+      const errText = await summaryResponse.text();
+      logger.error({ status: summaryResponse.status, body: errText.slice(0, 200) }, "Compact summary LLM call failed");
+      res.status(500).json({ error: "Failed to generate summary" });
+      return;
+    }
+
+    if (!summaryText) {
+      res.status(500).json({ error: "Summary was empty" });
+      return;
+    }
+
+    const oldGeneration = session.generation ?? 1;
+    const newGeneration = oldGeneration + 1;
+    const newId = `${id}-g${newGeneration}`;
+
+    // Check new session doesn't already exist
+    if (chatStore.sessions[newId]) {
+      res.status(409).json({ error: "Compacted session already exists" });
+      return;
+    }
+
+    const now = new Date().toISOString();
+
+    // Create new session inheriting from old
+    const newSession: ExtendedChatSession = {
+      ...session,
+      id: newId,
+      messages: [
+        {
+          id: `msg-${crypto.randomUUID().slice(0, 8)}`,
+          type: "system",
+          sender: "SYSTEM",
+          content: `Session compacted from generation ${oldGeneration}. Previous context summarized below.`,
+          timestamp: now,
+          showActions: false,
+        },
+        {
+          id: `msg-${crypto.randomUUID().slice(0, 8)}`,
+          type: "agent",
+          sender: session.role,
+          content: `[Previous Context Summary]\n\n${summaryText}`,
+          timestamp: now,
+          showActions: false,
+        },
+      ],
+      status: "active",
+      progress: 0,
+      conversationHistory: [
+        { role: "user", content: `[Previous Context Summary — Generation ${oldGeneration}]\n\n${summaryText}` },
+      ],
+      fileOperations: [],
+      completedPhases: [],
+      currentTask: "",
+      cumulativeInputTokens: 0,
+      cumulativeOutputTokens: 0,
+      contextUsage: undefined,
+      compactedFrom: id,
+      generation: newGeneration,
+    };
+
+    // Archive old session
+    session.status = "compacted" as ChatSession["status"] & string;
+
+    chatStore.sessions[newId] = newSession;
+    await saveChatState();
+
+    logger.info({ oldSessionId: id, newSessionId: newId, generation: newGeneration, summaryChars: summaryText.length }, "Session compacted");
+
+    broadcast({
+      type: "chat:session:compacted",
+      oldSessionId: id,
+      newSession,
+    } as WSEvent);
+
+    // Also broadcast session:created so frontend adds it to tabs
+    broadcast({
+      type: "chat:session:created",
+      session: newSession,
+    } as WSEvent);
+
+    res.json({ session: newSession, oldSessionId: id });
+  } catch (err) {
+    logger.error({ err }, "Compact endpoint error");
+    res.status(500).json({ error: "Compaction failed" });
+  }
 });
 
 // POST /api/chat/sessions/:id/messages — Add message and get LLM response
@@ -894,6 +1124,12 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
       }
     };
 
+    // Track token usage from API responses
+    const model = getZaiModel(agentRole);
+    const onTokenUsage = (usage: { input_tokens: number; output_tokens: number }) => {
+      updateSessionTokenUsage(session as ExtendedChatSession, usage, model);
+    };
+
     const result = await continueConversation(
       agentRole,
       session.conversationHistory,
@@ -903,6 +1139,7 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
       projectContext,
       onFileOperation,
       continueCtx || undefined,
+      onTokenUsage,
     );
 
     // Stop heartbeat
@@ -935,9 +1172,6 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
       role: "assistant",
       content: result.content || `[${agentRole} returned no content]`,
     });
-
-    // Prune conversation history to stay within context limits
-    session.conversationHistory = pruneConversationHistory(session.conversationHistory);
 
     // Check if LLM asked a question via AskUserQuestion tool
     const questionData = parseQuestionFromToolResult(result.toolCalls);
@@ -1119,6 +1353,8 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
     fileOperations: [],
     completedPhases: [],
     currentTask: "",
+    cumulativeInputTokens: 0,
+    cumulativeOutputTokens: 0,
   };
 
   chatStore.sessions[sessionId] = newSession;
@@ -1193,6 +1429,7 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
     try {
       // Don't broadcast agent events from invokeAgent — we handle them ourselves here
       const projectContext = toProjectContext(project);
+      const spawnModel = getZaiModel(agentRole);
       logger.info({ event: "spawn_invoke_start", agentRole, taskLength: task?.length ?? 0, sessionId }, `Invoking agent ${agentRole}`);
       const result = await invokeAgent(
         agentRole,
@@ -1209,6 +1446,9 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
           if (newSession.fileOperations.length > 200) {
             newSession.fileOperations = newSession.fileOperations.slice(-200);
           }
+        },
+        (usage) => {
+          updateSessionTokenUsage(newSession as ExtendedChatSession, usage, spawnModel);
         },
       );
       logger.info({ event: "spawn_invoke_complete", agentRole, contentLength: result.content.length, sessionId }, `Agent ${agentRole} completed with ${result.content.length} chars`);

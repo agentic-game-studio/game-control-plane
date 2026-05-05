@@ -11,6 +11,7 @@ const COMMANDS = [
   { cmd: "/spawn", desc: "Bring an agent online" },
   { cmd: "/approve", desc: "Approve last agent request" },
   { cmd: "/done", desc: "Complete agent task" },
+  { cmd: "/compact", desc: "Compact session into new generation" },
   { cmd: "/clear", desc: "Clear the chat" },
   { cmd: "/help", desc: "Show available commands" },
   { cmd: "/cost", desc: "Show mock token usage" },

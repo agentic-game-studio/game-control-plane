@@ -640,6 +640,8 @@ async function executeTool(
           fileOperations: [],
           completedPhases: [],
           currentTask: "",
+          cumulativeInputTokens: 0,
+          cumulativeOutputTokens: 0,
         };
 
         // Atomic check-and-set to prevent concurrent creation of same session
@@ -861,6 +863,7 @@ export async function invokeAgent(
   _depth = 0,
   projectContext?: ProjectContext,
   onFileOperation?: FileOperationCallback,
+  onTokenUsage?: import("../llm/zai-client.js").TokenUsageCallback,
 ): Promise<InvokeResult> {
   const invocationId = `invoke-${crypto.randomUUID().slice(0, 8)}`;
 
@@ -927,7 +930,8 @@ export async function invokeAgent(
       toolExecutor,
       onProgress,
       sessionId,
-      onFileOperation
+      onFileOperation,
+      onTokenUsage
     );
 
     if (broadcastEvents) {
@@ -972,6 +976,7 @@ export async function continueConversation(
   projectContext?: ProjectContext,
   onFileOperation?: FileOperationCallback,
   continuationContext?: string,
+  onTokenUsage?: import("../llm/zai-client.js").TokenUsageCallback,
 ): Promise<InvokeResult> {
   try {
     // Inject continuation context temporarily (not persisted to session)
@@ -1015,7 +1020,8 @@ export async function continueConversation(
       toolExecutor,
       onProgress,
       sessionId,
-      onFileOperation
+      onFileOperation,
+      onTokenUsage
     );
 
     return {

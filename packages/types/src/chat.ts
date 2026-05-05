@@ -109,6 +109,16 @@ export interface FileOperation {
   timestamp: string;
 }
 
+/** Token usage tracking per session — populated from API response usage data */
+export interface ContextUsage {
+  lastInputTokens: number;
+  lastOutputTokens: number;
+  cumulativeInputTokens: number;
+  cumulativeOutputTokens: number;
+  contextWindowTokens: number;
+  lastUpdated: string;
+}
+
 export interface ChatSession {
   id: string;
   role: string;
@@ -121,6 +131,11 @@ export interface ChatSession {
   fileOperations?: FileOperation[];
   completedPhases?: string[];
   currentTask?: string;
+  // Token usage from API responses
+  contextUsage?: ContextUsage;
+  // Session compaction (Claude Code style)
+  compactedFrom?: string;
+  generation?: number;
 }
 
 export interface CreateChatSessionRequest {

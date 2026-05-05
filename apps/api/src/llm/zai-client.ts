@@ -12,6 +12,7 @@ import { loadConfig } from "../config.js";
 import { getAgentSystemPrompt, loadAgentPrompts } from "../prompts/agent-prompt-loader.js";
 import { logger } from "../utils/logger.js";
 import { broadcast } from "../services/websocket.js";
+import { MAX_CONTEXT_TOKENS, SUMMARIZE_TOKEN_THRESHOLD, CHARS_PER_TOKEN_ESTIMATE } from "../config/model-mapping.js";
 
 export interface LLMMessage {
   role: "system" | "user" | "assistant" | "tool";
@@ -73,9 +74,7 @@ const TOOL_IMPORTANCE: Record<string, number> = {
   Task: 10,
 };
 const DEFAULT_TOOL_IMPORTANCE = 40;
-const MAX_CONTEXT_CHARS = 500_000;
 const MAX_TOOL_RESULT_BYTES = 15_000;
-const SUMMARIZE_THRESHOLD = 400_000;  // Trigger summary when context exceeds this
 const KEEP_RECENT_MESSAGES = 10;       // Never prune last N messages
 
 async function fetchWithRetry(url: string, options: RequestInit, retries = MAX_RETRIES): Promise<Response> {
@@ -160,10 +159,14 @@ function countMessageChars(messages: LLMMessage[]): number {
   );
 }
 
+/** Rough token estimate from messages (pre-emptive check before API call) */
+function estimateMessageTokens(messages: LLMMessage[]): number {
+  return Math.ceil(countMessageChars(messages) / CHARS_PER_TOKEN_ESTIMATE);
+}
+
 /** Summarize old messages when context exceeds threshold */
 async function summarizeOldMessages(messages: LLMMessage[]): Promise<string | null> {
-  const totalChars = countMessageChars(messages);
-  if (totalChars <= SUMMARIZE_THRESHOLD) return null;
+  if (estimateMessageTokens(messages) <= SUMMARIZE_TOKEN_THRESHOLD) return null;
 
   // Separate system, recent, and old messages
   const systemMsgs = messages.filter(m => m.role === "system");
@@ -223,20 +226,16 @@ Respond ONLY with the summary, nothing else. Max 2000 characters.`;
 }
 
 function pruneMessages(messages: LLMMessage[]): LLMMessage[] {
-  let totalChars = messages.reduce(
-    (sum, m) => sum + (typeof m.content === "string" ? m.content.length : 0),
-    0
-  );
-  if (totalChars <= MAX_CONTEXT_CHARS) return messages;
+  if (estimateMessageTokens(messages) <= MAX_CONTEXT_TOKENS) return messages;
 
   const result: LLMMessage[] = [];
-  let usedChars = 0;
+  let usedTokens = 0;
 
   // Keep system messages
   for (const msg of messages) {
     if (msg.role === "system") {
       result.push(msg);
-      usedChars += typeof msg.content === "string" ? msg.content.length : 0;
+      usedTokens += Math.ceil((typeof msg.content === "string" ? msg.content.length : 0) / CHARS_PER_TOKEN_ESTIMATE);
     }
   }
 
@@ -254,14 +253,16 @@ function pruneMessages(messages: LLMMessage[]): LLMMessage[] {
   for (let i = 0; i < recent.length; i++) {
     const msg = recent[i];
     const charCount = typeof msg.content === "string" ? msg.content.length : 0;
+    const tokenCount = Math.ceil(charCount / CHARS_PER_TOKEN_ESTIMATE);
 
-    if (usedChars + charCount <= MAX_CONTEXT_CHARS) {
+    if (usedTokens + tokenCount <= MAX_CONTEXT_TOKENS) {
       result.push(msg);
-      usedChars += charCount;
+      usedTokens += tokenCount;
     } else {
-      const remaining = MAX_CONTEXT_CHARS - usedChars;
-      if (remaining > 100) {
-        result.push({ ...msg, content: truncate(typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content), remaining) });
+      const remainingTokens = MAX_CONTEXT_TOKENS - usedTokens;
+      const remainingChars = remainingTokens * CHARS_PER_TOKEN_ESTIMATE;
+      if (remainingChars > 100) {
+        result.push({ ...msg, content: truncate(typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content), remainingChars) });
       }
       break;
     }
@@ -384,13 +385,17 @@ export type ProgressCallback = (info: {
 /** Callback to track file operations for long-running task context */
 export type FileOperationCallback = (op: { tool: string; path?: string; result: "success" | "failed" }) => void;
 
+/** Callback for real-time token usage updates from API responses */
+export type TokenUsageCallback = (usage: { input_tokens: number; output_tokens: number }) => void;
+
 /** Call LLM with tool execution loop */
 export async function callLLMWithTools(
   request: LLMRequest,
   toolExecutor: (name: string, input: Record<string, unknown>) => Promise<string>,
   onProgress?: ProgressCallback,
   sessionId?: string,
-  onFileOperation?: FileOperationCallback
+  onFileOperation?: FileOperationCallback,
+  onTokenUsage?: TokenUsageCallback
 ): Promise<LLMResponse> {
   const config = loadConfig();
   const maxTools = config.MAX_TOOL_CALLS;
@@ -401,7 +406,6 @@ export async function callLLMWithTools(
   let lastCheckpointIteration = 0;
   let messages = [...request.messages];
   let recentToolCalls: Array<{ name: string; inputHash: string }> = [];
-  let summarizedThisContext = false;
 
   while (iteration < 200) {
     iteration++;
@@ -412,27 +416,8 @@ export async function callLLMWithTools(
       logger.info({ iteration, totalTools, event: "checkpoint" }, `Checkpoint at iteration ${iteration}, ${totalTools} total tools`);
     }
 
-    // Check if we need to summarize old messages to stay within context
-    if (!summarizedThisContext && countMessageChars(messages) > SUMMARIZE_THRESHOLD) {
-      const summary = await summarizeOldMessages(messages);
-      if (summary) {
-        // Get system messages to preserve
-        const systemMsgs = messages.filter(m => m.role === "system");
-        const nonSystem = messages.filter(m => m.role !== "system");
-        const recentMsgs = nonSystem.slice(-KEEP_RECENT_MESSAGES);
-
-        // Replace messages with: system + summary + recent
-        messages = [
-          ...systemMsgs,
-          { role: "user", content: `[Previous Context Summary — Do not repeat this information verbatim, but use it for continuity]\n${summary}` },
-          ...recentMsgs,
-        ];
-        summarizedThisContext = true;
-        logger.info({ event: "context_summarized", originalChars: countMessageChars(messages), summaryChars: summary.length }, "Context summarized");
-      }
-    }
-
     const response = await callZAI({ ...request, messages });
+    if (response.usage) onTokenUsage?.(response.usage);
     onProgress?.({ iteration, totalTools, phase: "thinking", thinking: response.content.slice(0, 500) });
 
     if (!response.tool_calls || response.tool_calls.length === 0) {
@@ -448,6 +433,7 @@ export async function callLLMWithTools(
         content: `You have reached the maximum of ${maxTools} tool calls. Output your final response now.`,
       });
       const final = await callZAI({ ...request, messages });
+      if (final.usage) onTokenUsage?.(final.usage);
       return { ...final, tool_calls: undefined };
     }
 
@@ -530,6 +516,7 @@ Use "Now implementing..." to indicate you're continuing work rather than startin
         // Force stop after 25 iterations if still looping
         if (iteration > 25) {
           const final = await callZAI({ ...request, messages });
+          if (final.usage) onTokenUsage?.(final.usage);
           return { ...final, tool_calls: undefined };
         }
       }
@@ -537,15 +524,11 @@ Use "Now implementing..." to indicate you're continuing work rather than startin
 
     messages.push({ role: "assistant", content: response.content, tool_calls: response.tool_calls });
     messages.push({ role: "user", content: toolResults.join("\n\n") });
-
-    // Prune if too many messages
-    if (messages.length > 80) {
-      messages = pruneMessages(messages);
-    }
   }
 
   // Max iterations — return last response
   const last = await callZAI({ ...request, messages });
+  if (last.usage) onTokenUsage?.(last.usage);
   return { ...last, tool_calls: undefined };
 }
 

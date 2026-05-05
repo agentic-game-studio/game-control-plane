@@ -1,3 +1,5 @@
+import type { ContextUsage } from "@game-studio/types";
+
 /**
  * Producer LLM history budget — keep aligned with MAX_CONTEXT_CHARS in
  * apps/api/src/routes/chat.ts (pruneConversationHistory).
@@ -9,6 +11,14 @@ export const PRODUCER_MODEL_CONTEXT_TOKENS = 200_000;
 
 /** Rough chars→tokens for the Context bar only (no tokenizer on the client). */
 export const CONTEXT_CHARS_PER_TOKEN_ESTIMATE = 4;
+
+/** Fill percent from real API-reported token usage (ground truth) */
+export function contextFillPercentFromUsage(contextUsage: ContextUsage | undefined | null): number {
+  if (!contextUsage || !contextUsage.contextWindowTokens) return 0;
+  return Math.min(100, Math.round(
+    (contextUsage.lastInputTokens / contextUsage.contextWindowTokens) * 100
+  ));
+}
 
 /** Approximate serialized size of persisted conversationHistory entries */
 export function countConversationHistoryChars(

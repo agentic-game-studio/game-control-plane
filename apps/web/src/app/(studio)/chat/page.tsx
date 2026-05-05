@@ -81,6 +81,10 @@ function ChatPageInner() {
     connected,
     isLoading,
     producerSessionId,
+    contextUsageMap,
+    contextPressure,
+    compactSession,
+    compactingSessionId,
   } = useCommandRoom();
 
   const handleDecision = (action: string, sender: string) => {
@@ -167,6 +171,11 @@ function ChatPageInner() {
         <ProgressSummary
           activeAgents={[...sessions.values()].filter(s => s.status === "active" && s.role !== "producer").length}
           producerSessionId={producerSessionId || null}
+          currentSession={currentSession}
+          contextUsageMap={contextUsageMap}
+          contextPressure={contextPressure}
+          onCompact={compactSession}
+          compactingSessionId={compactingSessionId}
         />
         {/* Godot MCP Warning Banner */}
         {isGodot && mcpStatus && mcpStatus.status !== "connected" && (

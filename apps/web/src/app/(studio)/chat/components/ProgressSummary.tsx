@@ -1,14 +1,14 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
+import type { ContextUsage } from "@game-studio/types";
 import { apiFetch } from "@/lib/api";
 import {
-  CONTEXT_CHARS_PER_TOKEN_ESTIMATE,
-  PRODUCER_CONTEXT_WINDOW_CHARS,
   PRODUCER_MODEL_CONTEXT_TOKENS,
   countConversationHistoryChars,
   estimateConversationTokensFromHistory,
   producerModelContextFillPercent,
+  contextFillPercentFromUsage,
 } from "@/lib/chat-context";
 
 interface TicketSummary {
@@ -22,6 +22,16 @@ interface ProgressSummaryProps {
   activeAgents: number;
   /** Producer session only — persisted LLM thread for the board-room agent. */
   producerSessionId: string | null;
+  /** Currently active session tab (may differ from producer). */
+  currentSession?: string | null;
+  /** Real-time token usage from WS (keyed by sessionId). */
+  contextUsageMap?: Map<string, ContextUsage>;
+  /** Context pressure warnings from WS (keyed by sessionId, value = fillPercent). */
+  contextPressure?: Map<string, number>;
+  /** Compact the given session into a new generation. */
+  onCompact?: (sessionId: string) => void;
+  /** Session currently being compacted (shows progress bar). */
+  compactingSessionId?: string | null;
 }
 
 interface TicketColumn {
@@ -40,11 +50,37 @@ interface SessionPayload {
   conversationHistory?: Array<{ content?: unknown }>;
 }
 
-export default function ProgressSummary({ activeAgents, producerSessionId }: ProgressSummaryProps) {
+export default function ProgressSummary({ activeAgents, producerSessionId, currentSession, contextUsageMap, contextPressure, onCompact, compactingSessionId }: ProgressSummaryProps) {
+  /** Which session to show context for — active tab, falling back to producer. */
+  const targetSession = currentSession || producerSessionId;
   const [tickets, setTickets] = useState<TicketSummary | null>(null);
   const [contextPct, setContextPct] = useState(0);
   const [contextUsedChars, setContextUsedChars] = useState(0);
   const [contextEstTokens, setContextEstTokens] = useState(0);
+  const [contextRealTokens, setContextRealTokens] = useState<number | null>(null);
+  const [contextWindowTokens, setContextWindowTokens] = useState(PRODUCER_MODEL_CONTEXT_TOKENS);
+
+  // Compacting progress animation
+  const [compactPct, setCompactPct] = useState(0);
+  const compactIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    if (compactingSessionId) {
+      setCompactPct(0);
+      let tick = 0;
+      compactIntervalRef.current = setInterval(() => {
+        tick++;
+        // Ease-out: fast start, slow end — reaches ~90% in 15s, never 100% until done
+        setCompactPct(Math.min(90, Math.round(90 * (1 - Math.exp(-tick / 8)))));
+      }, 300);
+    } else {
+      if (compactIntervalRef.current) clearInterval(compactIntervalRef.current);
+      setCompactPct(0);
+    }
+    return () => {
+      if (compactIntervalRef.current) clearInterval(compactIntervalRef.current);
+    };
+  }, [compactingSessionId]);
 
   useEffect(() => {
     const fetchTickets = async () => {
@@ -70,40 +106,60 @@ export default function ProgressSummary({ activeAgents, producerSessionId }: Pro
   }, []);
 
   useEffect(() => {
-    if (!producerSessionId) {
+    if (!targetSession) {
       setContextPct(0);
       setContextUsedChars(0);
       setContextEstTokens(0);
+      setContextRealTokens(null);
+      setContextWindowTokens(PRODUCER_MODEL_CONTEXT_TOKENS);
       return;
     }
 
-    const fetchProducerContext = async () => {
+    // Prefer real WS data when available
+    const wsUsage = contextUsageMap?.get(targetSession);
+    if (wsUsage) {
+      setContextRealTokens(wsUsage.lastInputTokens);
+      setContextWindowTokens(wsUsage.contextWindowTokens);
+      setContextPct(contextFillPercentFromUsage(wsUsage));
+      // Don't zero out estimates — keep as fallback info
+      return;
+    }
+
+    // Fallback: REST polling with char estimation (only when no WS data)
+    setContextRealTokens(null);
+    const fetchSessionContext = async () => {
       try {
         const session = await apiFetch<SessionPayload>(
-          `/api/chat/sessions/${encodeURIComponent(producerSessionId)}`
+          `/api/chat/sessions/${encodeURIComponent(targetSession)}`
         );
         const usedChars = countConversationHistoryChars(session.conversationHistory);
         setContextUsedChars(usedChars);
         setContextEstTokens(estimateConversationTokensFromHistory(session.conversationHistory));
         setContextPct(producerModelContextFillPercent(session.conversationHistory));
       } catch (err) {
-        console.error("[Progress] Failed to fetch producer context:", err);
+        console.error("[Progress] Failed to fetch session context:", err);
       }
     };
 
-    fetchProducerContext();
-    const interval = setInterval(fetchProducerContext, 10000);
+    fetchSessionContext();
+    const interval = setInterval(fetchSessionContext, 30000);
     return () => clearInterval(interval);
-  }, [producerSessionId]);
+  }, [targetSession, contextUsageMap]);
 
   const contextHint =
-    producerSessionId === null
+    targetSession === null
       ? undefined
-      : [
-          `Producer (glm-5.1 class): ~${contextEstTokens.toLocaleString()} est. tokens / ${PRODUCER_MODEL_CONTEXT_TOKENS.toLocaleString()} (${contextPct}% of model window).`,
-          `Estimate: ${contextUsedChars.toLocaleString()} chars ÷ ${CONTEXT_CHARS_PER_TOKEN_ESTIMATE}; not billing-accurate.`,
-          `API prune cap: ${PRODUCER_CONTEXT_WINDOW_CHARS.toLocaleString()} chars.`,
-        ].join(" ");
+      : contextRealTokens !== null
+        ? [
+            `Context: ${contextRealTokens.toLocaleString()} tokens / ${contextWindowTokens.toLocaleString()} (${contextPct}% of model window).`,
+            `API-reported token usage. Real-time via WebSocket.`,
+          ].join(" ")
+        : [
+            `~${contextEstTokens.toLocaleString()} est. tokens / ${PRODUCER_MODEL_CONTEXT_TOKENS.toLocaleString()} (${contextPct}% of model window).`,
+            `Estimate: ${contextUsedChars.toLocaleString()} chars ÷ 4; not billing-accurate. Send a message for real data.`,
+          ].join(" ");
+
+  const isViewingProducer = targetSession === producerSessionId;
 
   const total = tickets ? tickets.available + tickets.in_progress + tickets.qa + tickets.completed : 0;
   const completionPct = total > 0 ? Math.round((tickets?.completed ?? 0) / total * 100) : 0;
@@ -158,29 +214,64 @@ export default function ProgressSummary({ activeAgents, producerSessionId }: Pro
 
         <div className="w-px h-5 bg-[#2a2a4e] shrink-0" aria-hidden />
 
+        {/* Context — shows compacting progress bar when active */}
         <div
           className="flex items-center gap-2 sm:gap-3 shrink-0"
-          title={contextHint}
+          title={compactingSessionId ? "Summarizing context into new session..." : contextHint}
         >
           <span className="text-[#737688] text-[10px] font-[var(--font-terminal)] uppercase tracking-wider whitespace-nowrap">
             Context
           </span>
           <div className="flex items-center gap-2">
-            <div className="w-16 sm:w-24 h-2 bg-[#2a2a4e] border border-[#3a3a5e] overflow-hidden shrink-0">
-              <div
-                className={`h-full transition-all duration-500 ${
-                  contextPct >= 90
-                    ? "bg-[#df2b31]"
-                    : contextPct >= 70
-                      ? "bg-[#FF9500]"
-                      : "bg-gradient-to-r from-[#AF52FF] to-[#0055FF]"
-                }`}
-                style={{ width: `${contextPct}%` }}
-              />
-            </div>
-            <span className="text-white font-[var(--font-mono)] text-xs tabular-nums w-[2.5rem] text-right">
-              {contextPct}%
-            </span>
+            {compactingSessionId ? (
+              <>
+                <div className="w-16 sm:w-24 h-2 bg-[#2a2a4e] border border-[#AF52FF]/50 overflow-hidden shrink-0">
+                  <div
+                    className="h-full bg-[#AF52FF] transition-all duration-300 ease-out"
+                    style={{ width: `${compactPct}%` }}
+                  />
+                </div>
+                <span className="text-[#AF52FF] font-[var(--font-mono)] text-[10px] uppercase animate-pulse whitespace-nowrap">
+                  Compact{compactPct > 0 ? ` ${compactPct}%` : "..."}
+                </span>
+              </>
+            ) : (
+              <>
+                <div className="w-16 sm:w-24 h-2 bg-[#2a2a4e] border border-[#3a3a5e] overflow-hidden shrink-0">
+                  <div
+                    className={`h-full transition-all duration-500 ${
+                      contextPct >= 90
+                        ? "bg-[#df2b31]"
+                        : contextPct >= 70
+                          ? "bg-[#FF9500]"
+                          : "bg-gradient-to-r from-[#AF52FF] to-[#0055FF]"
+                    }`}
+                    style={{ width: `${contextPct}%` }}
+                  />
+                </div>
+                <span className="text-white font-[var(--font-mono)] text-xs tabular-nums w-[2.5rem] text-right">
+                  {contextPct}%
+                </span>
+                {contextRealTokens !== null && (
+                  <span className="text-[#5a5a7a] font-[var(--font-mono)] text-[10px] tabular-nums">
+                    {contextRealTokens >= 1000 ? `${(contextRealTokens / 1000).toFixed(1)}k` : contextRealTokens}/{(contextWindowTokens / 1000).toFixed(0)}k
+                  </span>
+                )}
+                {contextPct >= 80 && onCompact && isViewingProducer && producerSessionId && (
+                  <button
+                    onClick={() => onCompact(producerSessionId)}
+                    className={`flex items-center gap-1 px-1.5 py-0.5 border text-[10px] font-[var(--font-mono)] uppercase shrink-0 ${
+                      contextPct >= 90
+                        ? "bg-[#df2b31] border-[#df2b31] text-white animate-pulse"
+                        : "bg-[#FF9500]/20 border-[#FF9500] text-[#FF9500]"
+                    }`}
+                    title={`Context at ${contextPct}% — compact into new session`}
+                  >
+                    Compact
+                  </button>
+                )}
+              </>
+            )}
           </div>
         </div>
       </div>

@@ -12,6 +12,7 @@ const envSchema = z.object({
   DEFAULT_MODEL: z.string().default("glm-5.1"),
   MAX_TOOL_CALLS: z.coerce.number().default(100),
   TOOL_CHECKPOINT_INTERVAL: z.coerce.number().default(30),
+  CONTEXT_WINDOW_TOKENS: z.coerce.number().default(200_000),
 });
 
 let configState: z.infer<typeof envSchema>;
@@ -30,6 +31,7 @@ export function loadConfig() {
     DEFAULT_MODEL: process.env.DEFAULT_MODEL,
     MAX_TOOL_CALLS: process.env.MAX_TOOL_CALLS,
     TOOL_CHECKPOINT_INTERVAL: process.env.TOOL_CHECKPOINT_INTERVAL,
+    CONTEXT_WINDOW_TOKENS: process.env.CONTEXT_WINDOW_TOKENS,
   };
 
   const result = envSchema.safeParse(raw);

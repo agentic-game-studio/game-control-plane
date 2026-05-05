@@ -7,7 +7,7 @@ import type { Project } from "./dashboard.js";
 import type { Ticket, TicketStatus } from "./tickets.js";
 import type { GameAsset } from "./assets.js";
 import type { SettingsConfig } from "./settings.js";
-import type { ChatSession, ChatMessage } from "./chat.js";
+import type { ChatSession, ChatMessage, ContextUsage } from "./chat.js";
 
 /** WebSocket event types for real-time frontend updates */
 export type WSEvent =
@@ -40,6 +40,9 @@ export type WSEvent =
   | { type: "chat:session:created"; session: ChatSession }
   | { type: "chat:session:updated"; sessionId: string; session: { id: string; role?: string; progress?: number; status?: string } }
   | { type: "chat:session:deleted"; sessionId: string }
+  | { type: "chat:context"; sessionId: string; contextUsage: ContextUsage }
+  | { type: "chat:context-pressure"; sessionId: string; fillPercent: number }
+  | { type: "chat:session:compacted"; oldSessionId: string; newSession: ChatSession }
   | { type: "workflow:stage"; sessionId: string; workflowId: string; stage: WorkflowStage; ticketId?: string; agentRole?: string }
   | { type: "workflow:complete"; sessionId: string; workflowId: string; success: boolean }
   | { type: "quest:linked"; sessionId: string; ticketId: string; agentRole: string }
