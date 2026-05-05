@@ -4,7 +4,10 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import path from "node:path";
 import fs from "node:fs/promises";
+import { watch } from "node:fs";
 import { readData, writeData, broadcastEvent } from "../services/data-store.js";
+import { logger } from "../utils/logger.js";
+import { resolveProjectWorkspace } from "../utils/workspace.js";
 import type {
   AssetsData,
   GameAsset,
@@ -12,20 +15,56 @@ import type {
   CreateAssetRequest,
   UpdateAssetRequest,
   AssetGenerationMeta,
+  Project,
 } from "@game-studio/types";
 import type { WSEvent } from "@game-studio/types";
 import { loadConfig } from "../config.js";
 
 const execFileAsync = promisify(execFile);
 
-/**
- * Resolve the Python binary that has the asset-pipeline dependencies installed.
- * Prefers /usr/local/bin/python3 (Python.org install with Pillow, rembg, etc.)
- * over /opt/homebrew/bin/python3 (Homebrew which may lack pip packages).
- */
 const PYTHON_BIN = process.env.PIPELINE_PYTHON ?? "/usr/local/bin/python3";
 
-/** Interface for asset generation requests */
+/** Known asset file extensions mapped to types */
+const EXT_TO_TYPE: Record<string, GameAsset["type"]> = {
+  ".png": "2d",
+  ".jpg": "2d",
+  ".jpeg": "2d",
+  ".webp": "2d",
+  ".gif": "2d",
+  ".bmp": "2d",
+  ".fbx": "3d",
+  ".obj": "3d",
+  ".gltf": "3d",
+  ".glb": "3d",
+  ".blend": "3d",
+  ".mp3": "audio",
+  ".wav": "audio",
+  ".ogg": "audio",
+  ".flac": "audio",
+  ".ttf": "texture",
+  ".otf": "texture",
+  ".font": "texture",
+};
+
+/** Infer asset type from filename/extension */
+function inferType(filename: string): GameAsset["type"] {
+  const ext = path.extname(filename).toLowerCase();
+  return EXT_TO_TYPE[ext] ?? "texture";
+}
+
+/** Infer category from filename keywords */
+function inferCategory(filename: string): GameAsset["category"] {
+  const lower = filename.toLowerCase();
+  if (/char|player|hero|enemy|npc|mob|unit/i.test(lower)) return "character";
+  if (/weapon|sword|gun|bow|axe|staff|dagger|shield/i.test(lower)) return "weapon";
+  if (/env|bg_|background|tile|terrain|map|level|world|ground/i.test(lower)) return "env";
+  if (/ui_|hud|icon|button|panel|frame|menu|cursor/i.test(lower)) return "ui";
+  if (/sfx|sound_|hit_|jump_|step_|click/i.test(lower)) return "sfx";
+  if (/music|bgm|theme|song|loop/i.test(lower)) return "music";
+  if (/tex|texture|pattern|material/i.test(lower)) return "tex";
+  return "prop";
+}
+
 interface GenerateAssetRequest {
   prompt: string;
   name: string;
@@ -43,8 +82,8 @@ interface GenerateAssetRequest {
   spriteCols?: number;
   spriteRows?: number;
   tags?: string[];
-  presetsFile?: string;  // Path to presets YAML (relative to scripts dir)
-  workspacePath?: string; // Project sub-path (e.g. "godot-test-1") — assets go to workspace/<workspacePath>/assets/
+  presetsFile?: string;
+  workspacePath?: string;
 }
 
 const DEFAULT_ASSETS: AssetsData = {
@@ -59,9 +98,6 @@ const DEFAULT_ASSETS: AssetsData = {
   },
 };
 
-/**
- * Build a GameAsset from a manifest entry, preserving all generation metadata.
- */
 function manifestEntryToGameAsset(entry: Record<string, unknown>): GameAsset {
   const generatedWith: AssetGenerationMeta | undefined = entry.generatedWith
     ? (entry.generatedWith as AssetGenerationMeta)
@@ -83,26 +119,220 @@ function manifestEntryToGameAsset(entry: Record<string, unknown>): GameAsset {
   };
 }
 
+/**
+ * Build a GameAsset from a filesystem entry, merging with saved metadata overlay.
+ */
+function fileEntryToGameAsset(
+  relPath: string,
+  sizeBytes: number,
+  stat: { ctime: Date; mtime: Date },
+  overlay?: Partial<GameAsset>
+): GameAsset {
+  const filename = path.basename(relPath);
+  const id = overlay?.id ?? `asset-${Buffer.from(relPath).toString("base64url").slice(0, 16)}`;
+  return {
+    id,
+    filename: overlay?.filename ?? filename,
+    type: overlay?.type ?? inferType(filename),
+    category: overlay?.category ?? inferCategory(filename),
+    sizeBytes,
+    tags: overlay?.tags ?? [],
+    createdAt: overlay?.createdAt ?? stat.ctime.toISOString(),
+    updatedAt: overlay?.updatedAt ?? stat.mtime.toISOString(),
+    path: relPath,
+    thumbnailPath: overlay?.thumbnailPath ?? undefined,
+    generatedWith: overlay?.generatedWith ?? undefined,
+  };
+}
+
+/** Resolve project by ID from dashboard data */
+async function getProjectById(projectId: string): Promise<Project | null> {
+  try {
+    const dashboard = await readData<{ projects: Project[] }>("dashboard.json");
+    return dashboard.projects.find((p) => p.id === projectId) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Resolve the assets directory for a project */
+function resolveAssetsDir(workspaceDir: string, workspacePath?: string | null): string {
+  if (!workspacePath) return path.join(workspaceDir, "assets");
+  const projectDir = resolveProjectWorkspace(workspacePath);
+  return path.join(projectDir, "assets");
+}
+
+/**
+ * Scan a directory for asset files and return GameAsset list, merged with metadata overlay.
+ */
+async function scanAssetsDir(
+  assetsDir: string,
+  workspaceDir: string,
+  overlayMap: Map<string, Partial<GameAsset>>
+): Promise<GameAsset[]> {
+  const results: GameAsset[] = [];
+
+  let entries: { name: string; isDirectory: boolean }[] = [];
+  try {
+    const dirents = await fs.readdir(assetsDir, { withFileTypes: true, recursive: true });
+    entries = dirents.map((d) => ({ name: d.name, isDirectory: d.isDirectory() }));
+  } catch {
+    // Directory doesn't exist or isn't readable — return empty
+    return results;
+  }
+
+  for (const entry of entries) {
+    if (entry.isDirectory) continue;
+    const fullPath = path.join(assetsDir, entry.name);
+    const relPath = path.relative(workspaceDir, fullPath);
+
+    // Skip hidden/system files and non-asset files
+    if (entry.name.startsWith(".") || entry.name.startsWith("_")) continue;
+    const ext = path.extname(entry.name).toLowerCase();
+    if (!ext || ext === ".json" || ext === ".md" || ext === ".txt" || ext === ".yaml" || ext === ".yml") continue;
+
+    try {
+      const stat = await fs.stat(fullPath);
+      if (!stat.isFile()) continue;
+
+      // Look up metadata overlay by relative path
+      const overlay = overlayMap.get(relPath);
+      const asset = fileEntryToGameAsset(relPath, stat.size, stat, overlay);
+      results.push(asset);
+    } catch {
+      // Skip unreadable files
+    }
+  }
+
+  return results;
+}
+
+/** Active fs.watch watchers keyed by projectId */
+const assetWatchers = new Map<string, ReturnType<typeof watch>>();
+
+/** Stop watching a project's assets directory */
+function unwatchProjectAssets(projectId: string): void {
+  const watcher = assetWatchers.get(projectId);
+  if (watcher) {
+    watcher.close();
+    assetWatchers.delete(projectId);
+    logger.info({ projectId }, "Stopped watching project assets");
+  }
+}
+
+/** Start watching a project's assets directory for changes */
+function watchProjectAssets(projectId: string, assetsDir: string): void {
+  if (assetWatchers.has(projectId)) return; // Already watching
+
+  try {
+    const watcher = watch(assetsDir, { recursive: true }, (eventType, filename) => {
+      if (!filename) return;
+      // Debounce: broadcast after a short delay to batch rapid changes
+      broadcastEvent({
+        type: "asset:updated",
+        asset: { id: `scan-${projectId}`, filename: String(filename) } as GameAsset,
+      } as WSEvent);
+    });
+
+    assetWatchers.set(projectId, watcher);
+    logger.info({ projectId, assetsDir }, "Started watching project assets");
+
+    watcher.on("error", (err) => {
+      logger.error({ projectId, err }, "Asset watcher error");
+      unwatchProjectAssets(projectId);
+    });
+  } catch {
+    // Watch may fail if directory doesn't exist yet
+  }
+}
+
 export const assetsRouter: Router = Router();
 
-// GET /api/assets - Get all assets
-assetsRouter.get("/", async (_req: Request, res: Response) => {
+// GET /api/assets?projectId=... - Scan workspace assets merged with metadata overlay
+assetsRouter.get("/", async (req: Request, res: Response) => {
+  const projectId = req.query.projectId as string | undefined;
+  const config = loadConfig();
+  const workspaceDir = path.resolve(config.WORKSPACE_DIR);
+
   try {
-    const data = await readData<AssetsData>("assets.json");
-    res.json({ success: true, data });
-  } catch {
-    // Initialize with default data if file doesn't exist
-    await writeData("assets.json", DEFAULT_ASSETS);
-    res.json({ success: true, data: DEFAULT_ASSETS });
+    let assetsDir: string;
+    if (projectId) {
+      const project = await getProjectById(projectId);
+      assetsDir = resolveAssetsDir(workspaceDir, project?.workspacePath);
+      // Start watching for real-time updates
+      watchProjectAssets(projectId, assetsDir);
+    } else {
+      assetsDir = path.join(workspaceDir, "assets");
+    }
+
+    // Read metadata overlay from assets.json
+    let overlayData: AssetsData;
+    try {
+      overlayData = await readData<AssetsData>("assets.json");
+    } catch {
+      overlayData = DEFAULT_ASSETS;
+    }
+
+    // Build overlay map keyed by relative path for O(1) lookup
+    const overlayMap = new Map<string, Partial<GameAsset>>();
+    for (const asset of overlayData.assets) {
+      if (asset.path) overlayMap.set(asset.path, asset);
+    }
+
+    // Scan filesystem
+    const scannedAssets = await scanAssetsDir(assetsDir, workspaceDir, overlayMap);
+
+    // Build response: scanned assets + overlay-only assets (if any)
+    const scannedPaths = new Set(scannedAssets.map((a) => a.path));
+    const overlayOnly = overlayData.assets.filter((a) => a.path && !scannedPaths.has(a.path));
+
+    const mergedAssets = [...scannedAssets, ...overlayOnly];
+
+    res.json({
+      success: true,
+      data: {
+        assets: mergedAssets,
+        artBible: overlayData.artBible ?? DEFAULT_ASSETS.artBible,
+      },
+    });
+  } catch (error) {
+    logger.error({ error }, "Failed to scan assets");
+    res.status(500).json({ success: false, error: "Failed to scan assets" });
   }
 });
 
 // GET /api/assets/:id - Get asset by ID
 assetsRouter.get("/:id", async (req: Request, res: Response) => {
   const { id } = req.params;
+  const projectId = req.query.projectId as string | undefined;
+  const config = loadConfig();
+  const workspaceDir = path.resolve(config.WORKSPACE_DIR);
+
   try {
-    const data = await readData<AssetsData>("assets.json");
-    const asset = data.assets.find((a) => a.id === id);
+    let assetsDir: string;
+    if (projectId) {
+      const project = await getProjectById(projectId);
+      assetsDir = resolveAssetsDir(workspaceDir, project?.workspacePath);
+    } else {
+      assetsDir = path.join(workspaceDir, "assets");
+    }
+
+    // Read overlay
+    let overlayData: AssetsData;
+    try {
+      overlayData = await readData<AssetsData>("assets.json");
+    } catch {
+      overlayData = DEFAULT_ASSETS;
+    }
+
+    const overlayMap = new Map<string, Partial<GameAsset>>();
+    for (const asset of overlayData.assets) {
+      if (asset.path) overlayMap.set(asset.path, asset);
+    }
+
+    const scanned = await scanAssetsDir(assetsDir, workspaceDir, overlayMap);
+    const asset = scanned.find((a) => a.id === id) ?? overlayData.assets.find((a) => a.id === id);
+
     if (!asset) {
       res.status(404).json({ success: false, error: "Asset not found" });
       return;
@@ -128,8 +358,6 @@ assetsRouter.get("/:id/thumbnail", async (req: Request, res: Response) => {
     const workspaceDir = path.resolve(config.WORKSPACE_DIR);
     const thumbAbsPath = path.resolve(workspaceDir, asset.thumbnailPath);
 
-    // Security: ensure the resolved path is within workspace (use trailing separator
-    // to prevent prefix-matching sibling dirs like /workspace-evil)
     const workspacePrefix = workspaceDir.endsWith("/") ? workspaceDir : workspaceDir + "/";
     if (!thumbAbsPath.startsWith(workspacePrefix) && thumbAbsPath !== workspaceDir) {
       res.status(403).send("Forbidden");
@@ -156,7 +384,7 @@ assetsRouter.get("/:id/thumbnail", async (req: Request, res: Response) => {
   }
 });
 
-// POST /api/assets - Create new asset
+// POST /api/assets - Create new asset (metadata overlay only; file must exist on disk)
 assetsRouter.post("/", async (req: Request, res: Response) => {
   const body = req.body as CreateAssetRequest;
 
@@ -186,7 +414,6 @@ assetsRouter.post("/", async (req: Request, res: Response) => {
     data.assets.push(newAsset);
     await writeData("assets.json", data);
 
-    // Broadcast event
     broadcastEvent({
       type: "asset:created",
       asset: newAsset,
@@ -198,7 +425,7 @@ assetsRouter.post("/", async (req: Request, res: Response) => {
   }
 });
 
-// PATCH /api/assets/:id - Update asset
+// PATCH /api/assets/:id - Update asset metadata overlay
 assetsRouter.patch("/:id", async (req: Request, res: Response) => {
   const { id } = req.params;
   const updates = req.body as UpdateAssetRequest;
@@ -208,7 +435,26 @@ assetsRouter.patch("/:id", async (req: Request, res: Response) => {
     const assetIndex = data.assets.findIndex((a) => a.id === id);
 
     if (assetIndex === -1) {
-      res.status(404).json({ success: false, error: "Asset not found" });
+      // If not in overlay, we need to add it so the metadata persists
+      const now = new Date().toISOString();
+      const newAsset: GameAsset = {
+        id: String(id),
+        filename: updates.filename ?? "unknown",
+        type: updates.type ?? "texture",
+        category: updates.category ?? "prop",
+        sizeBytes: updates.sizeBytes ?? 0,
+        tags: updates.tags ?? [],
+        createdAt: now,
+        updatedAt: now,
+        ...updates,
+      };
+      data.assets.push(newAsset);
+      await writeData("assets.json", data);
+      broadcastEvent({
+        type: "asset:updated",
+        asset: newAsset,
+      } as WSEvent);
+      res.json({ success: true, data: newAsset });
       return;
     }
 
@@ -216,14 +462,13 @@ assetsRouter.patch("/:id", async (req: Request, res: Response) => {
     const updatedAsset: GameAsset = {
       ...data.assets[assetIndex],
       ...updates,
-      id: assetId, // Ensure ID cannot be changed
+      id: assetId,
       updatedAt: new Date().toISOString(),
     };
 
     data.assets[assetIndex] = updatedAsset;
     await writeData("assets.json", data);
 
-    // Broadcast event
     broadcastEvent({
       type: "asset:updated",
       asset: updatedAsset,
@@ -248,10 +493,28 @@ assetsRouter.delete("/:id", async (req: Request, res: Response) => {
       return;
     }
 
+    // Optionally delete the actual file too
+    const asset = data.assets[assetIndex];
+    if (asset.path) {
+      try {
+        const config = loadConfig();
+        const workspaceDir = path.resolve(config.WORKSPACE_DIR);
+        const filePath = path.join(workspaceDir, asset.path);
+        const workspacePrefix = workspaceDir.endsWith("/") ? workspaceDir : workspaceDir + "/";
+        if (
+          (filePath.startsWith(workspacePrefix) || filePath === workspaceDir) &&
+          filePath !== workspaceDir
+        ) {
+          await fs.unlink(filePath);
+        }
+      } catch {
+        // File may not exist; continue
+      }
+    }
+
     data.assets.splice(assetIndex, 1);
     await writeData("assets.json", data);
 
-    // Broadcast event
     broadcastEvent({
       type: "asset:deleted",
       assetId: id,
@@ -268,10 +531,13 @@ assetsRouter.post("/generate", async (req: Request, res: Response) => {
   const body = req.body as GenerateAssetRequest;
   const config = loadConfig();
   const scriptDir = path.resolve(process.cwd(), "..", "..", "scripts", "asset-pipeline");
-  const workspaceDir = path.resolve(config.WORKSPACE_DIR);
-  const projectAssetsDir = body.workspacePath
-    ? path.join(workspaceDir, body.workspacePath, "assets")
-    : path.join(workspaceDir, "assets");
+  const projectDir = body.workspacePath
+    ? resolveProjectWorkspace(body.workspacePath)
+    : config.WORKSPACE_DIR;
+  const projectAssetsDir = path.join(projectDir, "assets");
+
+  // Ensure output directory exists
+  await fs.mkdir(projectAssetsDir, { recursive: true });
 
   // Support batch mode via presets file
   if (body.presetsFile) {
@@ -279,24 +545,22 @@ assetsRouter.post("/generate", async (req: Request, res: Response) => {
       path.join(scriptDir, "asset-pipeline.py"),
       "--presets", body.presetsFile,
       "--output-dir", projectAssetsDir,
-      "--workspace-dir", workspaceDir,
+      "--workspace-dir", projectDir,
     ];
 
     try {
       const { stdout, stderr } = await execFileAsync(PYTHON_BIN, args, {
         cwd: scriptDir,
-        timeout: 600_000, // 10 min for batch
+        timeout: 600_000,
         maxBuffer: 10 * 1024 * 1024,
       });
 
-      // Parse manifest and register ALL generated assets in inventory
       const manifestPath = path.join(projectAssetsDir, "asset-manifest.json");
       let generated: GameAsset[] = [];
       try {
         const raw = await fs.readFile(manifestPath, "utf-8");
         const manifest: Record<string, unknown>[] = JSON.parse(raw);
 
-        // Register new assets in inventory
         const data = await readData<AssetsData>("assets.json");
         const existingIds = new Set(data.assets.map((a) => a.id));
 
@@ -310,7 +574,6 @@ assetsRouter.post("/generate", async (req: Request, res: Response) => {
 
         if (generated.length > 0) {
           await writeData("assets.json", data);
-          // Broadcast each new asset individually so the UI refreshes
           for (const asset of generated) {
             broadcastEvent({
               type: "asset:created",
@@ -356,7 +619,7 @@ assetsRouter.post("/generate", async (req: Request, res: Response) => {
     "--height", String(body.height ?? 512),
     "--steps", String(body.steps ?? 4),
     "--output-dir", projectAssetsDir,
-    "--workspace-dir", workspaceDir,
+    "--workspace-dir", projectDir,
   ];
 
   if (body.seed !== undefined) args.push("--seed", String(body.seed));
@@ -376,7 +639,6 @@ assetsRouter.post("/generate", async (req: Request, res: Response) => {
       maxBuffer: 10 * 1024 * 1024,
     });
 
-    // Read the manifest to get the generated asset details with full metadata
     const manifestPath = path.join(projectAssetsDir, "asset-manifest.json");
     let generatedAsset: GameAsset | null = null;
     try {
@@ -384,7 +646,6 @@ assetsRouter.post("/generate", async (req: Request, res: Response) => {
       const manifest: Record<string, unknown>[] = JSON.parse(raw);
       const last = manifest[manifest.length - 1];
       if (last) {
-        // Register in asset inventory with dedup check
         const data = await readData<AssetsData>("assets.json");
         const existingIds = new Set(data.assets.map((a) => a.id));
         const assetId = last.id as string;
@@ -398,7 +659,6 @@ assetsRouter.post("/generate", async (req: Request, res: Response) => {
           } as WSEvent);
           generatedAsset = newAsset;
         } else {
-          // Already registered — return the existing one
           generatedAsset = data.assets.find((a) => a.id === assetId) ?? null;
         }
       }
@@ -454,5 +714,49 @@ assetsRouter.patch("/art-bible", async (req: Request, res: Response) => {
     res.json({ success: true, data: { artBible: updatedArtBible } });
   } catch (error) {
     res.status(500).json({ success: false, error: "Failed to update art bible" });
+  }
+});
+
+// POST /api/assets/rescan - Force rescan for a project
+assetsRouter.post("/rescan", async (req: Request, res: Response) => {
+  const projectId = req.body.projectId as string | undefined;
+  const config = loadConfig();
+  const workspaceDir = path.resolve(config.WORKSPACE_DIR);
+
+  try {
+    let assetsDir: string;
+    if (projectId) {
+      const project = await getProjectById(projectId);
+      assetsDir = resolveAssetsDir(workspaceDir, project?.workspacePath);
+      watchProjectAssets(projectId, assetsDir);
+    } else {
+      assetsDir = path.join(workspaceDir, "assets");
+    }
+
+    let overlayData: AssetsData;
+    try {
+      overlayData = await readData<AssetsData>("assets.json");
+    } catch {
+      overlayData = DEFAULT_ASSETS;
+    }
+
+    const overlayMap = new Map<string, Partial<GameAsset>>();
+    for (const asset of overlayData.assets) {
+      if (asset.path) overlayMap.set(asset.path, asset);
+    }
+
+    const scannedAssets = await scanAssetsDir(assetsDir, workspaceDir, overlayMap);
+    const scannedPaths = new Set(scannedAssets.map((a) => a.path));
+    const overlayOnly = overlayData.assets.filter((a) => a.path && !scannedPaths.has(a.path));
+
+    res.json({
+      success: true,
+      data: {
+        assets: [...scannedAssets, ...overlayOnly],
+        artBible: overlayData.artBible ?? DEFAULT_ASSETS.artBible,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: "Failed to rescan assets" });
   }
 });

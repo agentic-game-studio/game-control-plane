@@ -10,6 +10,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { loadConfig } from "../config.js";
+import { resolveProjectWorkspace } from "../utils/workspace.js";
 import { getAgentSystemPrompt, loadAgentPrompts } from "../prompts/agent-prompt-loader.js";
 import { callLLMWithTools, GAME_STUDIO_TOOLS, type LLMMessage, type ProgressCallback, type FileOperationCallback } from "../llm/zai-client.js";
 import { broadcast, broadcastSessionUpdate } from "./websocket.js";
@@ -37,8 +38,8 @@ export interface ProjectContext {
 
 /** Detect engine from workspace files */
 export async function detectEngineFromWorkspace(workspacePath: string): Promise<string | null> {
-  const config = loadConfig();
-  const fullPath = path.resolve(config.WORKSPACE_DIR, workspacePath);
+  const { resolveProjectWorkspace } = await import("../utils/workspace.js");
+  const fullPath = resolveProjectWorkspace(workspacePath);
 
   // Check for Godot (project.godot file)
   try {
@@ -135,34 +136,34 @@ function logEntry(sessionId: string, level: string, message: string, agent?: Age
   } as WSEvent);
 }
 
-/** Validate that a resolved path stays within the workspace boundary (S1) */
+/** Validate that a resolved path stays within the workspace boundary */
 function safePath(inputPath: string, baseDir: string): string {
   const workspaceDir = loadConfig().WORKSPACE_DIR;
   const resolvedWorkspaceDir = path.resolve(workspaceDir);
+  const base = path.resolve(baseDir);
 
-  // If the input path is already inside the resolved workspace directory, use it as-is
-  // This handles paths like /Users/.../workspace/godot-test-1/... that are already correct
-  if (inputPath.startsWith(resolvedWorkspaceDir + "/")) {
-    // Verify no path traversal
+  // If the input path is already absolute and inside the base directory, allow it
+  if (path.isAbsolute(inputPath)) {
     const resolved = path.resolve(inputPath);
-    if (resolved.startsWith(resolvedWorkspaceDir)) {
+    if (resolved.startsWith(base + path.sep) || resolved === base) {
       return resolved;
     }
-    throw new Error(`Path outside workspace is not allowed: ${inputPath}`);
+    if (resolved.startsWith(resolvedWorkspaceDir + path.sep) || resolved === resolvedWorkspaceDir) {
+      return resolved;
+    }
   }
 
-  // For paths outside workspace, apply normalization
+  // For relative paths or paths outside the base, apply normalization
+  let workingPath = inputPath;
 
   // Strip leading "./workspace/" or "/workspace/" prefix if present
-  let workingPath = inputPath;
   const workspacePattern = /^\.?\/?workspace\//;
   if (workspacePattern.test(inputPath)) {
     const pathAfterWorkspace = inputPath.replace(workspacePattern, "");
     workingPath = path.join(workspaceDir, pathAfterWorkspace);
   }
 
-  // Handle absolute paths to Godot projects that are mirrored in the workspace
-  // Godot returns paths like /Users/choguun/godot-test-1/project.godot
+  // Handle absolute paths to projects that are mirrored in the workspace
   const homeDir = process.env.HOME || "";
   const godotPathMatch = inputPath.match(new RegExp(`^${homeDir.replace("/", "\\/")}\/([^\/]+)(\/.*)?$`));
   if (godotPathMatch && godotPathMatch[2]) {
@@ -171,14 +172,9 @@ function safePath(inputPath: string, baseDir: string): string {
     workingPath = path.join(workspaceDir, projectName, relativePath);
   }
 
-  // Handle project-relative paths like "godot-test-1/gdd/..."
-  // Resolve relative to WORKSPACE_DIR
   const normalizedResolved = path.resolve(workingPath);
-  const base = path.resolve(baseDir);
 
-  // Allow paths that resolve to either:
-  // 1. Within the base directory (project workspace)
-  // 2. Within the global workspace directory (for shared files like design docs)
+  // Allow paths within the base directory or the global workspace directory
   if (normalizedResolved.startsWith(base + path.sep) || normalizedResolved === base) {
     return normalizedResolved;
   }
@@ -236,7 +232,7 @@ async function executeTool(
 ): Promise<string> {
   // Use project's workspacePath if available, otherwise fall back to global config
   const workspaceDir = projectContext?.workspacePath
-    ? path.resolve(loadConfig().WORKSPACE_DIR, projectContext.workspacePath)
+    ? resolveProjectWorkspace(projectContext.workspacePath)
     : loadConfig().WORKSPACE_DIR;
 
   try {
@@ -477,12 +473,10 @@ async function executeTool(
         // Resolve Python binary with pipeline dependencies (Pillow, rembg, etc.)
         const PYTHON_BIN = process.env.PIPELINE_PYTHON ?? "/usr/local/bin/python3";
 
-        const config = loadConfig();
         const scriptDir = path.resolve(process.cwd(), "..", "..", "scripts", "asset-pipeline");
-        const workspaceDir = path.resolve(config.WORKSPACE_DIR);
         const outputDir = projectContext?.workspacePath
-          ? path.join(workspaceDir, projectContext.workspacePath, "assets")
-          : path.join(workspaceDir, "assets");
+          ? path.join(resolveProjectWorkspace(projectContext.workspacePath), "assets")
+          : path.join(loadConfig().WORKSPACE_DIR, "assets");
 
         const genArgs = [
           path.join(scriptDir, "asset-pipeline.py"),

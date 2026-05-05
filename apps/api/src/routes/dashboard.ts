@@ -1,6 +1,5 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
-import { join } from "node:path";
 import { readData, writeData, broadcastEvent } from "../services/data-store.js";
 import { logger } from "../utils/logger.js";
 import type {
@@ -14,7 +13,8 @@ import type { WSEvent } from "@game-studio/types";
 import { orphanProjectSessions } from "./chat.js";
 import { removeGodotMCPService, installGodotMCPPlugin, isGodotMCPPluginInstalled, isGodotMCPPluginEnabled, launchGodotEditor } from "../services/godot-mcp-service.js";
 import { detectEngineFromWorkspace } from "../services/llm-service.js";
-import { loadConfig } from "../config.js";
+import { resolveProjectWorkspace, validateWorkspacePath } from "../utils/workspace.js";
+import path from "node:path";
 
 const DEFAULT_DATA: DashboardData = {
   summary: {
@@ -54,6 +54,17 @@ function normalizeDashboardData(data: DashboardData): DashboardData {
 }
 
 export const dashboardRouter: Router = Router();
+
+// POST /api/dashboard/validate-path - Validate a workspace path
+dashboardRouter.post("/validate-path", async (req: Request, res: Response) => {
+  const { path: inputPath } = req.body as { path?: string };
+  if (!inputPath) {
+    res.status(400).json({ success: false, error: "path is required" });
+    return;
+  }
+  const result = validateWorkspacePath(inputPath);
+  res.json({ success: true, data: result });
+});
 
 // GET /api/dashboard - Get all dashboard data
 dashboardRouter.get("/", async (_req: Request, res: Response) => {
@@ -108,11 +119,23 @@ dashboardRouter.post("/projects", async (req: Request, res: Response) => {
   try {
     const data = await readData<DashboardData>("dashboard.json");
     const now = new Date().toISOString();
-    const config = loadConfig();
+
+    // Validate workspacePath if provided
+    const workspacePath = body.workspacePath ?? null;
+    if (workspacePath) {
+      const validation = validateWorkspacePath(workspacePath);
+      if (path.isAbsolute(workspacePath) && !validation.exists) {
+        res.status(400).json({ success: false, error: `Directory does not exist: ${workspacePath}` });
+        return;
+      }
+      if (validation.error && validation.error.includes("traversal")) {
+        res.status(400).json({ success: false, error: validation.error });
+        return;
+      }
+    }
 
     // Auto-detect engine from workspacePath if provided and engine not specified
     let engine: ProjectEngine | null = body.engine ?? null;
-    const workspacePath = body.workspacePath ?? null;
     if (!engine && workspacePath) {
       const detected = await detectEngineFromWorkspace(workspacePath);
       if (detected) {
@@ -139,8 +162,8 @@ dashboardRouter.post("/projects", async (req: Request, res: Response) => {
     // Auto-install Godot MCP plugin for Godot projects with workspacePath
     let pluginInstallResult: { success: boolean; pluginCopied: boolean; pluginEnabled: boolean; error?: string } | null = null;
     if (engine === "godot" && workspacePath) {
-      const projectDir = join(config.WORKSPACE_DIR, workspacePath);
-      pluginInstallResult = installGodotMCPPlugin(projectDir, config.WORKSPACE_DIR);
+      const projectDir = resolveProjectWorkspace(workspacePath);
+      pluginInstallResult = installGodotMCPPlugin(projectDir, projectDir);
       if (!pluginInstallResult.success && pluginInstallResult.error) {
         logger.warn({ error: pluginInstallResult.error, projectDir }, "Failed to auto-install Godot MCP plugin");
       }
@@ -237,7 +260,6 @@ dashboardRouter.delete("/projects/:id", async (req: Request, res: Response) => {
 // POST /api/dashboard/projects/:id/install-plugin - Install Godot MCP plugin
 dashboardRouter.post("/projects/:id/install-plugin", async (req: Request, res: Response) => {
   const { id } = req.params;
-  const config = loadConfig();
 
   try {
     const data = await readData<DashboardData>("dashboard.json");
@@ -258,8 +280,8 @@ dashboardRouter.post("/projects/:id/install-plugin", async (req: Request, res: R
       return;
     }
 
-    const projectDir = join(config.WORKSPACE_DIR, project.workspacePath);
-    const result = installGodotMCPPlugin(projectDir, config.WORKSPACE_DIR);
+    const projectDir = resolveProjectWorkspace(project.workspacePath);
+    const result = installGodotMCPPlugin(projectDir, projectDir);
 
     if (result.success) {
       res.json({
@@ -280,7 +302,6 @@ dashboardRouter.post("/projects/:id/install-plugin", async (req: Request, res: R
 // GET /api/dashboard/projects/:id/plugin-status - Check Godot MCP plugin status
 dashboardRouter.get("/projects/:id/plugin-status", async (req: Request, res: Response) => {
   const { id } = req.params;
-  const config = loadConfig();
 
   try {
     const data = await readData<DashboardData>("dashboard.json");
@@ -308,7 +329,7 @@ dashboardRouter.get("/projects/:id/plugin-status", async (req: Request, res: Res
       return;
     }
 
-    const projectDir = join(config.WORKSPACE_DIR, project.workspacePath);
+    const projectDir = resolveProjectWorkspace(project.workspacePath);
     const installed = isGodotMCPPluginInstalled(projectDir);
     const enabled = isGodotMCPPluginEnabled(projectDir);
 
@@ -444,9 +465,8 @@ dashboardRouter.post("/projects/:id/launch-editor", async (req: Request, res: Re
       return;
     }
 
-    const config = loadConfig();
     const projectDir = project.workspacePath
-      ? join(config.WORKSPACE_DIR, project.workspacePath)
+      ? resolveProjectWorkspace(project.workspacePath)
       : null;
 
     if (!projectDir) {
