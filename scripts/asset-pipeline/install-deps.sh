@@ -99,6 +99,9 @@ check() {
 check "PIL"       "Pillow"
 check "yaml"      "PyYAML"
 check "rembg"     "rembg"
+check "wave"      "wave (stdlib)"
+check "struct"    "struct (stdlib)"
+check "math"      "math (stdlib)"
 
 # ── rembg model download hint ────────────────────────────────────────────────
 #

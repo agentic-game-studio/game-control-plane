@@ -6,6 +6,7 @@ import type { ModelTier, AgentRole } from "@game-studio/types";
  */
 export const agentTiers: Record<AgentRole, { tier: 1 | 2 | 3; model: ModelTier }> = {
   // Tier 1 — Leadership (Opus)
+  "autonomous-producer": { tier: 1, model: "opus" },
   "creative-director": { tier: 1, model: "opus" },
   "technical-director": { tier: 1, model: "opus" },
   producer: { tier: 1, model: "opus" },
@@ -43,6 +44,7 @@ export const agentTiers: Record<AgentRole, { tier: 1 | 2 | 3; model: ModelTier }
   "live-ops-designer": { tier: 3, model: "sonnet" },
   "community-manager": { tier: 3, model: "sonnet" },
   // Engine specialists
+  "godot-scaffolder": { tier: 3, model: "sonnet" },
   "godot-specialist": { tier: 3, model: "sonnet" },
   "godot-gdscript-specialist": { tier: 3, model: "sonnet" },
   "godot-shader-specialist": { tier: 3, model: "sonnet" },

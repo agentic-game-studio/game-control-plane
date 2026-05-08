@@ -55,6 +55,106 @@ game-control-plane/
 - **Tier 2 (Sonnet → glm-4.7)**: game-designer, lead-programmer, art-director, audio-director, narrative-director, qa-lead, release-manager, localization-lead
 - **Tier 3 (Sonnet/Haiku → glm-4.7/glm-4.7-flash)**: 38 specialists — systems-designer, gameplay-programmer, godot-specialist, unreal-specialist, unity-specialist, code-reviewer, etc.
 
+### Autonomous Production Mode
+
+The platform supports **fully autonomous game production** — no human-in-the-loop after initial game definition. The `autonomous-producer` agent orchestrates the entire pipeline from concept → playable game.
+
+#### Architecture
+
+```
+User prompt ("make a platformer")
+  → autonomous-producer (glm-5.1, tier 1)
+    → creates/updates GDD (game-design.md)
+    → spawns godot-scaffolder → setup-godot-project
+    → spawns godot-specialist → implement-level (tilemap, enemy, HUD via subSkills)
+    → spawns godot-gdscript-specialist → player controller, game state
+    → spawns qa-tester → automated-playtest
+    → cycles until milestone complete
+```
+
+#### Key Files
+
+| File | Purpose |
+|------|---------|
+| `apps/api/src/routes/autonomous.ts` | Autonomous loop orchestration (895 lines) — spawns agents, manages sprints, handles timeouts |
+| `apps/api/src/routes/gdd.ts` | GDD ingestion route — parses markdown, creates Kanban tickets, dedupes existing |
+| `packages/agents/src/tiers.ts` | `autonomous-producer` (tier 1, opus) + `godot-scaffolder` (tier 3, sonnet) |
+| `packages/agents/src/leadership.ts` | `autonomous-producer` agent definition + technical-director extended skills |
+| `packages/agents/src/engine-godot.ts` | `godot-scaffolder` agent definition |
+| `packages/agents/src/delegation-map.ts` | Added autonomous-producer + godot-scaffolder roles |
+| `packages/skills/src/skills-by-phase.ts` | +804 lines — 13 Godot implementation skills, subSkills cascade |
+| `workspace/.claude/agents/godot-specialist.md` | maxTurns: 20, TileMap efficiency rules, boot check gate |
+| `workspace/.claude/skills/*.md` | 13 skill stub files for runtime skill loading |
+
+#### Godot Production Skills (13 total)
+
+| Skill | Purpose |
+|-------|---------|
+| `setup-godot-project` | Scaffold project.godot, autoloads, boot scene, export presets |
+| `compose-scene` | Build .tscn from assets/scripts, wire nodes, connect signals |
+| `implement-player-controller` | CharacterBody2D, movement constants, state machine, animations |
+| `implement-game-state` | Autoload scripts (Global, Events, GameState), EventBus signals |
+| `implement-tilemap` | format=0 TileMapLayer, tilemap_fill_rect for rectangles |
+| `implement-level` | TileMap layers, spawn, hazards, exit; delegates via subSkills |
+| `implement-enemy` | CharacterBody2D/3D, AI state machine, patrol/flying/bounce/boss |
+| `implement-hud` | CanvasLayer, health bar, EventBus wiring, pause overlay |
+| `implement-save-system` | JSON save/load, user:// path, SettingsManager |
+| `implement-shader-effect` | gdshader, ShaderMaterial, fragment(), screen-space effects |
+| `automated-playtest` | RunGodotHeadless tool, boot check, GUT framework |
+| `export-godot-project` | export_presets.cfg, headless export, platform-specific settings |
+| `playtest-with-mcp` | MCP workflow, Godot editor tools, fallback to headless |
+
+#### ZAI Client Per-Model Semaphores
+
+| Model | Concurrency | File |
+|-------|-------------|------|
+| glm-5.1 | 10 | `apps/api/src/llm/zai-client.ts` |
+| glm-4.7 | 2 | `apps/api/src/llm/zai-client.ts` |
+| glm-4.7-flash | 1 | `apps/api/src/llm/zai-client.ts` |
+
+`MAX_RETRIES = 3` (retry delay sequence: 1s, 2s, 4s). Fetch timeout: 60s.
+
+#### WebSocket Events (autonomous)
+
+- `autonomous:started` — Loop started with sessionId, projectId, gameType
+- `autonomous:milestone` — Milestone complete with summary
+- `autonomous:completed` — All milestones done with final stats
+- `autonomous:error` — Error with message and context
+- `gdd:ingested` — GDD parsed with section/item counts
+
+#### Sub-Skills Cascade
+
+Skills can declare `subSkills` to delegate to child skill pipelines:
+
+```typescript
+// From implement-level in skills-by-phase.ts
+{
+  order: 6,
+  name: "Generate First Level",
+  subSkills: ["implement-level"],  // delegates all implement-level phases
+  agents: ["godot-specialist"],
+}
+```
+
+Currently used by `generate-genre-template` (phases 2 and 6). No circular references detected. No depth limit enforced (minor risk if circular refs added).
+
+#### Constraints
+
+- Godot `--script` mode does NOT initialize autoloads — use boot command (--quit) for validation
+- `class_name` on autoloads causes "hides autoload singleton" fatal errors — avoid in autoload scripts
+- TileMap tasks must use `tilemap_fill_rect` for rectangles — NOT individual `tilemap_set_cell` calls
+- UIDs are NOT computed from path — must read from `.import` files or `uid_cache.bin`
+
+#### Git Summary (last large change)
+
+**28 files changed (+5474/-178 lines)**:
+- New: `autonomous.ts` (895L), `gdd.ts` (333L), 13 SKILL.md stubs
+- Core: `zai-client.ts` (semaphores, retries, timeout), `llm-service.ts` (pipeline tools)
+- Skills: `skills-by-phase.ts` (+804L), `specialists.ts`, `tiers.ts`, `leadership.ts`, `engine-godot.ts`, `delegation-map.ts`
+- Godot agent: `godot-specialist.md` (maxTurns: 20), `godot-scaffolder.md`, `godot-gdscript-specialist.md`
+
+System prompts loaded from `workspace/.claude/agents/*.md` files dynamically.
+
 ### Model Tier Mapping
 
 | Tier | Z.ai Model | Use Case |
@@ -130,8 +230,8 @@ Express server on port 3001 with:
   - `/api/tickets` — Kanban board CRUD (`GET`, `POST/PATCH/DELETE`, `PATCH /:id/move`)
   - `/api/assets` — Asset inventory CRUD + art bible (`GET`, `POST/PATCH/DELETE`, `PATCH /art-bible`)
   - `/api/settings` — Config CRUD (`GET`, `PATCH`, `POST /reset`)
-  - `/api/chat` — Session management (`GET/POST /sessions`, `DELETE /sessions/:id`, `POST /sessions/:id/messages`, `GET /sessions/producer/:projectId` get-or-create)
-- **WebSocket**: Real-time events (agent:spawned, checkpoint:saved, gate:verdict, log:entry)
+  - `/api/chat` — Session management (`GET/POST /sessions`, `DELETE /sessions/:id`, `POST /sessions/:id/messages`, `GET /sessions/producer/:projectId` get-or-create, `POST /sessions/:id/compact` session compaction, `POST /sessions/:id/close` close consultation, `POST /sessions/consultation/test-create` test helper)
+- **WebSocket**: Real-time events (agent:spawned, checkpoint:saved, gate:verdict, log:entry, chat:context, chat:context-pressure, chat:session:compacted, ticket:verified)
 - **SSE**: Log streaming at `/api/sessions/:sessionId/stream`
 - **LLM**: ZAI API client (`src/llm/zai-client.ts`) with tool execution loop, retry, message pruning
 - **Document Store**: `src/services/document-store.ts` — scans workspace dirs, parses YAML frontmatter, extracts `[[wikilink]]` connections, computes backlinks, serves via `/api/documents`, watches files with `fs.watch` for real-time updates
@@ -145,7 +245,7 @@ Express server on port 3001 with:
 
 ### LLM Tool Execution
 
-The `callLLMWithTools()` function sends a request to ZAI API with game studio tools (Read, Write, Edit, Glob, Grep, Bash, Task). Tool calls are executed on the backend and results returned to the LLM. Loop continues until no more tool calls or max tools reached (100).
+The `callLLMWithTools()` function sends a request to ZAI API with game studio tools (Read, Write, Edit, Glob, Grep, Bash, Task, GenerateAsset, StartConsultation). Tool calls are executed on the backend and results returned to the LLM. Loop continues until no more tool calls or max tools reached (100).
 
 ### Context Management (Long Sessions)
 
@@ -153,12 +253,12 @@ For long-running sessions, the platform employs smart context management:
 
 | Threshold | Mechanism | Behavior |
 |-----------|-----------|----------|
-| > 400k chars | Summarization | LLM summarizes old messages, injects as `[Previous Context Summary]` |
-| > 500k chars | Pruning | Keeps last 30 messages as atomic groups |
+| > 100k tokens | Summarization | LLM summarizes old messages, injects as `[Previous Context Summary]` |
+| > 125k tokens | Pruning | Keeps last 30 messages as atomic groups |
 | > 80 messages | Pruning | Triggers pruning in tool execution loop |
 
 **Summarization flow:**
-1. When context exceeds 400k chars, `summarizeOldMessages()` is called
+1. When context exceeds 100k tokens, `summarizeOldMessages()` is called
 2. Uses lightweight model (glm-4.7-flash) to summarize old messages
 3. Preserves: key decisions, important facts, active tasks, code snippets
 4. Keeps: system messages + summary + last 10 messages
@@ -168,6 +268,21 @@ For long-running sessions, the platform employs smart context management:
 - `pruneConversationHistory()` in `chat.ts` keeps last 30 messages
 - Skips incomplete tool pairs (assistant+tool must stay together)
 - Triggers after each LLM response
+
+**Session compaction** (Claude Code-style):
+- When context fills up (>90%), session can be compacted into a new generation
+- Compaction flow: summarize via LLM → create new generation session → archive old session → switch UI seamlessly
+- Supports `/compact` slash command (autocomplete in input) and auto-compact
+- Animated purple progress bar during compaction
+- Old sessions marked as `status: "compacted"`, new session tracks `generation` number
+- `chat:session:compacted` WebSocket event drives frontend tab switch
+
+**Per-session context tracking**:
+- Context bar shows usage for the active tab (producer or agent), not just the producer
+- Model-specific context windows: `glm-5.1`/`glm-4.7` = 200k tokens, `glm-4.7-flash` = 128k tokens
+- Overridable via `CONTEXT_WINDOW_TOKENS` env var
+- `chat:context` and `chat:context-pressure` WebSocket events for real-time updates
+- At 80%, yellow "Compact" button appears (producer sessions only)
 
 ### Loop Detection
 
@@ -208,6 +323,7 @@ REVIEW_MODE=lean          # solo | lean | full
 DEFAULT_MODEL=glm-5.1      # Default fallback model
 MAX_TOOL_CALLS=100         # Tool execution loop limit
 TOOL_CHECKPOINT_INTERVAL=30 # Checkpoint frequency for long tasks
+CONTEXT_WINDOW_TOKENS=...   # Optional: override model-specific context window sizes
 ```
 
 ## Frontend (apps/web)
@@ -256,16 +372,22 @@ Next.js 15 App Router, Tailwind CSS v4, no UI framework. All pages are client co
 | `PlanMessage.tsx` | Structured plan phases with per-phase execution |
 | `ChatTabs.tsx` | Tabbed navigation between board room and agent sessions |
 | `TopAppBar.tsx` | Top bar with project pill + switcher dropdown |
+| `SubagentDrawer.tsx` | Subagent detail view in consultation sessions |
+| `ProgressSummary.tsx` | Animated purple compact progress bar + per-tab context usage |
 
 ### Chat Features
 
-- **Slash commands**: `/spawn`, `/approve`, `/done`, `/clear`, `/help`, `/cost`, `/diff`
+- **Slash commands**: `/spawn`, `/approve`, `/done`, `/clear`, `/help`, `/cost`, `/diff`, `/compact`
+- **Session compaction**: Claude Code-style compaction at >90% context — summarizes, creates new generation, archives old, seamless UI switch
+- **Director consultation**: Chat directly with directors (creative, technical, art, narrative, audio) via `StartConsultation` tool — close & return to producer with summary
+- **Per-tab context bar**: Shows context usage for active tab (producer or agent), model-specific windows, yellow "Compact" button at 80%
+- **Auto-verification**: Tickets in Verify column auto-verified by AI verifier (code→code-reviewer, design→game-designer, art→art-director, narrative→narrative-director, architecture→technical-director, default→qa-tester); PASS→Completed, FAIL→back to Processing with feedback
 - **OMC 5-stage workflow pipeline**: Plan → Decompose → Execute → Verify → Fix with progress stepper
-- **Activity log**: Real-time tool call activity (Read, Bash, Edit, etc.) under progress bar
+- **Activity log**: Collapsible (Claude Code-style), shows count badge + 3 latest entries when collapsed, persists across navigation via localStorage
 - **Real-time progress bar**: Smooth percentage updates (+3% every 2s) during agent work
 - **Thinking panel**: Shows agent reasoning during progress
 - **Navigate messages**: "Back to Producer" button after task completion
-- **Message types**: `system`, `agent`, `user`, `progress`, `welcome`, `diff`, `navigate`, `question`, `plan`, `workflow`
+- **Message types**: `system`, `agent`, `user`, `progress`, `welcome`, `diff`, `navigate`, `question`, `plan`, `workflow`, `consultation`
 - **Markdown rendering**: Messages render markdown with code blocks, lists, links
 - **Image paste**: Base64 inline images via clipboard paste (50mb body limit)
 - **Typing indicator**: Immediate visual feedback when agent is responding
@@ -278,7 +400,7 @@ Next.js 15 App Router, Tailwind CSS v4, no UI framework. All pages are client co
 - **ProjectGuard**: `/chat`, `/tickets`, `/assets` require active project — yellow overlay with link to dashboard otherwise
 - **Sample prompts**: Empty producer chat shows "Design a combat system", "Write opening cutscene", "Plan sprint 1" buttons
 - **Animation fixes**: Restored `animate-spin` / `animate-pulse` keyframes for loading spinners
-- **Session persistence**: Chat sessions saved to `chat-state.json`, survive page refreshes and server restarts; spawn/completion messages persist on producer session
+- **Session persistence**: Chat sessions saved to `chat-state.json`, survive page refreshes and server restarts; spawn/completion messages persist on producer session; progress messages and activity logs persist via localStorage cache
 - **Legacy migration**: On startup, legacy `producer` session renamed to `producer-legacy`
 
 ## Data Flow
@@ -299,7 +421,9 @@ Session state lives in `workspace/production/session-state/` as JSON files:
 
 Chat sessions persisted to `chat-state.json` survive page refreshes and server restarts.
 
-Quest tickets auto-created via Quest Bridge when agents spawn (Available → Processing → Verify → Completed).
+Quest tickets auto-created via Quest Bridge when agents spawn (Available → Processing → Verify → Auto-Verified → Completed).
+
+**Auto-Verification** (`apps/api/src/services/verification-service.ts`): When tickets reach Verify column, an AI verifier is auto-selected based on task area (CODE→code-reviewer, DESIGN→game-designer, ART→art-director, NARRATIVE→narrative-director, ARCHITECTURE→technical-director, default→qa-tester). PASS moves to Completed; FAIL moves back to Processing with feedback and producer notification. Runs async (fire-and-forget).
 
 Design documents in `workspace/design/gdd/` and `workspace/docs/architecture/` as Markdown.
 
@@ -362,7 +486,7 @@ pnpm test:e2e          # Playwright E2E test suite (apps/web/e2e/)
 - `apps/api/src/llm/zai-client.ts` — LLM client with tool loop, retry, pruning
 - `apps/api/src/services/llm-service.ts` — Agent orchestration, loads system prompts from MD files, maps tiers to Z.ai models
 - `apps/api/src/services/gate-service.ts` — LLM-powered gate execution with 18 gates across 5 review layers
-- `apps/api/src/config/model-mapping.ts` — Model tier → Z.ai model mapping (opus→glm-5.1, sonnet→glm-4.7, haiku→glm-4.7-flash)
+- `apps/api/src/config/model-mapping.ts` — Model tier → Z.ai model mapping (opus→glm-5.1, sonnet→glm-4.7, haiku→glm-4.7-flash), context window sizes, token thresholds
 - `apps/api/src/config.ts` — Environment validation
 - `apps/api/src/routes/sessions.ts` — Session CRUD + checkpointing
 - `apps/api/src/routes/skills.ts` — Skill invocation
@@ -382,11 +506,13 @@ pnpm test:e2e          # Playwright E2E test suite (apps/web/e2e/)
 - `apps/api/src/services/document-store.ts` — Workspace file scanning, wikilink extraction, backlink computation, fs.watch for real-time updates
 - `apps/api/src/services/data-store.ts` — Async file-based JSON persistence for dashboard, tickets, assets, settings with rate limiting
 - `apps/api/src/services/quest-bridge.ts` — Intercepts Task tool calls to auto-create and track Quest tickets (Available → Processing → Verify → Completed)
+- `apps/api/src/services/verification-service.ts` — Auto-verifies agent output when tickets reach Verify column, selects verifier by task area, moves tickets on PASS/FAIL
 - `apps/web/src/hooks/useCommandRoom.ts` — Chat state management with tool calls, diff, navigate
 - `apps/web/src/hooks/useGodotMCPStatus.ts` — Godot MCP health polling hook
 - `apps/web/src/app/(studio)/chat/components/DiffView.tsx` — Diff rendering component
 - `apps/web/src/lib/api.ts` — WebSocket API client with apiKey auth, debounced reconnect
 - `apps/web/src/lib/format-time.ts` — Shared time formatting utilities
+- `apps/web/src/lib/chat-context.ts` — Shared context window calculation + usage percentage for per-tab context bar
 - `packages/types/src/api.ts` — WSEvent union type (all real-time event types)
 - `packages/types/src/document.ts` — DocumentEntry, DocumentDetail, GraphData types
 - `packages/types/src/chat.ts` — ChatMessage, ToolCall, DiffBlock types

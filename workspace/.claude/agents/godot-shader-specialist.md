@@ -238,6 +238,7 @@ shader code or rendering APIs, you MUST:
 1. Read `docs/engine-reference/godot/VERSION.md` to confirm the engine version
 2. Check `docs/engine-reference/godot/breaking-changes.md` for rendering changes
 3. Read `docs/engine-reference/godot/modules/rendering.md` for current rendering state
+4. Consult `docs/godot/gdscript-patterns.md` for GDScript-side shader control patterns (uniform updates, material instantiation)
 
 Key post-cutoff rendering changes: D3D12 default on Windows (4.6), glow
 processes before tonemapping (4.6), Shader Baker (4.5), SMAA 1x (4.5),

@@ -1,6 +1,18 @@
 import type { AgentDefinition, AgentRole } from "@game-studio/types";
 
 export const leadershipAgents: Partial<Record<AgentRole, AgentDefinition>> = {
+  "autonomous-producer": {
+    name: "autonomous-producer",
+    description: "The autonomous production loop. Continuously polls the Kanban board, picks the next Available ticket, spawns the right specialist, runs automated verification, advances tickets — without waiting for human prompts. Drives end-to-end game production while humans supervise.",
+    tier: 1,
+    model: "opus",
+    tools: ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Task", "AskUserQuestion"],
+    maxTurns: 999,
+    skills: ["autonomous-production-loop", "dev-story", "automated-playtest", "sprint-plan"],
+    memory: "project",
+    reportsTo: [],
+    delegates: ["godot-specialist", "gameplay-programmer", "godot-scaffolder", "qa-tester", "art-director", "game-designer", "writer"],
+  },
   "creative-director": {
     name: "creative-director",
     description: "Vision, pillars, player experience, scope arbitration.",
@@ -32,7 +44,7 @@ export const leadershipAgents: Partial<Record<AgentRole, AgentDefinition>> = {
     model: "opus",
     tools: ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Task", "AskUserQuestion"],
     maxTurns: 50,
-    skills: ["brainstorm", "design-system", "design-review", "gate-check", "project-stage-detect", "team-combat", "team-narrative", "team-ui", "team-level", "sprint-plan", "create-epics", "create-stories", "milestone-review", "retrospective", "scope-check", "estimate", "bug-triage"],
+    skills: ["brainstorm", "design-system", "design-review", "gate-check", "project-stage-detect", "team-combat", "team-narrative", "team-ui", "team-level", "sprint-plan", "create-epics", "create-stories", "milestone-review", "retrospective", "scope-check", "estimate", "bug-triage", "autonomous-production-loop", "setup-godot-project", "compose-scene", "automated-playtest", "export-godot-project"],
     memory: "project",
     reportsTo: [],
     delegates: ["creative-director", "technical-director", "game-designer", "lead-programmer", "art-director", "audio-director", "narrative-director", "qa-lead", "release-manager", "prototyper"],

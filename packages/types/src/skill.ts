@@ -70,6 +70,27 @@ export type SkillName =
   | "prototype"
   | "onboard"
   | "localize"
+  // Godot Production
+  | "setup-godot-project"
+  | "compose-scene"
+  | "automated-playtest"
+  | "export-godot-project"
+  | "autonomous-production-loop"
+  | "implement-player-controller"
+  | "run-godot-headless"
+  | "implement-game-state"
+  | "implement-tilemap"
+  | "implement-level"
+  | "implement-enemy"
+  | "implement-hud"
+  | "implement-save-system"
+  | "gdd-to-tickets"
+  | "write-dialogue"
+  | "write-lore"
+  | "generate-audio-asset"
+  | "playtest-with-mcp"
+  | "implement-shader-effect"
+  | "generate-genre-template"
   // Team Orchestration
   | "team-combat"
   | "team-narrative"
@@ -95,6 +116,13 @@ export interface SkillPhase {
   agents: AgentRole[];
   parallel?: boolean;
   gates?: string[];
+  /**
+   * Sub-skills to invoke after this phase's agent tasks complete.
+   * Each sub-skill runs its own full skill pipeline (all phases + agents).
+   * Use for hierarchical decomposition — e.g. implement-level → sub-skills
+   * for tilemap, enemy, collectibles rather than duplicating those agents here.
+   */
+  subSkills?: SkillName[];
 }
 
 export interface SkillDefinition {

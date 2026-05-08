@@ -11,6 +11,7 @@ export type AgentTier = 1 | 2 | 3;
 /** Agent roles following the 3-tier studio hierarchy */
 export type AgentRole =
   // Tier 1 — Leadership
+  | "autonomous-producer"
   | "creative-director"
   | "technical-director"
   | "producer"
@@ -48,6 +49,7 @@ export type AgentRole =
   | "live-ops-designer"
   | "community-manager"
   // Engine specialists
+  | "godot-scaffolder"
   | "godot-specialist"
   | "godot-gdscript-specialist"
   | "godot-shader-specialist"
