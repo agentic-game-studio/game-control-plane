@@ -1029,6 +1029,66 @@ export function useCommandRoom() {
         });
         break;
       }
+
+      // ── Autonomous loop events ────────────────────────────────────────────
+      case "autonomous:iteration:started": {
+        addSessionMessage(producerSessionIdRef.current, {
+          type: "system",
+          sender: "SYSTEM",
+          content: `[Loop] Iteration ${event.iteration} started — ${event.agentRole} is working on: ${event.title}`,
+        });
+        break;
+      }
+      case "autonomous:iteration:completed": {
+        addSessionMessage(producerSessionIdRef.current, {
+          type: "system",
+          sender: "SYSTEM",
+          content: `[Loop] Iteration ${event.iteration} done — ${event.agentRole} completed ticket ${event.ticketId}. Total done: ${event.completedCount}`,
+        });
+        break;
+      }
+      case "autonomous:iteration:failed": {
+        addSessionMessage(producerSessionIdRef.current, {
+          type: "system",
+          sender: "SYSTEM",
+          content: `[Loop] Iteration ${event.iteration} failed — ${event.agentRole} on ${event.ticketId}: ${event.error}`,
+        });
+        break;
+      }
+      case "autonomous:completed": {
+        addSessionMessage(producerSessionIdRef.current, {
+          type: "system",
+          sender: "SYSTEM",
+          content: `[Loop] Autonomous loop finished. Completed: ${event.completedCount}, Failed: ${event.failedCount}, Total: ${event.totalIterations}`,
+        });
+        break;
+      }
+      case "autonomous:stopped": {
+        addSessionMessage(producerSessionIdRef.current, {
+          type: "system",
+          sender: "SYSTEM",
+          content: `[Loop] Autonomous loop stopped by user. Completed: ${event.completedCount}, Failed: ${event.failedCount}`,
+        });
+        break;
+      }
+      case "autonomous:error": {
+        addSessionMessage(producerSessionIdRef.current, {
+          type: "system",
+          sender: "SYSTEM",
+          content: `[Loop] Error: ${event.error}`,
+        });
+        break;
+      }
+
+      // ── GDD ingestion event ─────────────────────────────────────────────────
+      case "gdd:ingested": {
+        addSessionMessage(producerSessionIdRef.current, {
+          type: "system",
+          sender: "SYSTEM",
+          content: `[GDD] Ingested ${event.total} items — created ${event.created} tickets, skipped ${event.skipped} duplicates.`,
+        });
+        break;
+      }
     }
 
     // Handle chat:context — real-time token usage from API

@@ -1,12 +1,13 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
 import { skills } from "@game-studio/skills";
-import { invokeAgent } from "../services/llm-service.js";
+import { invokeAgent, detectEngineFromWorkspace, type ProjectContext } from "../services/llm-service.js";
 import { SessionStore } from "@game-studio/state";
 import { loadConfig } from "../config.js";
 import { broadcast } from "../services/websocket.js";
+import { readData } from "../services/data-store.js";
 import { logger } from "../utils/logger.js";
-import type { WSEvent } from "@game-studio/types";
+import type { WSEvent, SkillName, DashboardData } from "@game-studio/types";
 
 export const skillsRouter: Router = Router();
 
@@ -37,8 +38,9 @@ skillsRouter.post("/:id/invoke", async (req: Request, res: Response) => {
     return;
   }
 
-  const { sessionId, args, reviewMode } = req.body as {
+  const { sessionId, projectId, args, reviewMode } = req.body as {
     sessionId?: string;
+    projectId?: string;
     args?: Record<string, string>;
     reviewMode?: string;
   };
@@ -64,6 +66,21 @@ skillsRouter.post("/:id/invoke", async (req: Request, res: Response) => {
         .map(([k, v]) => `- ${k}: ${v}`)
         .join("\n")
     : "No additional arguments provided.";
+
+  // Resolve project context if projectId is provided
+  async function getProjectCtx(pid: string): Promise<ProjectContext | undefined> {
+    const data = await readData<DashboardData>("dashboard.json");
+    const project = data.projects.find((p) => p.id === pid);
+    if (!project) return undefined;
+    let engine = project.engine;
+    if (!engine && project.workspacePath) {
+      const detected = await detectEngineFromWorkspace(project.workspacePath);
+      if (detected) engine = detected as "godot" | "unreal" | "unity" | "phaser" | "threejs";
+    }
+    return { name: project.name, description: project.description, engine, workspacePath: project.workspacePath, projectId: project.id };
+  }
+
+  const projectContext = projectId ? await getProjectCtx(projectId) : undefined;
 
   // Execute phases sequentially if skill has phases
   if (skill.phases.length > 0) {
@@ -94,7 +111,12 @@ Execute this phase of the skill workflow.`;
             agentRole as import("@game-studio/types").AgentRole,
             task,
             sessionId,
-            undefined
+            undefined,
+            undefined,
+            undefined,
+            true,
+            1,
+            projectContext,
           );
 
           // Add log entry for the result
@@ -124,6 +146,73 @@ Execute this phase of the skill workflow.`;
               skill: skillId,
               timestamp: new Date().toISOString(),
             } as WSEvent);
+          }
+        }
+
+        // ── Sub-skills: invoke each after the phase's agents finish ──
+        if (phase.subSkills && phase.subSkills.length > 0) {
+          for (const subSkillName of phase.subSkills) {
+            const subSkill = skills[subSkillName as keyof typeof skills];
+            if (!subSkill) {
+              await store.addLog(sessionId, {
+                level: "warn",
+                message: `Sub-skill "${subSkillName}" not found — skipping`,
+                skill: skillId,
+              });
+              continue;
+            }
+
+            broadcast({
+              type: "skill:phase:complete",
+              skillId,
+              phase: currentPhase,
+              output: `Starting sub-skill: ${subSkillName}`,
+              sessionId,
+            } as WSEvent);
+
+            // Recursively run the sub-skill's phases (all of them sequentially)
+            for (const subPhase of subSkill.phases) {
+              for (const subAgent of subPhase.agents) {
+                const subTask = `SKILL: ${subSkillName}
+PHASE: ${subPhase.name} (${subPhase.order}/${subSkill.phases.length})
+DESCRIPTION: ${subPhase.description}
+
+PARENT SKILL: ${skillId}
+PARENT PHASE: ${phase.name}
+
+TASK ARGUMENTS:
+${taskArgs}
+
+Execute this sub-skill phase. The parent skill (${skillId}) is composing multiple sub-skills into a complete implementation.`;
+
+                const subResult = await invokeAgent(
+                  subAgent as import("@game-studio/types").AgentRole,
+                  subTask,
+                  sessionId,
+                  undefined,
+                  undefined,
+                  undefined,
+                  true,
+                  1,
+                  projectContext,
+                );
+
+                await store.addLog(sessionId, {
+                  level: "info",
+                  message: `[${subAgent}] Sub-skill ${subSkillName} phase ${subPhase.order}: ${subResult.content.slice(0, 200)}...`,
+                  agent: subAgent,
+                  skill: subSkillName,
+                });
+
+                broadcast({
+                  type: "skill:phase:complete",
+                  skillId: subSkillName,
+                  phase: subPhase.order,
+                  output: subResult.content,
+                  sessionId,
+                } as WSEvent);
+              }
+            }
           }
         }
       }
@@ -161,7 +250,12 @@ Execute this skill.`;
       "creative-director",
       task,
       sessionId,
-      undefined
+      undefined,
+      undefined,
+      undefined,
+      true,
+      1,
+      projectContext,
     );
 
     await store.addLog(sessionId, {

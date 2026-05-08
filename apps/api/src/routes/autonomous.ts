@@ -1,0 +1,895 @@
+/**
+ * autonomous.ts — Autonomous production loop runner.
+ *
+ * Drives the indie game production pipeline without human intervention.
+ * Reads tickets from tickets.json, dispatches to appropriate agents,
+ * and manages loop state across API calls via file-based persistence.
+ *
+ * Routes:
+ *   POST /autonomous/start       — Start or resume the loop for a project
+ *   POST /autonomous/stop        — Halt the running loop
+ *   GET  /autonomous/status      — Get current loop status
+ *   GET  /autonomous/history     — Get completed loop runs
+ */
+
+import { Router } from "express";
+import type { Request, Response } from "express";
+import { existsSync, mkdirSync, openSync, readFileSync, writeFileSync, fsyncSync, closeSync } from "fs";
+import { join } from "path";
+import { loadConfig } from "../config.js";
+import { invokeAgent, detectEngineFromWorkspace, type ProjectContext } from "../services/llm-service.js";
+import { readData, writeData, broadcastEvent } from "../services/data-store.js";
+import { generateTickets, addTicketsToBoard } from "../services/ticket-generator.js";
+import { broadcast } from "../services/websocket.js";
+import { logger } from "../utils/logger.js";
+import type { AgentRole, WSEvent } from "@game-studio/types";
+import type { TicketsBoard, Ticket, DashboardData, Project } from "@game-studio/types";
+import { getOrCreateGodotMCPService, launchGodotEditor, type GodotMCPServiceOptions } from "../services/godot-mcp-service.js";
+
+import { execSync } from "child_process";
+
+const DEBUG_FILE = "/tmp/autonomous-debug.txt";
+function debugLog(msg: string) {
+  const line = `[${new Date().toISOString()}] ${msg}\n`;
+  const fd = openSync(DEBUG_FILE, "a");
+  writeFileSync(fd, line);
+  fsyncSync(fd);
+  closeSync(fd);
+}
+
+/**
+ * Kill orphaned Godot headless subprocesses left behind when an agent invocation
+ * times out. The RunGodotHeadless tool uses `python3 run_godot_headless.py` which
+ * spawns a godot subprocess. If the parent python3 is orphaned (agent timed out),
+ * it keeps running indefinitely with its child godot process.
+ */
+function killOrphanedSubprocesses(): void {
+  try {
+    // Find all python3 processes running run_godot_headless.py
+    const output = execSync(
+      "ps aux | grep run_godot_headless | grep -v grep | awk '{print $2}'",
+      { timeout: 5000 }
+    ).toString().trim();
+
+    if (!output) return;
+
+    const pids = output.split("\n").filter(Boolean);
+    if (pids.length === 0) return;
+
+    logger.info({ pids, event: "kill_orphaned_subprocesses" }, `Killing ${pids.length} orphaned godot headless subprocess(es)`);
+
+    for (const pid of pids) {
+      try {
+        // Kill the python3 parent (this also kills its child godot subprocess)
+        execSync(`kill -9 ${pid}`, { timeout: 5000 });
+        logger.info({ pid, event: "killed_orphaned_subprocess" }, `Killed orphaned subprocess pid=${pid}`);
+      } catch {
+        // Process may have already exited
+      }
+    }
+  } catch {
+    // ps or kill failed — non-fatal, continue
+  }
+}
+
+/**
+ * godot-headless-boot-check — MANDATORY post-ticket gate.
+ *
+ * After each agent ticket completes, this runs `godot --headless --check-only`
+ * against the project to verify all scripts and scenes parse without errors.
+ *
+ * Returns { bootOk: true } on success.
+ * Returns { bootOk: false, errors: string[] } on failure — ticket is NOT marked done,
+ * it goes back to the queue for the agent to fix.
+ *
+ * NOTE: `--check-only` hangs in some macOS terminal environments (known Godot issue).
+ * The godot-headless.py runner uses a 120s timeout and spawns via subprocess.Popen
+ * with platform-specific workarounds. We invoke it the same way RunGodotHeadless does
+ * so we benefit from those workarounds.
+ */
+async function runBootCheck(projectPath: string): Promise<{ bootOk: boolean; errors: string[] }> {
+  const config = loadConfig();
+  // scripts/godot lives inside WORKSPACE_DIR (workspace/scripts/godot, via symlink)
+  const scriptDir = join(config.WORKSPACE_DIR, "scripts", "godot");
+  const pythonBin = process.env.PIPELINE_PYTHON ?? "python3";
+  const godotBin = process.env.GODOT_BIN ?? join(process.env.HOME ?? "", ".local/bin/godot_bin/Godot");
+
+  try {
+    const cmd = `${pythonBin} "${join(scriptDir, "run_godot_headless.py")}" --project "${projectPath}" --command boot --godot-bin "${godotBin}" --timeout 45`;
+
+    const result = execSync(cmd, {
+      timeout: 90_000, // 90s max (boot is fast, 60s timeout inside script)
+    });
+
+    const stdout = result?.toString() ?? "";
+
+    // Parse JSON output from run_godot_headless.py
+    let errors: string[] = [];
+    try {
+      const parsed = JSON.parse(stdout.trim());
+      if (!parsed.success || parsed.returnCode !== 0) {
+        errors = extractErrors(parsed.stderr ?? "");
+      }
+    } catch {
+      // JSON parse failed — fall back to raw text scanning so we never silently
+      // pass with bootOk:true when the script produced malformed output.
+      errors = extractErrors(stdout);
+    }
+
+    if (errors.length > 0) {
+      logger.warn({ projectPath, errors, event: "boot_check_failed" }, `Boot check FAILED for ${projectPath}: ${errors.length} errors`);
+      return { bootOk: false, errors };
+    } else {
+      logger.info({ projectPath, event: "boot_check_passed" }, `Boot check PASSED for ${projectPath}`);
+      return { bootOk: true, errors: [] };
+    }
+  } catch (err: unknown) {
+    // execSync throws on non-zero exit — that's the normal failure case
+    let errors: string[] = [];
+    let errorMsg = "";
+
+    if (err && typeof err === "object" && "stderr" in err) {
+      errors = extractErrors(String((err as { stderr: unknown }).stderr ?? ""));
+      errorMsg = `exit ${(err as { status?: number }).status ?? "?"}: ${errors.slice(0, 3).join("; ")}`;
+    } else {
+      errorMsg = err instanceof Error ? err.message : String(err);
+    }
+
+    logger.warn({ projectPath, error: errorMsg, event: "boot_check_error" }, `Boot check FAILED: ${errorMsg}`);
+    return { bootOk: false, errors: errors.length > 0 ? errors : [`Boot check failed: ${errorMsg}`] };
+  }
+}
+
+/** Extract fatal error lines from godot headless output.
+ * Distinguishes actual parse/script errors from non-fatal warnings.
+ * Godot can exit 0 but still report parse errors in stderr — we catch those.
+ * Non-fatal: generic ERROR: (often warnings), r克萨斯 errors, driver init messages.
+ */
+function extractErrors(output: string): string[] {
+  if (!output) return [];
+  const lines = output.split("\n");
+
+  // Fatal: always indicate a real problem that will prevent the game from running
+  const fatalPatterns = [
+    { pattern: /SCRIPT ERROR:/, label: "SCRIPT ERROR" },
+    { pattern: /Parse Error/, label: "Parse Error" },      // space = Godot parse error
+    { pattern: /Parser Error/, label: "Parser Error" },
+    { pattern: /Invalid set index/, label: "Invalid set index" },
+    { pattern: /Function not found/, label: "Function not found" },
+    { pattern: /Export variable not found/, label: "Export not found" },
+    // Non-fatal (too broad — skip):
+    //   /ERROR:/    — Godot driver init messages, vulkan warnings, etc. not fatal
+    //   /Failed to load/ — may be non-critical asset warnings
+  ];
+
+  const errorLines: string[] = [];
+  for (const line of lines) {
+    for (const { pattern, label } of fatalPatterns) {
+      if (pattern.test(line)) {
+        errorLines.push(line.trim());
+        break;
+      }
+    }
+  }
+
+  // Also check returnCode — if Godot crashed (non-zero exit), include a marker
+  // The caller handles returnCode separately via parsed.returnCode
+  const unique = Array.from(new Set(errorLines));
+  return unique.slice(0, 20);
+}
+
+export const autonomousRouter: Router = Router();
+
+const config = loadConfig();
+const SESSIONS_DIR = join(config.WORKSPACE_DIR, "production", "sessions");
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+interface LoopIteration {
+  iteration: number;
+  ticketId: string;
+  agentRole: string;
+  title: string;
+  status: "running" | "completed" | "failed";
+  startedAt: string;
+  completedAt?: string;
+  output?: string;
+  error?: string;
+}
+
+interface LoopState {
+  projectId: string;
+  sessionId: string;
+  status: "idle" | "running" | "paused" | "done" | "error";
+  startedAt: string;
+  lastHeartbeat: string;
+  currentIteration: number;
+  maxIterations: number;
+  currentTicketId?: string;
+  currentAgentRole?: string;
+  completedCount: number;
+  failedCount: number;
+  iterations: LoopIteration[];
+  lastError?: string;
+}
+
+interface LoopRunRecord {
+  runId: string;
+  projectId: string;
+  startedAt: string;
+  completedAt?: string;
+  totalIterations: number;
+  completedCount: number;
+  failedCount: number;
+  status: "completed" | "stopped" | "error" | "exhausted";
+}
+
+// ─── Persistence helpers ─────────────────────────────────────────────────────
+
+function getLoopStatePath(sessionId: string): string {
+  const dir = join(SESSIONS_DIR, sessionId);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  return join(dir, "loop-state.json");
+}
+
+function getLoopHistoryPath(): string {
+  const dir = join(SESSIONS_DIR, ".history");
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  return join(dir, "runs.json");
+}
+
+function loadLoopState(sessionId: string): LoopState | null {
+  const path = getLoopStatePath(sessionId);
+  if (!existsSync(path)) return null;
+  try {
+    return JSON.parse(readFileSync(path, "utf-8")) as LoopState;
+  } catch {
+    return null;
+  }
+}
+
+function saveLoopState(state: LoopState): void {
+  const path = getLoopStatePath(state.sessionId);
+  writeFileSync(path, JSON.stringify(state, null, 2), "utf-8");
+}
+
+function loadHistory(): LoopRunRecord[] {
+  const path = getLoopHistoryPath();
+  if (!existsSync(path)) return [];
+  try {
+    return JSON.parse(readFileSync(path, "utf-8")) as LoopRunRecord[];
+  } catch {
+    return [];
+  }
+}
+
+function saveHistory(history: LoopRunRecord[]): void {
+  const path = getLoopHistoryPath();
+  writeFileSync(path, JSON.stringify(history, null, 2), "utf-8");
+}
+
+function saveRunRecord(record: LoopRunRecord): void {
+  const history = loadHistory();
+  // Keep last 50 runs
+  const updated = [record, ...history].slice(0, 50);
+  saveHistory(updated);
+}
+
+// ─── Ticket helpers ──────────────────────────────────────────────────────────
+
+const STALE_IN_PROGRESS_THRESHOLD_MS = 30 * 60 * 1000; // 30 minutes
+
+/**
+ * Archive tickets stuck in in_progress for too long (crashed/timed-out iterations).
+ * Returns a fresh copy of the board with stale tickets moved to completed.
+ */
+async function cleanupStaleInProgress(board: TicketsBoard): Promise<TicketsBoard> {
+  const now = Date.now();
+  let changed = false;
+
+  const inProgressCol = board.columns.find((c) => c.id === "in_progress");
+  if (!inProgressCol || inProgressCol.tickets.length === 0) return board;
+
+  const stillValid: Ticket[] = [];
+  const toArchive: Ticket[] = [];
+
+  for (const ticket of inProgressCol.tickets) {
+    const age = now - new Date(ticket.updatedAt).getTime();
+    if (age > STALE_IN_PROGRESS_THRESHOLD_MS) {
+      toArchive.push(ticket);
+      changed = true;
+    } else {
+      stillValid.push(ticket);
+    }
+  }
+
+  if (!changed) return board;
+
+  inProgressCol.tickets = stillValid;
+
+  // Move stale tickets to qa column for review (not directly to completed —
+  // an agent crash can leave the project in a broken state; reviewer checks the diff)
+  const qaCol = board.columns.find((c) => c.id === "qa");
+  if (qaCol) {
+    for (const t of toArchive) {
+      t.status = "qa";
+      t.updatedAt = new Date().toISOString();
+      qaCol.tickets.push(t);
+    }
+  }
+
+  await writeData("tickets.json", board);
+  logger.info(`Archived ${toArchive.length} stale in_progress tickets`);
+  return board;
+}
+
+function getNextAvailableTicket(board: TicketsBoard): Ticket | null {
+  const col = board.columns.find((c) => c.id === "available");
+  if (!col || col.tickets.length === 0) return null;
+  // Pick oldest ticket (FIFO)
+  return col.tickets.sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0];
+}
+
+function assignTicketToAgent(ticket: Ticket): AgentRole {
+  const assignee = ticket.assignee as string;
+  if (assignee && assignee !== "unassigned") return assignee as AgentRole;
+
+  // Priority: explicit agentRole on ticket > area-based fallback
+  if (ticket.agentRole) return ticket.agentRole as AgentRole;
+
+  // Fallback mapping by area
+  const areaMap: Record<string, AgentRole> = {
+    engineering: "godot-specialist",
+    content: "writer",
+    design: "creative-director",
+    qa: "qa-tester",
+    art: "art-director",
+  };
+  return areaMap[ticket.area] ?? "godot-specialist";
+}
+
+async function moveTicket(ticketId: string, status: string): Promise<void> {
+  const data = await readData<TicketsBoard>("tickets.json");
+  for (const column of data.columns) {
+    const idx = column.tickets.findIndex((t) => t.id === ticketId);
+    if (idx !== -1) {
+      const ticket = column.tickets[idx];
+      column.tickets.splice(idx, 1);
+      const destCol = data.columns.find((c) => c.id === status);
+      if (destCol) {
+        destCol.tickets.push({ ...ticket, status: status as Ticket["status"], updatedAt: new Date().toISOString() });
+      }
+      await writeData("tickets.json", data);
+      return;
+    }
+  }
+}
+
+async function getProjectContext(projectId: string): Promise<ProjectContext | undefined> {
+  const data = await readData<DashboardData>("dashboard.json");
+  const project = data.projects.find((p) => p.id === projectId);
+  if (!project) return undefined;
+
+  let engine = project.engine;
+  // Auto-detect engine if not set
+  if (!engine && project.workspacePath) {
+    const detected = await detectEngineFromWorkspace(project.workspacePath);
+    if (detected) engine = detected as "godot" | "unreal" | "unity" | "phaser" | "threejs";
+  }
+
+  return {
+    name: project.name,
+    description: project.description,
+    engine,
+    workspacePath: project.workspacePath,
+    projectId: project.id,
+  };
+}
+
+// ─── Core loop step ──────────────────────────────────────────────────────────
+
+async function runIteration(state: LoopState, board: TicketsBoard, projectContext: ProjectContext | undefined): Promise<{ ticket: Ticket | null; done: boolean; error?: string }> {
+  debugLog(`runIteration ENTRY iter=${state.currentIteration}, projectContext.engine=${projectContext?.engine}, workspacePath=${projectContext?.workspacePath}`);
+
+  // Clean up stale in_progress tickets (from crashed/timed-out iterations)
+  board = await cleanupStaleInProgress(board);
+
+  let ticket = getNextAvailableTicket(board);
+  debugLog(`getNextAvailableTicket result: ${ticket ? `ticket.id=${ticket.id}, title=${ticket.title}` : "null (queue empty)"}`);
+
+    // Queue empty — generate new tickets from GDD analysis
+    if (!ticket) {
+      const completedCol = board.columns.find((c) => c.id === "completed");
+      const totalCompleted = completedCol?.tickets.length ?? 0;
+
+      debugLog(`queue empty, completedCount=${totalCompleted}, generating tickets...`);
+      try {
+        const newTickets = await generateTickets(state.projectId ?? "pixel-platformer-1", projectContext?.workspacePath ?? undefined);
+        debugLog(`generateTickets returned ${newTickets.length} tickets`);
+
+        if (newTickets.length > 0) {
+          await addTicketsToBoard(newTickets);
+          logger.info(`Generated ${newTickets.length} new tickets`);
+          const refreshedBoard = await readData<TicketsBoard>("tickets.json");
+          ticket = getNextAvailableTicket(refreshedBoard);
+          debugLog(`queue replenished: ${newTickets.length} tickets added, getNextAvailableTicket=${ticket ? "got ticket" : "still null"}`);
+        } else if (totalCompleted > 0) {
+          // All feature templates already completed — the game is done!
+          debugLog(`all ${totalCompleted} feature templates exhausted — loop done`);
+          return { ticket: null, done: true };
+        } else {
+          // No completed tickets AND zero new tickets — either first run with no templates
+          // applicable to this project, or templates are being filtered out entirely.
+          // Continue retrying but cap at maxIterations so we don't loop forever.
+          debugLog(`no tickets generated and nothing completed yet — will retry (iter=${state.currentIteration}/${state.maxIterations})`);
+          return { ticket: null, done: false };
+        }
+      } catch (err) {
+        logger.error("Ticket generation failed:", err);
+        return { ticket: null, done: false };
+      }
+    }
+
+  state.currentTicketId = ticket.id;
+  state.currentAgentRole = assignTicketToAgent(ticket);
+  state.status = "running";
+
+  const iteration: LoopIteration = {
+    iteration: state.currentIteration,
+    ticketId: ticket.id,
+    agentRole: state.currentAgentRole,
+    title: ticket.title,
+    status: "running",
+    startedAt: new Date().toISOString(),
+  };
+  state.iterations.push(iteration);
+  saveLoopState(state);
+
+  // Broadcast iteration start
+  broadcast({
+    type: "autonomous:iteration:started",
+    sessionId: state.sessionId,
+    ticketId: ticket.id,
+    agentRole: state.currentAgentRole,
+    title: ticket.title,
+    iteration: state.currentIteration,
+  } as WSEvent);
+
+  // Move ticket to in_progress
+  await moveTicket(ticket.id, "in_progress");
+
+  // Per-ticket retry with exponential backoff for transient fetch failures.
+  // "fetch failed" = Node.js network error (ZAI API unreachable). These are often
+  // temporary — retry up to 3 times before treating as a real failure.
+  const MAX_TICKET_RETRIES = 3;
+  const RETRY_DELAYS = [15_000, 30_000, 60_000]; // 15s, 30s, 60s
+  let agentResult: { content?: string } | null = null;
+  let agentError = "";
+  let attempt = 0;
+
+  while (attempt <= MAX_TICKET_RETRIES) {
+    attempt++;
+    const AGENT_TIMEOUT_MS = 1_200_000; // 20 minutes per attempt
+
+    const agentPromise = invokeAgent(
+      state.currentAgentRole as AgentRole,
+      `[AUTONOMOUS TICKET] ${ticket.description || ticket.title}${attempt > 1 ? ` (retry ${attempt}/${MAX_TICKET_RETRIES})` : ""}`,
+      state.sessionId,
+      attempt > 1 ? `Previous attempt failed with: ${agentError}. Fix the issue and retry.` : undefined,
+      undefined, // conversationHistory
+      undefined, // onProgress
+      true,      // broadcastEvents
+      1,         // depth
+      projectContext,
+    );
+
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`Agent timed out after ${AGENT_TIMEOUT_MS / 1000}s — godot-specialist likely hanging on a Godot MCP tool. The MCP per-tool timeout is 30s; if a tool hangs past that the MCP service kills it. Check that Godot editor is running with godot_mcp plugin and MCP port 6005 is reachable.`)), AGENT_TIMEOUT_MS)
+    );
+
+    let agentRejected = false;
+    try {
+      agentResult = await Promise.race([agentPromise, timeoutPromise]);
+    } catch (err: unknown) {
+      agentRejected = true;
+      agentError = err instanceof Error ? err.message : String(err);
+    }
+
+    if (!agentRejected) {
+      // Agent completed successfully
+      break;
+    }
+
+    // Classify the error
+    const isFetchFailure = agentError.includes("fetch failed") || agentError.includes("fetch() failed");
+    const isTimeout = agentError.includes("timed out") || agentError.includes("timeout");
+    const isBootFailure = agentError.includes("Boot check failed");
+
+    if (isFetchFailure && attempt <= MAX_TICKET_RETRIES) {
+      logger.warn({ ticketId: ticket.id, attempt, error: agentError, event: "retry_fetch_failure" },
+        `ZAI fetch failure on attempt ${attempt}/${MAX_TICKET_RETRIES} — retrying in ${RETRY_DELAYS[attempt - 1] / 1000}s`);
+      await new Promise((r) => setTimeout(r, RETRY_DELAYS[attempt - 1]));
+      continue;
+    }
+
+    // Non-retryable or max retries exceeded — stop retrying
+    if (attempt > MAX_TICKET_RETRIES) {
+      logger.warn({ ticketId: ticket.id, error: agentError, event: "max_retries_exceeded" },
+        `Ticket ${ticket.id} failed after ${MAX_TICKET_RETRIES} retries — giving up`);
+    }
+    break;
+  }
+
+  const agentRejected = agentError.length > 0 && !agentResult;
+
+  if (agentRejected) {
+    // Kill any orphaned godot/python subprocesses left behind by timed-out agents
+    killOrphanedSubprocesses();
+
+    // Even on crash/timeout, run boot check — a crashed agent may have left
+    // the project in a broken state (parse errors, half-written files).
+    // Skip boot check only if we have no valid project path.
+    let bootOk = true;
+    let bootErrors: string[] = [];
+    if (projectContext?.workspacePath) {
+      const fullProjectPath = join(loadConfig().WORKSPACE_DIR, projectContext.workspacePath);
+      const bootResult = await runBootCheck(fullProjectPath);
+      bootOk = bootResult.bootOk;
+      bootErrors = bootResult.errors;
+    } else {
+      // No workspace path — can't validate; treat as unhealthy so reviewer inspects
+      bootOk = false;
+      bootErrors = [`No workspacePath configured for projectId=${state.projectId}`];
+    }
+
+    // Build the failure description
+    const crashPrefix = bootOk
+      ? `[Agent crashed/timed out — project health OK]\n`
+      : `[Agent crashed/timed out — boot check FAILED]\n`;
+    const combinedError = crashPrefix
+      + (bootErrors.length > 0 ? `Boot errors:\n${bootErrors.slice(0, 5).join("\n")}\n\n` : "")
+      + `Agent error:\n${agentError}`;
+
+    iteration.status = "failed";
+    iteration.completedAt = new Date().toISOString();
+    iteration.error = combinedError;
+    state.failedCount++;
+    state.lastError = combinedError;
+    state.lastHeartbeat = new Date().toISOString();
+
+    // Route to QA for code reviewer to inspect the diff and identify what went wrong
+    await moveTicket(ticket.id, "qa");
+
+    // Invoke code-reviewer to analyze what went wrong and provide diagnostic feedback.
+    // This runs async (non-blocking) so the loop isn't slowed down by a second LLM call.
+    // Errors from the reviewer are logged but never block the loop.
+    invokeAgent(
+      "code-reviewer" as AgentRole,
+      `Code review task — analyze this failed ticket and provide diagnostic feedback.
+
+**Ticket:** ${ticket.title}
+**Agent:** ${state.currentAgentRole}
+**Error:** ${combinedError}
+**Project workspace:** ${projectContext?.workspacePath ?? "unknown"}
+
+Review the godot-specialist's recent changes in the project workspace above.
+Identify what likely caused the failure. Be specific — point to files, functions, or patterns.
+If the failure is a known Godot gotcha (e.g. class_name conflicts, tilemap tool limits, etc.), note it.
+If the failure is an infinite loop or hang (timeout), suggest a workaround.`,
+      state.sessionId,
+      undefined, // no additional context needed — workspace path is in the projectContext
+      undefined, // no conversation history
+      undefined, // no onProgress
+      false,     // don't broadcast reviewer events — it's background analysis
+    ).then((result) => {
+      logger.info({ ticketId: ticket.id, reviewLength: result.content.length, event: "code_review_done" },
+        `Code review for failed ticket ${ticket.id}: ${result.content.slice(0, 200)}`);
+    }).catch((err) => {
+      logger.warn({ ticketId: ticket.id, error: err.message, event: "code_review_error" },
+        `Code reviewer failed for ticket ${ticket.id}: ${err.message}`);
+    });
+
+    broadcast({
+      type: "autonomous:iteration:failed",
+      sessionId: state.sessionId,
+      ticketId: ticket.id,
+      agentRole: ticket.agentRole ?? "godot-specialist",
+      iteration: state.currentIteration,
+      error: combinedError,
+      bootOk,
+      bootErrors,
+    } as WSEvent);
+  } else {
+    // Agent completed — run godot-headless-boot-check before marking ticket done.
+    // Boot check gate: Godot project files must parse cleanly before a ticket is marked done.
+    // If workspacePath is missing, we cannot validate — treat as a hard failure so the loop
+    // never silently passes tickets without validation. This prevents parse-error cascades
+    // from accumulating across iterations when the project path is misconfigured.
+    let bootOk = true;
+    let bootErrors: string[] = [];
+
+    if (!projectContext?.workspacePath) {
+      logger.warn({ projectId: state.projectId, event: "boot_check_skipped_no_path" },
+        "Cannot run Godot boot check: project workspacePath is not set. Ticket will be re-queued.");
+      bootOk = false;
+      bootErrors = [`Project workspacePath not configured — cannot validate Godot project (projectId=${state.projectId}). Set workspacePath in dashboard.json.`];
+    } else {
+      const fullProjectPath = join(
+        loadConfig().WORKSPACE_DIR,
+        projectContext.workspacePath,
+      );
+      const bootResult = await runBootCheck(fullProjectPath);
+      bootOk = bootResult.bootOk;
+      bootErrors = bootResult.errors;
+    }
+
+    if (!bootOk) {
+      // Boot check failed — return ticket to queue, prepend boot errors to description
+      iteration.status = "failed";
+      iteration.completedAt = new Date().toISOString();
+      iteration.error = `Boot check failed:\n${bootErrors.slice(0, 5).join("\n")}\n\nAgent output:\n${agentResult?.content?.slice(0, 300) ?? ""}`;
+      iteration.output = iteration.error;
+      state.failedCount++;
+      state.lastError = iteration.error;
+      state.lastHeartbeat = new Date().toISOString();
+
+      // Return ticket to available queue for the agent to fix
+      await moveTicket(ticket.id, "available");
+
+      broadcast({
+        type: "autonomous:iteration:boot_check_failed",
+        sessionId: state.sessionId,
+        ticketId: ticket.id,
+        iteration: state.currentIteration,
+        errors: bootErrors,
+      } as unknown as WSEvent);
+    } else {
+      // Boot check passed — mark completed
+      iteration.status = "completed";
+      iteration.completedAt = new Date().toISOString();
+      iteration.output = agentResult?.content?.slice(0, 500);
+      state.completedCount++;
+      state.lastHeartbeat = new Date().toISOString();
+
+      await moveTicket(ticket.id, "completed");
+
+      broadcast({
+        type: "autonomous:iteration:completed",
+        sessionId: state.sessionId,
+        ticketId: ticket.id,
+        iteration: state.currentIteration,
+        completedCount: state.completedCount,
+      } as WSEvent);
+    }
+  }
+
+  state.currentIteration++;
+  state.currentTicketId = undefined;
+  state.currentAgentRole = undefined;
+  saveLoopState(state);
+
+  // Check if we've hit max iterations
+  if (state.currentIteration >= state.maxIterations) {
+    return { ticket, done: true };
+  }
+
+  return { ticket, done: false };
+}
+
+// ─── Routes ──────────────────────────────────────────────────────────────────
+
+// POST /autonomous/start — Start or resume the autonomous loop
+autonomousRouter.post("/start", async (req: Request, res: Response) => {
+  const { sessionId, projectId, maxIterations = 50 } = req.body as {
+    sessionId?: string;
+    projectId?: string;
+    maxIterations?: number;
+  };
+
+  if (!sessionId) {
+    res.status(400).json({ success: false, error: "sessionId is required" });
+    return;
+  }
+
+  const existing = loadLoopState(sessionId);
+
+  // Resume if already running
+  if (existing && existing.status === "running") {
+    res.status(409).json({ success: false, error: "Loop already running", data: existing });
+    return;
+  }
+
+  const state: LoopState = existing && existing.status !== "idle"
+    ? { ...existing, status: "running", maxIterations, lastHeartbeat: new Date().toISOString() }
+    : {
+        projectId: projectId ?? "default",
+        sessionId,
+        status: "running",
+        startedAt: existing?.startedAt ?? new Date().toISOString(),
+        lastHeartbeat: new Date().toISOString(),
+        currentIteration: existing?.currentIteration ?? 0,
+        maxIterations,
+        completedCount: existing?.completedCount ?? 0,
+        failedCount: existing?.failedCount ?? 0,
+        iterations: existing?.iterations ?? [],
+      };
+
+  saveLoopState(state);
+
+  // Kick off the loop asynchronously (don't block the HTTP response)
+  (async () => {
+    debugLog(`batch ${state.sessionId}] async loop started, projectId=${state.projectId}`);
+
+    // ── Setup phase ──────────────────────────────────────────────────────────
+    let projectContext: ReturnType<typeof getProjectContext> extends Promise<infer T> ? T : never | undefined;
+    try {
+      projectContext = await getProjectContext(state.projectId);
+      debugLog(`batch ${state.sessionId}] getProjectContext done, engine=${projectContext?.engine}, workspacePath=${projectContext?.workspacePath}`);
+    } catch (err: unknown) {
+      debugLog(`batch ${state.sessionId}] getProjectContext CRASHED: ${err}`);
+      const e = err instanceof Error ? err.message : String(err);
+      state.status = "error";
+      state.lastError = `getProjectContext failed: ${e}`;
+      state.lastHeartbeat = new Date().toISOString();
+      saveLoopState(state);
+      return;
+    }
+
+    // Start Godot MCP service for godot projects (mirrors chat.ts logic)
+    if (projectContext?.engine === "godot") {
+      const mcpOptions: GodotMCPServiceOptions = {
+        projectPath: projectContext.workspacePath ?? undefined,
+        mode: "lite",
+      };
+      logger.info({ projectId: state.projectId, engine: projectContext.engine, event: "autonomous_mcp_starting" },
+        "Starting Godot MCP service for autonomous loop");
+      getOrCreateGodotMCPService(state.projectId, mcpOptions).then((service) => {
+        logger.info({ projectId: state.projectId, running: service.running(), event: "autonomous_mcp_started" },
+          "Godot MCP service ready");
+      }).catch((err) => {
+        logger.error({ projectId: state.projectId, error: err.message, event: "autonomous_mcp_start_error" },
+          "Failed to start Godot MCP service — agents will fall back to file I/O");
+      });
+
+      // Auto-launch Godot editor if workspace path is known
+      if (projectContext.workspacePath) {
+        const config = loadConfig();
+        const projectDir = join(config.WORKSPACE_DIR, projectContext.workspacePath);
+        const launchResult = launchGodotEditor(projectDir);
+        if (launchResult.success) {
+          logger.info({ projectId: state.projectId, pid: launchResult.pid, event: "godot_editor_launched" },
+            `Godot editor launched (pid=${launchResult.pid})`);
+        } else {
+          logger.warn({ projectId: state.projectId, error: launchResult.error, event: "godot_editor_launch_failed" },
+            `Godot editor launch failed: ${launchResult.error}`);
+        }
+      }
+    }
+
+    let currentState = loadLoopState(state.sessionId)!;
+    let done = false;
+
+    debugLog(`batch ${state.sessionId}] starting while loop`);
+    while (!done && currentState.status === "running") {
+      try {
+        debugLog(`batch ${state.sessionId}] calling runIteration`);
+        const board = await readData<TicketsBoard>("tickets.json");
+        const result = await runIteration(currentState, board, projectContext);
+        debugLog(`batch ${state.sessionId}] runIteration returned, done=${result.done}`);
+        currentState = loadLoopState(state.sessionId)!;
+        done = result.done;
+
+        if (!done) {
+          // Small delay between iterations to avoid hammering the API
+          await new Promise((r) => setTimeout(r, 2000));
+        }
+      } catch (err: unknown) {
+        const error = err instanceof Error ? err.message : String(err);
+        currentState.status = "error";
+        currentState.lastError = error;
+        currentState.lastHeartbeat = new Date().toISOString();
+        saveLoopState(currentState);
+        done = true;
+
+        broadcast({
+          type: "autonomous:error",
+          sessionId: state.sessionId,
+          error,
+        } as WSEvent);
+      }
+    }
+
+    if (currentState.status === "running") {
+      currentState.status = done ? "done" : "idle";
+      saveLoopState(currentState);
+
+      // Save run record
+      saveRunRecord({
+        runId: `run-${Date.now()}`,
+        projectId: currentState.projectId,
+        startedAt: currentState.startedAt,
+        completedAt: new Date().toISOString(),
+        totalIterations: currentState.currentIteration,
+        completedCount: currentState.completedCount,
+        failedCount: currentState.failedCount,
+        status: currentState.failedCount > 0 && currentState.completedCount === 0 ? "error" : "completed",
+      });
+
+      broadcast({
+        type: "autonomous:completed",
+        sessionId: state.sessionId,
+        completedCount: currentState.completedCount,
+        failedCount: currentState.failedCount,
+        totalIterations: currentState.currentIteration,
+      } as WSEvent);
+    }
+  })().catch((err) => {
+    debugLog(`batch ${state.sessionId}] CRASH in async loop: ${err}`);
+    logger.error({ error: err, event: "autonomous_loop_crash" }, "Autonomous loop crashed");
+  });
+
+  res.status(202).json({ success: true, data: state });
+
+});
+
+// POST /autonomous/stop — Halt the running loop
+autonomousRouter.post("/stop", async (req: Request, res: Response) => {
+  const { sessionId } = req.body as { sessionId?: string };
+  if (!sessionId) {
+    res.status(400).json({ success: false, error: "sessionId is required" });
+    return;
+  }
+
+  const state = loadLoopState(sessionId);
+  if (!state) {
+    res.status(404).json({ success: false, error: "No loop state found for session" });
+    return;
+  }
+
+  state.status = "idle";
+  state.lastHeartbeat = new Date().toISOString();
+  saveLoopState(state);
+
+  saveRunRecord({
+    runId: `run-${Date.now()}`,
+    projectId: state.projectId,
+    startedAt: state.startedAt,
+    completedAt: new Date().toISOString(),
+    totalIterations: state.currentIteration,
+    completedCount: state.completedCount,
+    failedCount: state.failedCount,
+    status: "stopped",
+  });
+
+  broadcast({
+    type: "autonomous:stopped",
+    sessionId,
+    completedCount: state.completedCount,
+    failedCount: state.failedCount,
+  } as WSEvent);
+
+  res.json({ success: true, data: state });
+});
+
+// GET /autonomous/status — Get current loop status
+autonomousRouter.get("/status", (req: Request, res: Response) => {
+  const { sessionId } = req.query as { sessionId?: string };
+  if (!sessionId) {
+    res.status(400).json({ success: false, error: "sessionId query param is required" });
+    return;
+  }
+
+  const state = loadLoopState(sessionId);
+  if (!state) {
+    res.json({ success: true, data: { status: "not_found" } });
+    return;
+  }
+
+  res.json({ success: true, data: state });
+});
+
+// GET /autonomous/history — Get completed loop runs
+autonomousRouter.get("/history", (_req: Request, res: Response) => {
+  const history = loadHistory();
+  res.json({ success: true, data: history });
+});

@@ -8,6 +8,7 @@ import CommandInput from "./components/CommandInput";
 import QuestionToolbar from "./components/QuestionToolbar";
 import ProgressSummary from "./components/ProgressSummary";
 import SubagentDrawer from "./components/SubagentDrawer";
+import AutonomousControlBar from "./components/AutonomousControlBar";
 import { useCommandRoom } from "@/hooks/useCommandRoom";
 import { ProjectGuard } from "@/components/ProjectGuard";
 import { useProject } from "@/contexts/ProjectContext";
@@ -176,6 +177,12 @@ function ChatPageInner() {
           contextPressure={contextPressure}
           onCompact={compactSession}
           compactingSessionId={compactingSessionId}
+        />
+        {/* Autonomous production loop control — rendered below ProgressSummary */}
+        <AutonomousControlBar
+          projectId={currentProject?.id}
+          producerSessionId={producerSessionId}
+          onLoopStarted={(sessionId) => selectSession(sessionId)}
         />
         {/* Godot MCP Warning Banner */}
         {isGodot && mcpStatus && mcpStatus.status !== "connected" && (

@@ -35,6 +35,482 @@ export const skillsByPhase: Record<string, SkillDefinition[]> = {
       phases: [],
       userInvocable: true,
     },
+    {
+      name: "setup-godot-project",
+      description: "Scaffold a complete Godot 4 project from scratch: project.godot, directory structure, autoloads (Global, Events, GameState), input map, boot scene, main menu, first level placeholder, and export_presets.cfg. Uses godot-scaffolder agent.",
+      phases: [
+        {
+          order: 1,
+          name: "Detect or Create Project Directory",
+          description: "Check if project exists under workspace/, create if not",
+          agents: ["godot-scaffolder"],
+        },
+        {
+          order: 2,
+          name: "Write project.godot",
+          description: "Configure engine version, app name, autoloads, display, input actions",
+          agents: ["godot-scaffolder"],
+        },
+        {
+          order: 3,
+          name: "Create Autoload Scripts",
+          description: "Write global.gd, events.gd, game_state.gd",
+          agents: ["godot-scaffolder"],
+        },
+        {
+          order: 4,
+          name: "Create Boot & UI Scenes",
+          description: "boot.tscn, main_menu.tscn with functional script",
+          agents: ["godot-scaffolder"],
+        },
+        {
+          order: 5,
+          name: "Create First Level",
+          description: "level_01.tscn placeholder wired to game state",
+          agents: ["godot-scaffolder"],
+        },
+        {
+          order: 6,
+          name: "Create Export Presets",
+          description: "export_presets.cfg for Windows Desktop and HTML5",
+          agents: ["godot-scaffolder"],
+        },
+      ],
+      userInvocable: true,
+    },
+  ],
+
+  implementation: [
+    {
+      name: "compose-scene",
+      description: "Build a Godot scene from assets and scripts: wire nodes, connect signals, configure physics bodies, tilemaps, and cameras. Reads the GDD system spec and generates a complete, runnable scene with all required components.",
+      phases: [
+        {
+          order: 1,
+          name: "Read System Spec",
+          description: "Read the relevant GDD system section to understand required scene components",
+          agents: ["godot-specialist", "game-designer"],
+        },
+        {
+          order: 2,
+          name: "Design Node Hierarchy",
+          description: "Design the scene tree structure, node types, and relationships",
+          agents: ["godot-specialist"],
+        },
+        {
+          order: 3,
+          name: "Create or Locate Assets",
+          description: "Find existing assets or invoke GenerateAsset for missing ones",
+          agents: ["godot-specialist", "art-director"],
+        },
+        {
+          order: 4,
+          name: "Write Scene .tscn",
+          description: "Write the scene file with all nodes and resource references",
+          agents: ["godot-specialist"],
+        },
+        {
+          order: 5,
+          name: "Write Node Scripts",
+          description: "Write GDScript for each custom node with proper signal wiring",
+          agents: ["godot-specialist", "gameplay-programmer"],
+        },
+        {
+          order: 6,
+          name: "Wire Signals & Autoloads",
+          description: "Connect signals, register with GameState, verify tree",
+          agents: ["godot-specialist"],
+        },
+        {
+          order: 7,
+          name: "Validate Scene",
+          description: "Verify scene loads without errors using Godot MCP or file validation",
+          agents: ["godot-specialist", "qa-tester"],
+        },
+      ],
+      userInvocable: true,
+    },
+    {
+      name: "implement-player-controller",
+      description: "Implement a complete player controller scene: CharacterBody2D with movement, jumping, health, damage, animation wiring, and input mapping. Produces a drop-in player scene and script wired to the Events signal bus.",
+      phases: [
+        {
+          order: 1,
+          name: "Read Player Spec",
+          description: "Read the GDD player mechanics section for movement parameters",
+          agents: ["game-designer", "godot-specialist"],
+        },
+        {
+          order: 2,
+          name: "Generate or Locate Player Sprite",
+          description: "Use GenerateAsset for character sprite if not available",
+          agents: ["art-director"],
+        },
+        {
+          order: 3,
+          name: "Write Player Scene",
+          description: "Create player.tscn with CharacterBody2D, CollisionShape2D, Sprite2D, AnimationPlayer",
+          agents: ["godot-specialist"],
+        },
+        {
+          order: 4,
+          name: "Write Player GDScript",
+          description: "Implement movement, jump, health, damage, animation state machine",
+          agents: ["gameplay-programmer", "godot-specialist"],
+        },
+        {
+          order: 5,
+          name: "Wire Signals",
+          description: "Connect to Events signal bus, wire animations",
+          agents: ["godot-specialist"],
+        },
+        {
+          order: 6,
+          name: "Validate",
+          description: "Run godot_scene_get_children to verify node tree, run automated-playtest",
+          agents: ["qa-tester"],
+        },
+      ],
+      userInvocable: true,
+    },
+    {
+      name: "run-godot-headless",
+      description: "Spawn a headless Godot process to run GDScript, GUT tests, or export without a desktop editor. Handles godot binary detection, --headless flag, --check-only mode, --script execution, and return code parsing. The workhorse that makes automated-playtest and export-godot-project actually work in CI.",
+      phases: [
+        {
+          order: 1,
+          name: "Detect Godot Binary",
+          description: "Find godot binary: check GODOT_BIN env var, then scan common paths (brew --prefix, /Applications, ~/.local/bin, /usr/local/bin). Die if not found.",
+          agents: ["devops-engineer"],
+        },
+        {
+          order: 2,
+          name: "Build Command",
+          description: "Build the godot --headless command: --headless --path <project_dir> [--check-only | --script <script.gd> | --export-release <preset>]. Log the full command.",
+          agents: ["devops-engineer"],
+        },
+        {
+          order: 3,
+          name: "Execute",
+          description: "Run the command as a subprocess. Capture stdout + stderr. Set timeout (120s for tests, 300s for export).",
+          agents: ["devops-engineer"],
+        },
+        {
+          order: 4,
+          name: "Parse Output",
+          description: "Parse return code: 0 = success, non-zero = failure. Extract error lines, stack traces, and assertion failures from output.",
+          agents: ["devops-engineer", "qa-tester"],
+        },
+        {
+          order: 5,
+          name: "Report",
+          description: "Return structured result: { success: bool, stdout: string, stderr: string, returnCode: number }. Throw on binary-not-found.",
+          agents: ["devops-engineer"],
+        },
+      ],
+      userInvocable: true,
+    },
+    {
+      name: "implement-game-state",
+      description: "Implement game-wide state management: pause menu, game over screen, victory screen, level transition, player death/respawn logic, score tracking, and ConfigFile-based persistence. Wires into the Events signal bus.",
+      phases: [
+        {
+          order: 1,
+          name: "Read Game State Spec",
+          description: "Read the GDD sections covering: game states, win/lose conditions, scoring, pause behaviour",
+          agents: ["game-designer", "lead-programmer"],
+        },
+        {
+          order: 2,
+          name: "Design State Machine",
+          description: "Design the StateMachine enum (Menu, Playing, Paused, GameOver, Victory). Define valid transitions and signals for each.",
+          agents: ["lead-programmer", "godot-specialist"],
+        },
+        {
+          order: 3,
+          name: "Write GameState Autoload",
+          description: "Write or update res://autoload/game_state.gd with: score, current_level, player_health, game_paused, state enum, transition methods, save()/load() using ConfigFile",
+          agents: ["godot-specialist", "gameplay-programmer"],
+        },
+        {
+          order: 4,
+          name: "Write Pause Menu",
+          description: "Create ui/pause_menu.tscn with Resume, Options, Quit buttons. Write pause_menu.gd that toggles visibility and pauses physics via get_tree().paused",
+          agents: ["godot-specialist", "gameplay-programmer"],
+        },
+        {
+          order: 5,
+          name: "Write Game Over / Victory Screens",
+          description: "Create ui/game_over.tscn and ui/victory.tscn with appropriate scripts. Wire to game_state signals.",
+          agents: ["godot-specialist", "gameplay-programmer"],
+        },
+        {
+          order: 6,
+          name: "Wire Death/Respawn",
+          description: "Connect player health=0 signal to game over transition. Implement respawn at level start position.",
+          agents: ["godot-specialist"],
+        },
+        {
+          order: 7,
+          name: "Validate",
+          description: "Write and run GUT test for state transitions: Menu→Playing→Paused→Resume, Playing→GameOver→Menu. Run via run-godot-headless.",
+          agents: ["qa-tester", "godot-specialist"],
+        },
+      ],
+      userInvocable: true,
+    },
+    {
+      name: "implement-tilemap",
+      description: "Generate a tilemap for a level: create a tileset image via the asset pipeline, split it into individual tile PNGs, then compose a Godot TileSet and paint it into a TileMap node. Reads level layout from the GDD or from a level data file.",
+      phases: [
+        {
+          order: 1,
+          name: "Read Level Layout",
+          description: "Read the GDD level design section or level data JSON to get: tile size, grid dimensions, terrain layers, collision rules, decorative tiles",
+          agents: ["game-designer", "godot-specialist"],
+        },
+        {
+          order: 2,
+          name: "Generate Tileset Image",
+          description: "Invoke GenerateAsset with prompt describing the tile set (e.g. '16x16 pixel art platformer tileset, stone brick, grass, dirt, water'). Use rembg to remove background.",
+          agents: ["art-director"],
+        },
+        {
+          order: 3,
+          name: "Split Tileset",
+          description: "Write a Python script (or use PIL) to slice the tileset PNG into individual tile images at the configured tile_size. Save to res://assets/tiles/",
+          agents: ["art-director", "godot-specialist"],
+        },
+        {
+          order: 4,
+          name: "Create TileSet Resource",
+          description: "Use Godot MCP create_tileset or write a .tres file: configure each tile with terrain set, physics layers, navigation layers, and terrain neighbors for autotiling",
+          agents: ["godot-specialist"],
+        },
+        {
+          order: 5,
+          name: "Paint TileMap",
+          description: "Use Godot MCP paint_tile tool to paint the terrain: walkable floor, walls, hazards, decoration. Apply collision shapes per-tile.",
+          agents: ["godot-specialist"],
+        },
+        {
+          order: 6,
+          name: "Validate",
+          description: "Run scene in Godot headless, verify no tile conflicts or missing textures. Run automated-playtest on the level.",
+          agents: ["qa-tester"],
+        },
+      ],
+      userInvocable: true,
+    },
+    {
+      name: "implement-level",
+      description: "Create a complete playable level from GDD spec: tilemap terrain, enemy placements, interactive objects (pressure plates, doors, checkpoints), player start, goal zone. Wires everything into game_state and Events bus.",
+      phases: [
+        {
+          order: 1,
+          name: "Read Level Spec",
+          description: "Read GDD level design section: level number, theme, terrain type, enemy types and count, interactive objects, checkpoint positions, goal position, difficulty tier",
+          agents: ["game-designer", "level-designer"],
+        },
+        {
+          order: 2,
+          name: "Scaffold Level Scene",
+          description: "Create level_<NN>.tscn with: Node2D root, TileMap node, enemy container, interactables container, checkpoint nodes, goal zone, player spawn point",
+          agents: ["godot-specialist"],
+        },
+        {
+          order: 3,
+          name: "Generate Terrain",
+          description: "Create the TileSet resource and paint the level terrain: solid floors, walls, platforms, hazards, and decoration tiles. Use TileMap node with terrain sets configured for autotiling.",
+          agents: ["godot-specialist"],
+        },
+        {
+          order: 4,
+          name: "Place Enemies",
+          description: "Read GDD enemy section for this level. Invoke implement-enemy for each unique enemy type. Place enemy scenes at specified positions.",
+          agents: ["godot-specialist", "gameplay-programmer"],
+        },
+        {
+          order: 5,
+          name: "Place Interactables",
+          description: "Create pressure plates, doors, moving platforms, and checkpoints per GDD spec. Wire their signals to the Events bus.",
+          agents: ["godot-specialist", "gameplay-programmer"],
+        },
+        {
+          order: 6,
+          name: "Set Player Spawn & Goal",
+          description: "Position player at spawn point. Create goal zone (Area2D) at goal position that emits level_complete signal.",
+          agents: ["godot-specialist"],
+        },
+        {
+          order: 7,
+          name: "Wire Level Completion",
+          description: "Connect goal zone signal to game_state.level_complete(). Increment score, unlock next level.",
+          agents: ["godot-specialist", "gameplay-programmer"],
+        },
+        {
+          order: 8,
+          name: "Validate",
+          description: "Run automated-playtest: spawn player, simulate inputs, verify goal reached without crash. Screenshot compare.",
+          agents: ["qa-tester"],
+        },
+      ],
+      userInvocable: true,
+    },
+    {
+      name: "implement-enemy",
+      description: "Implement a complete enemy type: CharacterBody2D or CharacterBody3D with AI state machine (idle, chase, attack, death), navigation, health, damage to player on contact, death animation, drops. Reads GDD enemy design section.",
+      phases: [
+        {
+          order: 1,
+          name: "Read Enemy Spec",
+          description: "Read GDD enemy design section: enemy type, patrol behaviour, chase range, attack pattern, health, damage, death effect, sprite description",
+          agents: ["game-designer", "godot-specialist"],
+        },
+        {
+          order: 2,
+          name: "Generate Sprite",
+          description: "Invoke GenerateAsset for enemy sprite if not available. Use art style consistent with the game.",
+          agents: ["art-director"],
+        },
+        {
+          order: 3,
+          name: "Write Enemy Scene",
+          description: "Create enemy_<type>.tscn: CharacterBody2D, CollisionShape2D, Sprite2D, AnimationPlayer, NavigationAgent2D, hurtbox/hitbox Area2Ds",
+          agents: ["godot-specialist"],
+        },
+        {
+          order: 4,
+          name: "Write AI State Machine",
+          description: "Write enemy.gd with StateMachine: Idle→Chase→Attack→Death. Use NavigationServer2D for pathfinding. Emit signals on state transitions.",
+          agents: ["gameplay-programmer", "godot-specialist"],
+        },
+        {
+          order: 5,
+          name: "Wire Damage & Death",
+          description: "Connect enemy hitbox to player damage signal. Connect health=0 to death animation + drop logic.",
+          agents: ["godot-specialist"],
+        },
+        {
+          order: 6,
+          name: "Validate",
+          description: "Write GUT test: spawn enemy, simulate player entering chase range, verify attack triggers. Run via run-godot-headless.",
+          agents: ["qa-tester"],
+        },
+      ],
+      userInvocable: true,
+    },
+    {
+      name: "implement-hud",
+      description: "Build the in-game HUD: health bar, score display, level indicator, item/inventory slots, and ability cooldown markers. Wires to GameState signals and Events bus. Uses Godot Control nodes (ProgressBar, Label, TextureRect).",
+      phases: [
+        {
+          order: 1,
+          name: "Read HUD Spec",
+          description: "Read GDD UI/HUD section: elements required, layout (screen position), font/style, update frequencies",
+          agents: ["game-designer", "art-director"],
+        },
+        {
+          order: 2,
+          name: "Design HUD Layout",
+          description: "Design anchor positions (top-left health, top-right score, bottom-center items). Ensure responsive scaling.",
+          agents: ["godot-specialist"],
+        },
+        {
+          order: 3,
+          name: "Create HUD Scene",
+          description: "Create ui/hud.tscn with: HealthBar (ProgressBar), ScoreLabel (Label), LevelLabel (Label), ability cooldown markers (TextureRect + AnimationPlayer)",
+          agents: ["godot-specialist"],
+        },
+        {
+          order: 4,
+          name: "Write HUD Script",
+          description: "Write hud.gd: connect to GameState.score_changed, GameState.health_changed, Events.player_ability_used. Update UI elements in _ready and via signal callbacks.",
+          agents: ["gameplay-programmer", "godot-specialist"],
+        },
+        {
+          order: 5,
+          name: "Validate",
+          description: "Run game, verify HUD updates correctly when health/score change. Check for z-ordering (HUD renders above game world).",
+          agents: ["qa-tester"],
+        },
+      ],
+      userInvocable: true,
+    },
+    {
+      name: "implement-save-system",
+      description: "Implement a save/load system using Godot's ConfigFile. Saves: current level, player stats, unlocked abilities, score, and settings. Auto-save on level complete, manual save from pause menu.",
+      phases: [
+        {
+          order: 1,
+          name: "Design Save Schema",
+          description: "Define what gets saved: player_position, current_level, health, score, unlocked_levels[], achievements[], settings (volume, difficulty)",
+          agents: ["game-designer", "lead-programmer"],
+        },
+        {
+          order: 2,
+          name: "Write SaveManager Autoload",
+          description: "Write res://autoload/save_manager.gd with: save_game(slot: int), load_game(slot: int), get_save_path(), save_exists(slot: int), delete_save(slot: int). Use ConfigFile.",
+          agents: ["godot-specialist", "gameplay-programmer"],
+        },
+        {
+          order: 3,
+          name: "Wire Auto-Save",
+          description: "Call save_manager.save_game() on: level_complete signal, player death (optional), pause menu save button. Load on game start.",
+          agents: ["godot-specialist"],
+        },
+        {
+          order: 4,
+          name: "Write Save/Load UI",
+          description: "Create ui/save_slots.tscn with 3 save slots showing: level name, date, score. Wire to save_manager.",
+          agents: ["godot-specialist", "gameplay-programmer"],
+        },
+        {
+          order: 5,
+          name: "Validate",
+          description: "Test save/load cycle: save at level 2, die, reload, verify player at level 2 with correct stats. Test save slot overwrite.",
+          agents: ["qa-tester"],
+        },
+      ],
+      userInvocable: true,
+    },
+    {
+      name: "implement-shader-effect",
+      description: "Implement a visual shader effect for Godot: glow, dissolve, distortion, outline, CRT scanlines, or pixel art palette swap. Writes a .gdshader file and wires it to a ShaderMaterial on the target node.",
+      phases: [
+        {
+          order: 1,
+          name: "Read VFX Spec",
+          description: "Read the GDD visual effects section or ticket description for the desired shader behaviour",
+          agents: ["godot-shader-specialist", "art-director"],
+        },
+        {
+          order: 2,
+          name: "Write Shader",
+          description: "Write the .gdshader file: vertex/fragment sections, uniforms, texture sampling. Use Godot's shader language (GLSL-like).",
+          agents: ["godot-shader-specialist"],
+        },
+        {
+          order: 3,
+          name: "Create ShaderMaterial",
+          description: "Create a ShaderMaterial resource referencing the shader. Set uniform values (colours, thresholds, time scaling).",
+          agents: ["godot-shader-specialist"],
+        },
+        {
+          order: 4,
+          name: "Wire to Node",
+          description: "Apply ShaderMaterial to the target node (e.g., Sprite2D, MeshInstance2D). Connect to gameplay signals if needed (e.g., activate on damage).",
+          agents: ["godot-specialist"],
+        },
+        {
+          order: 5,
+          name: "Validate",
+          description: "Screenshot compare via playtest-with-mcp. Verify shader compiles without errors in output.",
+          agents: ["qa-tester"],
+        },
+      ],
+      userInvocable: true,
+    },
   ],
 
   design: [
@@ -515,6 +991,37 @@ export const skillsByPhase: Record<string, SkillDefinition[]> = {
       phases: [],
       userInvocable: true,
     },
+    {
+      name: "automated-playtest",
+      description: "Automated gameplay verification using run-godot-headless: writes a GUT test script for the feature, spawns a godot --headless subprocess via run-godot-headless, captures stdout/stderr, parses pass/fail, and posts evidence to the Kanban ticket.",
+      phases: [
+        {
+          order: 1,
+          name: "Write GUT Test",
+          description: "Write a GUT (Godot Unit Test) script for the feature or scene under test",
+          agents: ["qa-tester", "godot-specialist"],
+        },
+        {
+          order: 2,
+          name: "Run Headless",
+          description: "Execute godot --headless via run-godot-headless skill. Capture stdout + stderr.",
+          agents: ["qa-tester"],
+        },
+        {
+          order: 3,
+          name: "Parse Results",
+          description: "Parse test output, classify pass/fail, extract console errors",
+          agents: ["qa-tester"],
+        },
+        {
+          order: 4,
+          name: "Report",
+          description: "Post results to Kanban ticket as evidence comment, flag if failures found",
+          agents: ["qa-tester"],
+        },
+      ],
+      userInvocable: true,
+    },
   ],
 
   production: [
@@ -556,6 +1063,124 @@ export const skillsByPhase: Record<string, SkillDefinition[]> = {
       userInvocable: true,
       gates: ["CD-PLAYTEST"],
     },
+    {
+      name: "playtest-with-mcp",
+      description: "Playtest using Godot MCP Pro editor tools (requires Godot editor running with WebSocket connection). Launches scenes via play_scene, simulates inputs via simulate_action, asserts node state via get_game_node_properties/assert_node_state, and captures screenshots via get_game_screenshot. Use this when the Godot editor is running. For headless CI, use automated-playtest instead.",
+      phases: [
+        {
+          order: 1,
+          name: "Read Test Scenario",
+          description: "Parse the story acceptance criteria or test scenario to understand what to verify",
+          agents: ["qa-tester"],
+        },
+        {
+          order: 2,
+          name: "Launch Game",
+          description: "Start Godot with the target scene via play_scene",
+          agents: ["godot-specialist"],
+        },
+        {
+          order: 3,
+          name: "Execute Input Sequence",
+          description: "Send simulated input (move, interact, attack) via simulate_action",
+          agents: ["qa-tester"],
+        },
+        {
+          order: 4,
+          name: "Assert Game State",
+          description: "Check node properties via get_game_node_properties or assert_node_state",
+          agents: ["qa-tester"],
+        },
+        {
+          order: 5,
+          name: "Capture Evidence",
+          description: "Take game screenshot via get_game_screenshot for visual diff baseline",
+          agents: ["qa-tester"],
+        },
+        {
+          order: 6,
+          name: "Report Results",
+          description: "Summarize pass/fail, frame captures, and console errors",
+          agents: ["qa-tester", "qa-lead"],
+        },
+      ],
+      userInvocable: true,
+    },
+    {
+      name: "autonomous-production-loop",
+      description: "The autonomous production loop. Continuously reads the Kanban board (tickets.json), picks the next Available ticket, spawns the correct specialist, runs the implementation skill, verifies with automated-playtest, moves the ticket to Completed, and repeats — without waiting for human prompts. Stops when no Available tickets remain or supervisor says 'pause'.",
+      phases: [
+        {
+          order: 1,
+          name: "Read Kanban Board",
+          description: "Read apps/api/src/data/tickets.json to find all Available tickets. Sort by priority or age.",
+          agents: ["autonomous-producer"],
+        },
+        {
+          order: 2,
+          name: "Claim Ticket",
+          description: "Move the top Available ticket to Processing. Record ticket ID in session context.",
+          agents: ["autonomous-producer"],
+        },
+        {
+          order: 3,
+          name: "Route & Delegate",
+          description: "Based on ticket.area and ticket.assignee, invoke the correct skill (e.g., compose-scene for level tickets, implement-player-controller for player tickets). Spawn the assigned agent via Task tool.",
+          agents: ["autonomous-producer"],
+        },
+        {
+          order: 4,
+          name: "Verify",
+          description: "Run automated-playtest skill to verify the implementation. If failures found, move ticket back to Available with a note.",
+          agents: ["autonomous-producer", "qa-tester"],
+        },
+        {
+          order: 5,
+          name: "Complete",
+          description: "Move ticket to Completed. Post summary comment. Log to session state.",
+          agents: ["autonomous-producer"],
+        },
+      ],
+      userInvocable: true,
+      gates: ["AUTONOMOUS-MODE"],
+    },
+    {
+      name: "gdd-to-tickets",
+      description: "Parse a Game Design Document (GDD) and automatically create Kanban tickets for every implementable item. Reads GDD sections, extracts features, systems, assets, and tests as individual tickets, then calls createQuestTicket for each. Runs once when a new GDD is written or updated.",
+      phases: [
+        {
+          order: 1,
+          name: "Read GDD",
+          description: "Locate and read the project's GDD file (workspace/<project>/gdd/*.md). Identify all major sections: game overview, mechanics, systems, levels, enemies, items, UI, audio, art, technical",
+          agents: ["game-designer", "producer"],
+        },
+        {
+          order: 2,
+          name: "Break Into Tickets",
+          description: "Parse each GDD section into discrete implementable items. Assign: area (engineering/content/qa), assignee hint (godot-specialist, writer, art-director), priority (P0/P1/P2), and a brief implementation note from the GDD text",
+          agents: ["producer", "game-designer"],
+        },
+        {
+          order: 3,
+          name: "Deduplicate",
+          description: "Compare against existing tickets in tickets.json. Skip any item whose title already has an open ticket (Available or Processing)",
+          agents: ["producer"],
+        },
+        {
+          order: 4,
+          name: "Create Tickets",
+          description: "Call createQuestTicket for each new item. Set status to Available. Log created ticket IDs",
+          agents: ["producer"],
+        },
+        {
+          order: 5,
+          name: "Report",
+          description: "Summarize: N tickets created, N skipped (duplicates), breakdown by area. Post as session note.",
+          agents: ["producer"],
+        },
+      ],
+      userInvocable: true,
+    },
   ],
 
   release: [
@@ -569,6 +1194,37 @@ export const skillsByPhase: Record<string, SkillDefinition[]> = {
       name: "launch-checklist",
       description: "Complete launch readiness validation across all departments",
       phases: [],
+      userInvocable: true,
+    },
+    {
+      name: "export-godot-project",
+      description: "Orchestrate the full Godot export pipeline: configure export presets, run headless export (godot --headless --export-release), verify the output artifact exists and is non-zero size, then register the build in the production dashboard.",
+      phases: [
+        {
+          order: 1,
+          name: "Configure Export Presets",
+          description: "Ensure export_presets.cfg has correct paths and platforms (Windows, macOS, Linux, HTML5)",
+          agents: ["godot-specialist", "devops-engineer"],
+        },
+        {
+          order: 2,
+          name: "Run Headless Export",
+          description: "Execute godot --headless --export-release for each target platform",
+          agents: ["devops-engineer"],
+        },
+        {
+          order: 3,
+          name: "Verify Artifacts",
+          description: "Check that all export files exist and meet minimum size thresholds",
+          agents: ["devops-engineer", "release-manager"],
+        },
+        {
+          order: 4,
+          name: "Register Build",
+          description: "Log the build in production/sessions and update dashboard with build artifact paths",
+          agents: ["release-manager"],
+        },
+      ],
       userInvocable: true,
     },
     {
@@ -608,6 +1264,154 @@ export const skillsByPhase: Record<string, SkillDefinition[]> = {
       name: "localize",
       description: "Localization workflow: string extraction and translation readiness",
       phases: [],
+      userInvocable: true,
+    },
+    {
+      name: "write-dialogue",
+      description: "Write NPC dialogue, item descriptions, tutorial text, and pause menu strings. Adheres to the narrative tone defined in the GDD. Outputs CSV-formatted strings ready for Godot TranslationServer.",
+      phases: [
+        {
+          order: 1,
+          name: "Read Narrative Spec",
+          description: "Read GDD narrative section and any existing dialogue samples to understand tone, speaker style, and content constraints",
+          agents: ["writer", "narrative-director"],
+        },
+        {
+          order: 2,
+          name: "Write Dialogue Tree",
+          description: "Write dialogue for each NPC or interactive element. Structure as: {speaker, text, mood, next_id or null}. Include branching options where applicable.",
+          agents: ["writer"],
+        },
+        {
+          order: 3,
+          name: "Write UI Strings",
+          description: "Write all UI text: menu labels, button text, tutorial prompts, item names and descriptions. Map to translation keys.",
+          agents: ["writer"],
+        },
+        {
+          order: 4,
+          name: "Export CSV",
+          description: "Output as res://localization/dialogue.<locale>.csv with columns: key, speaker, text. Ready for Godot TranslationServer import.",
+          agents: ["writer", "localization-lead"],
+        },
+      ],
+      userInvocable: true,
+    },
+    {
+      name: "write-lore",
+      description: "Write world lore entries: codex entries, item lore blurbs, environmental storytelling text, and achievement descriptions. Fits within the world-building pillars defined in the GDD.",
+      phases: [
+        {
+          order: 1,
+          name: "Read World Spec",
+          description: "Read GDD world/lore section: history, factions, codex categories, tone",
+          agents: ["writer", "narrative-director"],
+        },
+        {
+          order: 2,
+          name: "Draft Lore Entries",
+          description: "Write lore entries as structured objects: {id, title, category, body, unlock_condition}",
+          agents: ["writer"],
+        },
+        {
+          order: 3,
+          name: "Integrate",
+          description: "Write each lore entry to the appropriate JSON file under res://data/lore/. Include unlock conditions.",
+          agents: ["writer"],
+        },
+      ],
+      userInvocable: true,
+    },
+    {
+      name: "generate-audio-asset",
+      description: "Generate audio assets (sound effects, ambient loops, UI sounds) via AI audio generation. Reads the GDD audio section to determine required sounds, then generates and saves to res://assets/audio/. Falls back to placeholder silence if generation fails.",
+      phases: [
+        {
+          order: 1,
+          name: "Read Audio Spec",
+          description: "Read GDD audio section: required SFX list (jump, attack, death, pickup, UI click), ambient loops, music cues",
+          agents: ["audio-director", "writer"],
+        },
+        {
+          order: 2,
+          name: "Generate SFX",
+          description: "Invoke HeartMuLa skill or Suno-like audio generation for each required SFX. Use short descriptive prompts ('8-bit jump sound effect', 'metallic UI click').",
+          agents: ["audio-director"],
+        },
+        {
+          order: 3,
+          name: "Save Assets",
+          description: "Save generated audio to res://assets/audio/sfx/ and res://assets/audio/music/. Create AudioStreamPlayer GDScript wrapper for each.",
+          agents: ["audio-director"],
+        },
+        {
+          order: 4,
+          name: "Wire to Events",
+          description: "Write audio.gd autoload: connect Events signals (player_jumped, player_damaged, item_picked_up) to appropriate play() calls.",
+          agents: ["godot-specialist", "audio-director"],
+        },
+      ],
+      userInvocable: true,
+    },
+    {
+      name: "generate-genre-template",
+      description:
+        "Scaffold a complete playable game skeleton for a given genre from a high-level prompt. " +
+        "Takes a genre keyword (platformer, roguelike, puzzle, shoot-em-up, top-down RPG) plus optional constraints, " +
+        "then generates: project.godot, core scene structure, player controller, basic enemy, UI overlay, and one playable level. " +
+        "All code uses the GDScript pattern library (docs/godot/gdscript-patterns.md) for proven implementations.",
+      phases: [
+        {
+          order: 1,
+          name: "Parse Genre Request",
+          description: "Read the genre prompt. Identify: core mechanic (jumping/turn-based/tile-matching/shooting/navigation), camera type (2D side-scroll/top-down/isometric), UI needs (health/lives/inventory), and asset requirements.",
+          agents: ["game-designer", "creative-director"],
+        },
+        {
+          order: 2,
+          name: "Scaffold Project Structure",
+          description: "Invoke setup-godot-project skill to create the Godot project structure, project.godot, autoloads, input map, boot scene, and export presets. This scaffolds the complete project foundation.",
+          agents: ["godot-scaffolder"],
+          subSkills: ["setup-godot-project"],
+        },
+        {
+          order: 3,
+          name: "Generate Player Controller",
+          description: "Write scenes/player/Player.tscn + scripts/player/player_controller.gd using CharacterBody2D pattern from gdscript-patterns.md. Genre-specific: platformer gets jump + gravity, roguelike gets turn-based movement, puzzle gets grid-snapped movement, shmup gets 8-directional flying.",
+          agents: ["godot-gdscript-specialist", "gameplay-programmer"],
+        },
+        {
+          order: 4,
+          name: "Generate Enemy / Hazard",
+          description: "Write scenes/enemies/Enemy.tscn + scripts/enemies/enemy.gd using StateMachine + Area2D patterns from gdscript-patterns.md. Simple patrol + chase AI (distance-based state transitions).",
+          agents: ["godot-gdscript-specialist"],
+        },
+        {
+          order: 5,
+          name: "Generate UI Overlay",
+          description: "Write scenes/ui/GameUI.tscn with Control root. Health bar (ProgressBar), score label (Label), and pause button. Wire to EventBus signals.",
+          agents: ["ui-programmer", "godot-gdscript-specialist"],
+        },
+        {
+          order: 6,
+          name: "Generate First Level",
+          description: "Invoke implement-level skill to create the first playable level: TileMap terrain, enemy placements, interactive objects, player start, goal zone. This delegates to the implement-level skill for complete level implementation.",
+          agents: ["godot-specialist"],
+          subSkills: ["implement-level"],
+        },
+        {
+          order: 7,
+          name: "Wire Main Scene",
+          description: "Write main.tscn: instantiates GameUI, Level_01, Player. Writes main.gd that handles scene transitions (load next level on exit zone, restart on player death).",
+          agents: ["godot-gdscript-specialist"],
+        },
+        {
+          order: 8,
+          name: "Verify Headless Check",
+          description: "Run godot --headless --check-only on the generated project. Fix any .gd syntax errors reported.",
+          agents: ["godot-gdscript-specialist"],
+        },
+      ],
       userInvocable: true,
     },
   ],

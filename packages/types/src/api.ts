@@ -49,7 +49,16 @@ export type WSEvent =
   | { type: "subagent:spawned"; agentRole: AgentRole; parentSessionId: string; ticketId: string; task: string }
   | { type: "subagent:completed"; agentRole: AgentRole; parentSessionId: string; ticketId: string; output: string }
   | { type: "subagent:failed"; agentRole: AgentRole; parentSessionId: string; ticketId: string; error: string }
-  | { type: "error"; error: string; sessionId?: string };
+  | { type: "error"; error: string; sessionId?: string }
+  // Autonomous loop events
+  | { type: "autonomous:iteration:started"; sessionId: string; ticketId: string; agentRole: string; title: string; iteration: number }
+  | { type: "autonomous:iteration:completed"; sessionId: string; ticketId: string; agentRole: string; iteration: number; completedCount: number }
+  | { type: "autonomous:iteration:failed"; sessionId: string; ticketId: string; agentRole: string; iteration: number; error: string }
+  | { type: "autonomous:error"; sessionId: string; error: string }
+  | { type: "autonomous:completed"; sessionId: string; completedCount: number; failedCount: number; totalIterations: number }
+  | { type: "autonomous:stopped"; sessionId: string; completedCount: number; failedCount: number }
+  // GDD ingestion
+  | { type: "gdd:ingested"; sessionId: string; projectId: string; total: number; created: number; skipped: number; errors: number };
 
 /** API request/response types */
 export interface ApiResponse<T = unknown> {
