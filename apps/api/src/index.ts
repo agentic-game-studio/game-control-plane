@@ -16,6 +16,8 @@ import { chatRouter } from "./routes/chat.js";
 import { ticketsRouter } from "./routes/tickets.js";
 import { assetsRouter } from "./routes/assets.js";
 import { settingsRouter } from "./routes/settings.js";
+import { autonomousRouter } from "./routes/autonomous.js";
+import { gddRouter } from "./routes/gdd.js";
 import { errorHandler } from "./middleware/error-handler.js";
 import { authMiddleware } from "./middleware/auth.js";
 import { broadcast, wss, sseClients } from "./services/websocket.js";
@@ -100,6 +102,8 @@ app.use("/api/chat/spawn", rateLimiter);
 
 app.use("/api/chat", chatRouter);
 app.use("/api/tickets", ticketsRouter);
+app.use("/api/autonomous", autonomousRouter);
+app.use("/api/gdd", gddRouter);
 app.use("/api/assets", assetsRouter);
 app.use("/api/settings", settingsRouter);
 

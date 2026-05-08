@@ -51,7 +51,7 @@ export const departmentLeadAgents: Partial<Record<AgentRole, AgentDefinition>> =
     model: "sonnet",
     tools: ["Read", "Write", "Edit", "Glob", "Grep", "Task", "AskUserQuestion"],
     maxTurns: 30,
-    skills: [],
+    skills: ["generate-audio-asset"],
     memory: "project",
     reportsTo: ["creative-director"],
     delegates: ["sound-designer"],

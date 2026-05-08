@@ -14,6 +14,66 @@ import { logger } from "../utils/logger.js";
 import { broadcast } from "../services/websocket.js";
 import { MAX_CONTEXT_TOKENS, SUMMARIZE_TOKEN_THRESHOLD, CHARS_PER_TOKEN_ESTIMATE } from "../config/model-mapping.js";
 
+/** Simple async semaphore for ZAI API concurrency control */
+class Semaphore {
+  private permits: number;
+  private waitQueue: Array<() => void> = [];
+
+  constructor(permits: number) {
+    this.permits = permits;
+  }
+
+  async acquire(): Promise<void> {
+    if (this.permits > 0) {
+      this.permits--;
+      return;
+    }
+    return new Promise<void>((resolve) => {
+      this.waitQueue.push(resolve);
+    });
+  }
+
+  release(): void {
+    if (this.waitQueue.length > 0) {
+      const next = this.waitQueue.shift()!;
+      next();
+    } else {
+      this.permits++;
+    }
+  }
+}
+
+/**
+ * Per-model concurrency limits (from ZAI API specs):
+ *   glm-5.1      → 10 concurrent
+ *   glm-5        →  2 concurrent
+ *   glm-4.7      →  2 concurrent
+ *   glm-4.7-flash → 1 concurrent (used for summarization — most constrained)
+ *
+ * glm-4.7-flash uses 2x tokens vs other models, so keeping it at limit=1
+ * ensures summarization doesn't consume excessive token budget while
+ * not blocking glm-5.1 agents which have 10x more capacity.
+ */
+const MODEL_CONCURRENCY_LIMITS: Record<string, number> = {
+  "glm-5.1": 10,
+  "glm-5": 2,
+  "glm-4.7": 2,
+  "glm-4.7-flash": 1,
+};
+
+const DEFAULT_CONCURRENCY_LIMIT = 2;
+
+/** Per-model semaphores — keyed by model name */
+const modelSemaphores = new Map<string, Semaphore>();
+
+function getSemaphore(model: string): Semaphore {
+  const limit = MODEL_CONCURRENCY_LIMITS[model] ?? DEFAULT_CONCURRENCY_LIMIT;
+  if (!modelSemaphores.has(model)) {
+    modelSemaphores.set(model, new Semaphore(limit));
+  }
+  return modelSemaphores.get(model)!;
+}
+
 export interface LLMMessage {
   role: "system" | "user" | "assistant" | "tool";
   content: string | ToolResultContent[];
@@ -60,8 +120,8 @@ export interface LLMRequest {
   agentRole?: string;
 }
 
-const MAX_RETRIES = 10;
-const RETRY_DELAY_MS = 2000;
+const MAX_RETRIES = 3;
+const RETRY_DELAY_MS = 1000;
 
 /** Tool importance for pruning (higher = more important) */
 const TOOL_IMPORTANCE: Record<string, number> = {
@@ -77,11 +137,16 @@ const DEFAULT_TOOL_IMPORTANCE = 40;
 const MAX_TOOL_RESULT_BYTES = 15_000;
 const KEEP_RECENT_MESSAGES = 10;       // Never prune last N messages
 
+const FETCH_TIMEOUT_MS = 60_000;
+
 async function fetchWithRetry(url: string, options: RequestInit, retries = MAX_RETRIES): Promise<Response> {
   let lastError: Error | null = null;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      const response = await fetch(url, options);
+      const response = await fetch(url, {
+        ...options,
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      });
       if (response.status === 429 && attempt < retries) {
         const delay = RETRY_DELAY_MS * Math.pow(2, attempt) + Math.random() * 1000;
         await new Promise((r) => setTimeout(r, delay));
@@ -139,9 +204,9 @@ function detectRepetitiveLoop(recentCalls: Array<{ name: string; inputHash: stri
   for (const call of recentCalls) {
     toolCounts.set(call.name, (toolCounts.get(call.name) || 0) + 1);
   }
-  const maxCount = Math.max(...toolCounts.values());
+  const maxCount = Math.max(...Array.from(toolCounts.values()));
   if (maxCount >= MAX_CONSECUTIVE_SAME_TOOL_CALLS) {
-    const mostFrequent = [...toolCounts.entries()].find(([, c]) => c === maxCount)?.[0] ?? "";
+    const mostFrequent = Array.from(toolCounts.entries()).find(([, c]) => c === maxCount)?.[0] ?? "";
     return {
       detected: true,
       message: `Tool "${mostFrequent}" called ${maxCount} times in last ${recentCalls.length} iterations. Progress may be stalled.`,
@@ -190,25 +255,32 @@ ${conversationText}
 
 Respond ONLY with the summary, nothing else. Max 2000 characters.`;
 
-  // Use a lightweight model for summarization (haiku)
+  // Use a lightweight model for summarization (glm-4.7-flash, limit=1)
   const config = loadConfig();
+  const flashSemaphore = getSemaphore("glm-4.7-flash");
   try {
-    const summaryResponse = await fetchWithRetry(
-      `${config.ZAI_BASE_URL}/v1/messages`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": config.ZAI_API_KEY,
-          "anthropic-version": "2023-06-01",
-        },
-        body: JSON.stringify({
-          model: "glm-4.7-flash",
-          max_tokens: 1024,
-          messages: [{ role: "user", content: summaryPrompt }],
-        }),
-      }
-    );
+    await flashSemaphore.acquire();
+    let summaryResponse: Response;
+    try {
+      summaryResponse = await fetchWithRetry(
+        `${config.ZAI_BASE_URL}/v1/messages`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-key": config.ZAI_API_KEY,
+            "anthropic-version": "2023-06-01",
+          },
+          body: JSON.stringify({
+            model: "glm-4.7-flash",
+            max_tokens: 1024,
+            messages: [{ role: "user", content: summaryPrompt }],
+          }),
+        }
+      );
+    } finally {
+      flashSemaphore.release();
+    }
 
     if (summaryResponse.ok) {
       const data = await summaryResponse.json() as {
@@ -328,15 +400,22 @@ export async function callZAI(request: LLMRequest): Promise<LLMResponse> {
   }
 
   const url = `${config.ZAI_BASE_URL}/v1/messages`;
-  const response = await fetchWithRetry(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": config.ZAI_API_KEY,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify(body),
-  });
+  const modelSem = getSemaphore(model);
+  await modelSem.acquire();
+  let response: Response;
+  try {
+    response = await fetchWithRetry(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": config.ZAI_API_KEY,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify(body),
+    });
+  } finally {
+    modelSem.release();
+  }
 
   if (!response.ok) {
     const text = await response.text();
@@ -703,6 +782,105 @@ export const GAME_STUDIO_TOOLS: LLMTool[] = [
         presetsFile: { type: "string", description: "YAML presets filename for batch generation (e.g. 'presets.yaml')" },
       },
       required: ["prompt", "name"],
+    },
+  },
+  {
+    name: "RunGodotHeadless",
+    description:
+      "Run Godot Engine in headless mode (no GUI) for CI/testing. " +
+      "Detects the godot binary automatically via GODOT_BIN env var or common install paths. " +
+      "Commands: check (--check-only validates GDScripts), script (runs a .gd file), export (exports via preset), gut (runs GUT test runner). " +
+      "Returns JSON with success, returnCode, stdout, stderr, elapsed_ms. " +
+      "Use for: automated-playtest validation, export-godot-project, run-godot-headless skill.",
+    input_schema: {
+      type: "object",
+      properties: {
+        project: { type: "string", description: "Absolute path to the Godot project directory (containing project.godot)" },
+        command: { type: "string", description: "Command: check | script | export | gut", enum: ["check", "script", "export", "gut"] },
+        script: { type: "string", description: "Absolute path to .gd script to run (required when command=script)" },
+        preset: { type: "string", description: "Export preset name e.g. 'Windows Desktop' (required when command=export)" },
+        output: { type: "string", description: "Output file path for export (required when command=export)" },
+        godotBin: { type: "string", description: "Path to godot binary (optional, auto-detected)" },
+      },
+      required: ["project", "command"],
+    },
+  },
+  {
+    name: "CreateTicket",
+    description:
+      "Create a ticket on the Kanban board (tickets.json). " +
+      "Use to break GDD content into actionable items, file bugs, or queue features. " +
+      "The ticket is placed in the 'Available' column and can be picked up by the autonomous-production-loop. " +
+      "Returns the created ticket ID.",
+    input_schema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "Ticket title — concise, imperative (e.g. 'Implement player dash ability')" },
+        description: { type: "string", description: "Detailed description: acceptance criteria, GDD reference, implementation notes" },
+        agentRole: { type: "string", description: "Target agent role: godot-specialist, writer, art-director, qa-tester, etc." },
+        area: { type: "string", description: "Broad area: engineering, content, qa, design" },
+        subarea: { type: "string", description: "Sub-area: gameplay, ui, audio, narrative, etc." },
+      },
+      required: ["title", "description", "agentRole", "area"],
+    },
+  },
+  {
+    name: "TilemapSplit",
+    description:
+      "Split a packed tileset image into individual tile PNGs. " +
+      "Reads a tileset image (e.g. 256x256 with 16x16 tiles), extracts each tile, and writes them to an output directory with an atlas.json metadata file. " +
+      "Use when: implementing levels, need individual tile assets from a spritesheet, preparing TileSet resources for Godot. " +
+      "Supports margin, spacing, and optional square padding per tile.",
+    input_schema: {
+      type: "object",
+      properties: {
+        input: { type: "string", description: "Absolute path to the input tileset PNG image" },
+        outputDir: { type: "string", description: "Absolute path to output directory (created if not exists)" },
+        tileWidth: { type: "integer", description: "Width of each tile in pixels", minimum: 1 },
+        tileHeight: { type: "integer", description: "Height of each tile in pixels", minimum: 1 },
+        margin: { type: "integer", description: "Outer edge margin in source image (pixels)", default: 0 },
+        spacing: { type: "integer", description: "Gap between tiles in source image (pixels)", default: 0 },
+        pad: { type: "integer", description: "Square cell size to pad each tile to (e.g. 16 pads each tile to 16x16)", default: 0 },
+        namePrefix: { type: "string", description: "Prefix for output tile filenames", default: "tile" },
+      },
+      required: ["input", "outputDir", "tileWidth", "tileHeight"],
+    },
+  },
+  {
+    name: "SpritePack",
+    description:
+      "Pack individual sprite frame PNGs from a directory into a sprite sheet image. " +
+      "Arrange frames in a rows×cols grid with optional padding between cells. " +
+      "Use when: preparing animation assets for Godot, combining individual frames into a texture atlas, building character animation sheets. " +
+      "Outputs a .png sprite sheet + .json atlas with per-frame coordinates.",
+    input_schema: {
+      type: "object",
+      properties: {
+        inputDir: { type: "string", description: "Absolute path to directory containing individual .png frame files" },
+        output: { type: "string", description: "Absolute path for output sprite sheet .png" },
+        columns: { type: "integer", description: "Number of columns in the sprite sheet grid", minimum: 1, default: 4 },
+        padding: { type: "integer", description: "Pixel gap between frames in the sheet", default: 0 },
+        pad: { type: "integer", description: "Square cell size (frames centered in pad×pad cells)", default: 0 },
+      },
+      required: ["inputDir", "output"],
+    },
+  },
+  {
+    name: "GenerateAudio",
+    description:
+      "Synthesize retro 2D game sound effects using pure Python (no external audio deps — uses stdlib wave module). " +
+      "Types: jump, coin, shoot, explosion, hit, death, powerup, levelup, menu_select, menu_move, footstep, damage. " +
+      "Each type has a tuned synthesizer. " +
+      "Use for: quick prototyping SFX without external audio tools, generating placeholder sounds for playtesting. " +
+      "Output is a .wav file + manifest entry.",
+    input_schema: {
+      type: "object",
+      properties: {
+        type: { type: "string", description: "Sound type: jump | coin | shoot | explosion | hit | death | powerup | levelup | menu_select | menu_move | footstep | damage" },
+        output: { type: "string", description: "Absolute path for output .wav file (parent dir created if needed)" },
+        duration: { type: "number", description: "Override duration in seconds (optional, each type has a default)" },
+      },
+      required: ["type", "output"],
     },
   },
   {

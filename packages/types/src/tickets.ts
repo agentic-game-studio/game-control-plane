@@ -12,6 +12,8 @@ export interface Ticket {
   estimateHours?: number;
   status: TicketStatus;
   assignee?: string;
+  /** Preferred agent role to handle this ticket (overrides area-based assignment). */
+  agentRole?: string;
   acknowledged?: boolean;
   createdAt: string;
   updatedAt: string;
@@ -28,6 +30,8 @@ export interface CreateTicketRequest {
   credits?: number;
   estimateHours?: number;
   status?: TicketStatus;
+  /** Preferred agent role to handle this ticket. */
+  agentRole?: string;
 }
 
 export interface UpdateTicketRequest {

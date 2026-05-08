@@ -235,6 +235,11 @@ async function executeTool(
     ? resolveProjectWorkspace(projectContext.workspacePath)
     : loadConfig().WORKSPACE_DIR;
 
+  // Shared subprocess utility for all tool cases
+  const { execFile: execFileTool } = await import("node:child_process");
+  const { promisify: promisifyTool } = await import("node:util");
+  const execFileAsyncTool = promisifyTool(execFileTool);
+
   try {
     switch (name) {
       case "Read": {
@@ -575,6 +580,125 @@ async function executeTool(
         }
       }
 
+      case "TilemapSplit": {
+        const _input = input.input as string;
+        const _outputDir = input.outputDir as string;
+        const _tileWidth = input.tileWidth as number;
+        const _tileHeight = input.tileHeight as number;
+        const _margin = (input.margin as number | undefined) ?? 0;
+        const _spacing = (input.spacing as number | undefined) ?? 0;
+        const _pad = (input.pad as number | undefined) ?? 0;
+        const _namePrefix = (input.namePrefix as string | undefined) ?? "tile";
+
+        if (!_input || !_outputDir || !_tileWidth || !_tileHeight) {
+          return "Error: input, outputDir, tileWidth, and tileHeight are required";
+        }
+
+        const config = loadConfig();
+        const scriptDir = path.join(config.WORKSPACE_DIR, "scripts", "asset-pipeline");
+        const pythonBin = process.env.PIPELINE_PYTHON ?? "python3";
+
+        const args = [
+          pythonBin,
+          path.join(scriptDir, "tilemap_split.py"),
+          "--input", _input,
+          "--output-dir", _outputDir,
+          "--tile-width", String(_tileWidth),
+          "--tile-height", String(_tileHeight),
+        ];
+        if (_margin) args.push("--margin", String(_margin));
+        if (_spacing) args.push("--spacing", String(_spacing));
+        if (_pad) args.push("--pad", String(_pad));
+        if (_namePrefix !== "tile") args.push("--name-prefix", _namePrefix);
+
+        try {
+          const { stdout, stderr } = await execFileAsyncTool(pythonBin, args, {
+            cwd: scriptDir,
+            timeout: 120_000,
+          });
+          const summary = stdout.slice(-300);
+          logEntry(sessionId, "info", `[${agentRole}] TilemapSplit: ${_input} -> ${_outputDir}`, agentRole);
+          return `Tilemap split complete.\n${summary}${stderr ? `\nStderr: ${stderr.slice(-200)}` : ""}`;
+        } catch (err: unknown) {
+          const error = err as { stderr?: string; message?: string };
+          return `Error: TilemapSplit failed: ${error.stderr || error.message}`;
+        }
+      }
+
+      case "SpritePack": {
+        const _inputDir = input.inputDir as string;
+        const _output = input.output as string;
+        const _columns = (input.columns as number | undefined) ?? 4;
+        const _padding = (input.padding as number | undefined) ?? 0;
+        const _pad = (input.pad as number | undefined) ?? 0;
+
+        if (!_inputDir || !_output) {
+          return "Error: inputDir and output are required";
+        }
+
+        const config = loadConfig();
+        const scriptDir = path.join(config.WORKSPACE_DIR, "scripts", "asset-pipeline");
+        const pythonBin = process.env.PIPELINE_PYTHON ?? "python3";
+
+        const args = [
+          pythonBin,
+          path.join(scriptDir, "sprite_pack.py"),
+          "--input-dir", _inputDir,
+          "--output", _output,
+          "--columns", String(_columns),
+        ];
+        if (_padding) args.push("--padding", String(_padding));
+        if (_pad) args.push("--pad", String(_pad));
+
+        try {
+          const { stdout, stderr } = await execFileAsyncTool(pythonBin, args, {
+            cwd: scriptDir,
+            timeout: 120_000,
+          });
+          const summary = stdout.slice(-300);
+          logEntry(sessionId, "info", `[${agentRole}] SpritePack: ${_inputDir} -> ${_output}`, agentRole);
+          return `Sprite pack complete.\n${summary}${stderr ? `\nStderr: ${stderr.slice(-200)}` : ""}`;
+        } catch (err: unknown) {
+          const error = err as { stderr?: string; message?: string };
+          return `Error: SpritePack failed: ${error.stderr || error.message}`;
+        }
+      }
+
+      case "GenerateAudio": {
+        const _sfxType = input.type as string;
+        const _outputPath = input.output as string;
+        const _duration = input.duration as number | undefined;
+
+        if (!_sfxType || !_outputPath) {
+          return "Error: type and output are required";
+        }
+
+        const config = loadConfig();
+        const scriptDir = path.join(config.WORKSPACE_DIR, "scripts", "asset-pipeline");
+        const pythonBin = process.env.PIPELINE_PYTHON ?? "python3";
+
+        const args = [
+          pythonBin,
+          path.join(scriptDir, "generate_audio.py"),
+          "--type", _sfxType,
+          "--output", _outputPath,
+        ];
+        if (_duration !== undefined) args.push("--duration", String(_duration));
+
+        try {
+          const { stdout, stderr } = await execFileAsyncTool(pythonBin, args, {
+            cwd: scriptDir,
+            timeout: 60_000,
+          });
+          const summary = stdout.slice(-200);
+          logEntry(sessionId, "info", `[${agentRole}] GenerateAudio: ${_sfxType} -> ${_outputPath}`, agentRole);
+          return `Audio generated.\n${summary}${stderr ? `\nStderr: ${stderr.slice(-200)}` : ""}`;
+        } catch (err: unknown) {
+          const error = err as { stderr?: string; message?: string };
+          return `Error: GenerateAudio failed: ${error.stderr || error.message}`;
+        }
+      }
+
       case "StartConsultation": {
         const role = input.role as string;
         const brief = input.brief as string | undefined;
@@ -664,6 +788,70 @@ async function executeTool(
         logEntry(sessionId, "info", `[${agentRole}] Started consultation: ${role}`, agentRole);
 
         return `${role} consultation session started (${sessionId}). The user can now switch to the ${role} tab to chat directly.`;
+      }
+
+      case "RunGodotHeadless": {
+        const project = input.project as string;
+        const command = input.command as string;
+        const script = input.script as string | undefined;
+        const preset = input.preset as string | undefined;
+        const output = input.output as string | undefined;
+        const godotBin = input.godotBin as string | undefined;
+
+        if (!project) return "Error: project path is required";
+
+        const config = loadConfig();
+        const scriptDir = path.join(config.WORKSPACE_DIR, "scripts", "godot");
+        const pythonBin = process.env.PIPELINE_PYTHON ?? "python3";
+
+        const args: string[] = [pythonBin, path.join(scriptDir, "run_godot_headless.py"), "--project", project, "--command", command];
+        if (script) args.push("--script", script);
+        if (preset) args.push("--preset", preset);
+        if (output) args.push("--output", output);
+        if (godotBin) args.push("--godot-bin", godotBin);
+
+        try {
+          const { stdout, stderr } = await execFileAsyncTool(pythonBin, args, {
+            cwd: scriptDir,
+            timeout: 360_000, // 6 min for export
+            maxBuffer: 10 * 1024 * 1024,
+          });
+
+          // The script outputs JSON — try to parse it for a structured result
+          let resultMsg = "";
+          try {
+            const parsed = JSON.parse(stdout.trim());
+            resultMsg = `Godot headless ${command} completed.\nReturn code: ${parsed.returnCode}\nElapsed: ${parsed.elapsed_ms}ms\nStdout:\n${(parsed.stdout || "").slice(-500)}`;
+            if (parsed.stderr) resultMsg += `\nStderr:\n${parsed.stderr.slice(-500)}`;
+            resultMsg += `\nSuccess: ${parsed.success}`;
+          } catch {
+            resultMsg = `Output:\n${stdout.slice(-500)}${stderr ? `\nStderr: ${stderr.slice(-200)}` : ""}`;
+          }
+
+          logEntry(sessionId, "info", `[${agentRole}] RunGodotHeadless: ${command} on ${project}`, agentRole);
+          return resultMsg;
+        } catch (err: unknown) {
+          const error = err as { stderr?: string; message?: string };
+          return `Error: RunGodotHeadless failed: ${error.stderr || error.message}`;
+        }
+      }
+
+      case "CreateTicket": {
+        const title = input.title as string;
+        const description = input.description as string;
+        const agentRole = input.agentRole as string;
+        const area = input.area as string;
+        const subarea = (input.subarea as string | undefined) ?? area;
+
+        if (!title || !description || !agentRole || !area) {
+          return "Error: title, description, agentRole, and area are required";
+        }
+
+        const { createQuestTicket } = await import("../services/quest-bridge.js");
+        const ticket = await createQuestTicket(sessionId, title, agentRole as AgentRole, description, area, subarea);
+
+        logEntry(sessionId, "info", `[${agentRole}] Created ticket: ${ticket.id} — ${title}`, agentRole as AgentRole);
+        return `Ticket created:\nID: ${ticket.id}\nTitle: ${ticket.title}\nStatus: ${ticket.status}\nAssignee: ${ticket.assignee}\nArea: ${ticket.area}/${ticket.subarea}`;
       }
 
       default:
@@ -952,9 +1140,8 @@ export async function invokeAgent(
         sessionId,
       } as WSEvent);
     }
-    return {
-      content: `Error invoking agent: ${error.message}`,
-    };
+    // Re-throw so the autonomous loop can handle it properly
+    throw error;
   }
 }
 

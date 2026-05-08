@@ -87,6 +87,8 @@ export const delegationMap: Record<AgentRole, AgentRole[]> = {
   "performance-analyst": [],
   "devops-engineer": [],
   "analytics-engineer": [],
+  "autonomous-producer": [],
+  "godot-scaffolder": [],
   "godot-gdscript-specialist": ["code-reviewer"],
   "godot-shader-specialist": [],
   "godot-gdextension-specialist": ["code-reviewer"],

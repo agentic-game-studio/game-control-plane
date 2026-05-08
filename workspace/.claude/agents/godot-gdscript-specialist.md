@@ -247,6 +247,7 @@ GDScript code or language features, you MUST:
 2. Check `docs/engine-reference/godot/deprecated-apis.md` for any APIs you plan to use
 3. Check `docs/engine-reference/godot/breaking-changes.md` for relevant version transitions
 4. Read `docs/engine-reference/godot/current-best-practices.md` for new GDScript features
+5. Consult `docs/godot/gdscript-patterns.md` for ready-to-use implementations of common 2D patterns
 
 Key post-cutoff GDScript changes: variadic arguments (`...`), `@abstract`
 decorator, script backtracing in Release builds. Check the reference docs
