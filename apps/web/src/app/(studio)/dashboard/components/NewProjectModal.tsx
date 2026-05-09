@@ -4,6 +4,7 @@ import { useState, useCallback } from "react";
 import { Modal, FormField } from "@/components/Modal";
 import type { ProjectIcon, CreateProjectRequest } from "@game-studio/types";
 import { apiFetch } from "@/lib/api";
+import { DirectoryBrowser } from "./DirectoryBrowser";
 
 const PROJECT_ICONS: ProjectIcon[] = [
   "folder",
@@ -43,6 +44,7 @@ export function NewProjectModal({ isOpen, onClose, onSubmit }: NewProjectModalPr
   const [validating, setValidating] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [browserOpen, setBrowserOpen] = useState(false);
 
   const validatePath = useCallback(async (path: string) => {
     if (!path.trim()) {
@@ -136,6 +138,7 @@ export function NewProjectModal({ isOpen, onClose, onSubmit }: NewProjectModalPr
   }, [onClose]);
 
   return (
+    <>
     <Modal
       isOpen={isOpen}
       onClose={handleClose}
@@ -202,6 +205,13 @@ export function NewProjectModal({ isOpen, onClose, onSubmit }: NewProjectModalPr
                 className="flex-1 border-2 border-black bg-[#faf8ff] p-2 font-[var(--font-mono)] text-sm focus:outline-none focus:bg-white"
                 placeholder="/Users/you/my-game or my-game (relative)"
               />
+              <button
+                type="button"
+                onClick={() => setBrowserOpen(true)}
+                className="shrink-0 border-2 border-black bg-[#f3f2ff] px-3 py-2 font-[var(--font-label)] text-[10px] font-bold uppercase hover:bg-black hover:text-white transition-colors"
+              >
+                BROWSE
+              </button>
               {workspacePath && (
                 <button
                   type="button"
@@ -250,6 +260,18 @@ export function NewProjectModal({ isOpen, onClose, onSubmit }: NewProjectModalPr
           </div>
         )}
       </div>
-    </Modal>
+
+      </Modal>
+
+      <DirectoryBrowser
+        isOpen={browserOpen}
+        onClose={() => setBrowserOpen(false)}
+        onSelect={(selectedPath) => {
+          handlePathChange(selectedPath);
+          validatePath(selectedPath);
+        }}
+        initialPath={workspacePath?.startsWith("/") ? workspacePath : undefined}
+      />
+    </>
   );
 }

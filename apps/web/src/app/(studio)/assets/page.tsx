@@ -31,11 +31,12 @@ function AssetsPageInner() {
     loading,
     error,
     retry,
+    rescan,
     createAsset,
     deleteAsset,
     generateAsset,
     generateAssetBatch,
-  } = useAssets();
+  } = useAssets(currentProject?.id);
 
   const { data: settings } = useSettings();
 
@@ -63,9 +64,13 @@ function AssetsPageInner() {
   );
 
   const filteredAssets = useMemo(() => {
-    let result = [...data.assets];
-
-    // Filter by type
+    // Deduplicate by id to prevent duplicate key errors
+    const seen = new Set<string>();
+    let result = data.assets.filter((a) => {
+      if (seen.has(a.id)) return false;
+      seen.add(a.id);
+      return true;
+    });
     if (activeType !== "all") {
       result = result.filter((a) => a.type === activeType);
     }
@@ -110,24 +115,35 @@ function AssetsPageInner() {
     <div className="flex flex-col h-full p-8 gap-6">
       {/* Header */}
       <div className="border-2 border-black bg-white shadow-[4px_4px_0_0_rgba(0,0,0,1)] p-4">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 border-2 border-black bg-black flex items-center justify-center text-white">
-            <span className="material-symbols-outlined" style={{ fontVariationSettings: "'FILL' 1" }}>
-              grid_on
-            </span>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 border-2 border-black bg-black flex items-center justify-center text-white">
+              <span className="material-symbols-outlined" style={{ fontVariationSettings: "'FILL' 1" }}>
+                grid_on
+              </span>
+            </div>
+            <div>
+              <h1 className="font-[var(--font-terminal)] text-xl font-bold uppercase tracking-widest">
+                ASSET LIBRARY
+              </h1>
+              <span className="font-[var(--font-terminal)] text-xs text-[#737688] uppercase">
+                {loading
+                  ? "RESOURCE MANAGEMENT // Scanning..."
+                  : error
+                    ? "RESOURCE MANAGEMENT // Connection Lost"
+                    : `RESOURCE MANAGEMENT // ${data.assets.length} Assets Scanned`}
+              </span>
+            </div>
           </div>
-          <div>
-            <h1 className="font-[var(--font-terminal)] text-xl font-bold uppercase tracking-widest">
-              ASSET LIBRARY
-            </h1>
-            <span className="font-[var(--font-terminal)] text-xs text-[#737688] uppercase">
-              {loading
-                ? "RESOURCE MANAGEMENT // Scanning..."
-                : error
-                  ? "RESOURCE MANAGEMENT // Connection Lost"
-                  : `RESOURCE MANAGEMENT // ${data.assets.length} Assets Indexed`}
-            </span>
-          </div>
+          <button
+            onClick={rescan}
+            disabled={loading}
+            className="flex items-center gap-2 border-2 border-black bg-white px-3 py-2 font-[var(--font-label)] text-xs font-bold uppercase hover:bg-[#0055FF] hover:text-white transition-colors disabled:opacity-50"
+            title="Rescan workspace folder"
+          >
+            <span className="material-symbols-outlined text-sm">refresh</span>
+            Rescan
+          </button>
         </div>
       </div>
 

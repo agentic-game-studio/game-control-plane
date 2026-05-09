@@ -1,5 +1,7 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
+import fs from "fs";
+import os from "os";
 import { readData, writeData, broadcastEvent } from "../services/data-store.js";
 import { logger } from "../utils/logger.js";
 import type {
@@ -64,6 +66,44 @@ dashboardRouter.post("/validate-path", async (req: Request, res: Response) => {
   }
   const result = validateWorkspacePath(inputPath);
   res.json({ success: true, data: result });
+});
+
+// POST /api/dashboard/browse-directory - List child directories of a path
+dashboardRouter.post("/browse-directory", async (req: Request, res: Response) => {
+  try {
+    const { path: inputPath } = req.body as { path?: string };
+    const dirPath = inputPath?.trim() || os.homedir();
+
+    if (dirPath.includes("..")) {
+      res.status(400).json({ success: false, error: "Path traversal not allowed" });
+      return;
+    }
+
+    const resolved = path.resolve(dirPath);
+    if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
+      res.status(400).json({ success: false, error: "Not a valid directory" });
+      return;
+    }
+
+    const dirents = fs.readdirSync(resolved, { withFileTypes: true });
+    const directories = dirents
+      .filter((d) => d.isDirectory())
+      .map((d) => d.name)
+      .sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+
+    const parentPath = path.dirname(resolved);
+
+    res.json({
+      success: true,
+      data: {
+        currentPath: resolved,
+        parentPath: parentPath !== resolved ? parentPath : null,
+        directories,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: "Failed to browse directory" });
+  }
 });
 
 // GET /api/dashboard - Get all dashboard data

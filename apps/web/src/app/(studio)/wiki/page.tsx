@@ -1,11 +1,23 @@
 "use client";
 
+import { useProject } from "@/contexts/ProjectContext";
+import { ProjectGuard } from "@/components/ProjectGuard";
 import { useDocuments } from "@/hooks/useDocuments";
 import FileTree from "./components/FileTree";
 import DocumentViewer from "./components/DocumentViewer";
 import KnowledgeGraph from "./components/KnowledgeGraph";
 
 export default function WikiPage() {
+  return (
+    <ProjectGuard>
+      <WikiPageInner />
+    </ProjectGuard>
+  );
+}
+
+function WikiPageInner() {
+  const { currentProject } = useProject();
+
   const {
     documents,
     categories,
@@ -16,7 +28,7 @@ export default function WikiPage() {
     refresh,
     loading,
     error,
-  } = useDocuments();
+  } = useDocuments(currentProject?.id);
 
   return (
     <div className="flex h-full">

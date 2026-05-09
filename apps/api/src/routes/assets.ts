@@ -3,6 +3,7 @@ import type { Request, Response } from "express";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import path from "node:path";
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import { watch } from "node:fs";
 import { readData, writeData, broadcastEvent } from "../services/data-store.js";
@@ -126,10 +127,14 @@ function fileEntryToGameAsset(
   relPath: string,
   sizeBytes: number,
   stat: { ctime: Date; mtime: Date },
-  overlay?: Partial<GameAsset>
+  overlay?: Partial<GameAsset>,
+  fullPath?: string
 ): GameAsset {
   const filename = path.basename(relPath);
-  const id = overlay?.id ?? `asset-${Buffer.from(relPath).toString("base64url").slice(0, 16)}`;
+  // Use a hash of the full absolute path for the ID to avoid collisions
+  // when relPath contains ".." or when truncated base64 collides
+  const idSource = fullPath || relPath;
+  const id = overlay?.id ?? `asset-${crypto.createHash("sha256").update(idSource).digest("hex").slice(0, 16)}`;
   return {
     id,
     filename: overlay?.filename ?? filename,
@@ -172,10 +177,15 @@ async function scanAssetsDir(
 ): Promise<GameAsset[]> {
   const results: GameAsset[] = [];
 
-  let entries: { name: string; isDirectory: boolean }[] = [];
+  let entries: { name: string; isDirectory: boolean; parentPath?: string }[] = [];
   try {
     const dirents = await fs.readdir(assetsDir, { withFileTypes: true, recursive: true });
-    entries = dirents.map((d) => ({ name: d.name, isDirectory: d.isDirectory() }));
+    entries = dirents.map((d) => ({
+      name: d.name,
+      isDirectory: d.isDirectory(),
+      parentPath: (d as unknown as { parentPath?: string; path?: string }).parentPath
+        ?? (d as unknown as { path?: string }).path,
+    }));
   } catch {
     // Directory doesn't exist or isn't readable — return empty
     return results;
@@ -183,7 +193,7 @@ async function scanAssetsDir(
 
   for (const entry of entries) {
     if (entry.isDirectory) continue;
-    const fullPath = path.join(assetsDir, entry.name);
+    const fullPath = path.join(entry.parentPath ?? assetsDir, entry.name);
     const relPath = path.relative(workspaceDir, fullPath);
 
     // Skip hidden/system files and non-asset files
@@ -197,7 +207,7 @@ async function scanAssetsDir(
 
       // Look up metadata overlay by relative path
       const overlay = overlayMap.get(relPath);
-      const asset = fileEntryToGameAsset(relPath, stat.size, stat, overlay);
+      const asset = fileEntryToGameAsset(relPath, stat.size, stat, overlay, fullPath);
       results.push(asset);
     } catch {
       // Skip unreadable files
@@ -288,10 +298,20 @@ assetsRouter.get("/", async (req: Request, res: Response) => {
 
     const mergedAssets = [...scannedAssets, ...overlayOnly];
 
+    // Deduplicate by id — prefer scanned assets over overlay entries
+    const dedupedAssets: GameAsset[] = [];
+    const seenIds = new Set<string>();
+    for (const asset of mergedAssets) {
+      if (!seenIds.has(asset.id)) {
+        seenIds.add(asset.id);
+        dedupedAssets.push(asset);
+      }
+    }
+
     res.json({
       success: true,
       data: {
-        assets: mergedAssets,
+        assets: dedupedAssets,
         artBible: overlayData.artBible ?? DEFAULT_ASSETS.artBible,
       },
     });
@@ -749,10 +769,20 @@ assetsRouter.post("/rescan", async (req: Request, res: Response) => {
     const scannedPaths = new Set(scannedAssets.map((a) => a.path));
     const overlayOnly = overlayData.assets.filter((a) => a.path && !scannedPaths.has(a.path));
 
+    const mergedAssets = [...scannedAssets, ...overlayOnly];
+    const dedupedAssets: GameAsset[] = [];
+    const seenIds = new Set<string>();
+    for (const asset of mergedAssets) {
+      if (!seenIds.has(asset.id)) {
+        seenIds.add(asset.id);
+        dedupedAssets.push(asset);
+      }
+    }
+
     res.json({
       success: true,
       data: {
-        assets: [...scannedAssets, ...overlayOnly],
+        assets: dedupedAssets,
         artBible: overlayData.artBible ?? DEFAULT_ASSETS.artBible,
       },
     });

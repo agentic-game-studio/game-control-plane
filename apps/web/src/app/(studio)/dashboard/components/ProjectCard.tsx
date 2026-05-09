@@ -17,6 +17,7 @@ interface ProjectCardProps {
   project: Project;
   isSelected?: boolean;
   onClick?: () => void;
+  onRequestDelete?: (id: string) => void;
   mcpStatus?: MCPStatus | null;
   onLaunchEditor?: () => void;
 }
@@ -29,7 +30,7 @@ const ENGINE_COLORS: Record<ProjectEngine, string> = {
   threejs: "bg-[#000000]",
 };
 
-export function ProjectCard({ project, isSelected, onClick, mcpStatus, onLaunchEditor }: ProjectCardProps) {
+export function ProjectCard({ project, isSelected, onClick, onRequestDelete, mcpStatus, onLaunchEditor }: ProjectCardProps) {
   const isGodot = project.engine === "godot";
 
   // Godot MCP connection status indicator
@@ -114,6 +115,18 @@ export function ProjectCard({ project, isSelected, onClick, mcpStatus, onLaunchE
                 >
                   {project.engine.toUpperCase()}
                 </span>
+              )}
+              {onRequestDelete && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onRequestDelete(project.id);
+                  }}
+                  className="w-6 h-6 border-2 border-black flex items-center justify-center hover:bg-[#c13301] hover:text-white hover:border-[#c13301] transition-colors"
+                  title="Remove from dashboard"
+                >
+                  <span className="material-symbols-outlined text-xs">logout</span>
+                </button>
               )}
             </div>
           </div>
