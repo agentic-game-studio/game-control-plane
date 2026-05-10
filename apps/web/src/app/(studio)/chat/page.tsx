@@ -81,6 +81,7 @@ function ChatPageInner() {
     initialized,
     connected,
     isLoading,
+    messageQueue,
     producerSessionId,
     contextUsageMap,
     contextPressure,
@@ -273,7 +274,7 @@ function ChatPageInner() {
         })()}
       </div>
       {currentSession ? (
-        <CommandInput onSend={executeCommand} isLoading={isLoading} />
+        <CommandInput onSend={executeCommand} isLoading={isLoading} queueCount={messageQueue.length} />
       ) : (
         <AgentStatusBar session={sessions.get(currentSession)} onClose={() => handleCloseSession(currentSession)} />
       )}
