@@ -750,6 +750,7 @@ export function useCommandRoom() {
   const [threadTitle, setThreadTitle] = useState("Board Room");
   const [initialized, setInitialized] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [messageQueue, setMessageQueue] = useState<Array<{ input: string; images?: string[] }>>([]);
   const [subagents, setSubagents] = useState<Map<string, SubagentInfo>>(new Map());
   const [contextUsageMap, setContextUsageMap] = useState<Map<string, ContextUsage>>(new Map());
   const [contextPressure, setContextPressure] = useState<Map<string, number>>(new Map());
@@ -766,6 +767,18 @@ export function useCommandRoom() {
   currentSessionRef.current = currentSession;
   const producerSessionIdRef = useRef(producerSessionId);
   producerSessionIdRef.current = producerSessionId;
+  const sessionsRef = useRef<Map<string, AgentSession>>(new Map());
+  const subagentsRef = useRef<Map<string, SubagentInfo>>(new Map());
+  const contextUsageMapRef = useRef(contextUsageMap);
+  contextUsageMapRef.current = contextUsageMap;
+  const contextPressureRef = useRef(contextPressure);
+  contextPressureRef.current = contextPressure;
+  const isLoadingRef = useRef(isLoading);
+  isLoadingRef.current = isLoading;
+  const messageQueueRef = useRef(messageQueue);
+  messageQueueRef.current = messageQueue;
+  // Ref for executeCommand to avoid stale closures when dequeuing
+  const executeCommandRef = useRef<(input: string, images?: string[]) => void>(() => {});
 
   // Filter sessions visible for the active project. The producer session
   // for the current project plus any specialist sessions tagged with
@@ -788,6 +801,8 @@ export function useCommandRoom() {
   }, [allSessions, allSessionProjectIds, currentProjectId, producerSessionId]);
   latestSessionsRef.current = sessions;
   latestSubagentsRef.current = subagents;
+  sessionsRef.current = sessions;
+  subagentsRef.current = subagents;
 
   // Flush cache immediately on page unload to avoid losing recent messages
   useEffect(() => {
@@ -1409,18 +1424,61 @@ export function useCommandRoom() {
           addSessionMessage(targetSession, { type: "system", sender: "SYSTEM", content: "Chat cleared." });
           return;
         }
+        case "stop": {
+          const queueCount = messageQueueRef.current.length;
+          setMessageQueue([]);
+          setIsLoading(false);
+          addSessionMessage(producerSessionIdRef.current, {
+            type: "system",
+            sender: "SYSTEM",
+            content: queueCount > 0
+              ? `Stopped. Cleared ${queueCount} queued message(s).`
+              : "Stopped. No queued messages.",
+          });
+          return;
+        }
         case "help": {
           addSessionMessage(producerSessionIdRef.current, { type: "user", sender: "DIRECTOR", content: trimmed });
           addSessionMessage(producerSessionIdRef.current, {
             type: "agent",
             sender: "producer",
             content: `Available commands:
-- /clear — Clear the chat
-- /help — Show this message
-- /spawn <agent> — Bring an agent online
-- /cost — Show mock token usage
-- /diff — Show recent changes
-You can also use: spawn <agent>, approve, done <agent>`,
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Production:
+  /autonomous          — Start autonomous production loop
+  /autonomous stop     — Stop the loop
+  /plan <query>        — Create execution plan
+  /sprint              — Summarize current sprint
+  /verify [ticket]     — Run auto-verification
+  /inject <text>       — Inject context into producer
+
+Orchestration:
+  /spawn <agent>       — Manually spawn an agent
+  /approve             — Approve last agent request
+  /done <agent>        — Complete agent task
+  /consult <director>  — Consult a director
+  /tree                — Show agent hierarchy
+
+Session:
+  /clear               — Clear the chat
+  /stop                — Stop processing + clear queue
+  /compact             — Compact into new generation
+  /context             — Show context window usage
+  /cost                — Show token usage (legacy)
+  /export              — Export session as markdown
+
+Production:
+  /plan [query]        — Create execution plan
+  /sprint              — Summarize current sprint
+  /verify [ticket]     — Run auto-verification
+  /inject <text>       — Inject context into producer
+
+Utilities:
+  /diff                — Show recent changes
+  /help                — Show this message
+  /mcp                 — Check Godot MCP status
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Also: spawn <agent>, approve, done <agent>`,
             showActions: false,
           });
           return;
@@ -1481,6 +1539,243 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
               newContent: "function newName() {\n  return 42;\n}",
             },
           });
+          return;
+        }
+        case "context": {
+          addSessionMessage(producerSessionIdRef.current, { type: "user", sender: "DIRECTOR", content: trimmed });
+          const usage = contextUsageMapRef.current.get(producerSessionIdRef.current);
+          const pressure = contextPressureRef.current.get(producerSessionIdRef.current);
+          if (usage) {
+            const pct = Math.round((usage.lastInputTokens / usage.contextWindowTokens) * 100);
+            const pressurePct = pressure ?? 0;
+            const filled = Math.round(pressurePct / 5);
+            const pressureBar = "█".repeat(filled) + "░".repeat(20 - filled);
+            addSessionMessage(producerSessionIdRef.current, {
+              type: "agent",
+              sender: "producer",
+              content: `Context Window Usage\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nLast Input:    ${usage.lastInputTokens.toLocaleString()} tokens\nLast Output:   ${usage.lastOutputTokens.toLocaleString()} tokens\nCumulative In: ${usage.cumulativeInputTokens.toLocaleString()} tokens\nCumulative Out:${usage.cumulativeOutputTokens.toLocaleString()} tokens\nContext Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.contextWindowTokens.toLocaleString()})\nPressure:      ${pressurePct}% [${pressureBar}]\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+              showActions: false,
+            });
+          } else {
+            addSessionMessage(producerSessionIdRef.current, {
+              type: "agent",
+              sender: "producer",
+              content: "No context usage data yet. Send a message to start tracking.",
+              showActions: false,
+            });
+          }
+          return;
+        }
+        case "tree": {
+          addSessionMessage(producerSessionIdRef.current, { type: "user", sender: "DIRECTOR", content: trimmed });
+          const sess = sessionsRef.current;
+          const subs = subagentsRef.current;
+          let tree = "Agent Hierarchy\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n";
+          const producer = [...sess.values()].find((s) => isProducerSession(s.role));
+          if (producer) {
+            tree += `📋 ${producer.role.toUpperCase()} (${producer.status})\n`;
+          }
+          const agents = [...sess.values()].filter((s) => !isProducerSession(s.role));
+          if (agents.length > 0) {
+            tree += "\nActive Sessions:\n";
+            for (const a of agents) {
+              tree += `  🤖 ${a.role} — ${a.progress}% (${a.status})\n`;
+            }
+          }
+          if (subs.size > 0) {
+            tree += "\nSub-agents:\n";
+            for (const [, sa] of subs) {
+              tree += `  ⚡ ${sa.role} — ${sa.status} [${sa.ticketId}]\n`;
+            }
+          }
+          if (agents.length === 0 && subs.size === 0) {
+            tree += "\nNo active agents or sub-agents.";
+          }
+          tree += "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
+          addSessionMessage(producerSessionIdRef.current, {
+            type: "agent",
+            sender: "producer",
+            content: tree,
+            showActions: false,
+          });
+          return;
+        }
+        case "autonomous": {
+          const pid = currentProjectId;
+          if (!pid) {
+            addSessionMessage(producerSessionIdRef.current, { type: "system", sender: "SYSTEM", content: "No project selected." });
+            return;
+          }
+          const sid = producerSessionIdRef.current;
+          if (args.trim() === "stop") {
+            addSessionMessage(sid, { type: "user", sender: "DIRECTOR", content: trimmed });
+            apiFetch<{ success: boolean; data?: { status: string } }>("/api/autonomous/stop", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ sessionId: sid }),
+            })
+              .then((result) => {
+                addSessionMessage(sid, {
+                  type: "system",
+                  sender: "SYSTEM",
+                  content: result.success ? "Autonomous loop stopped." : `Failed to stop: ${JSON.stringify(result.data)}`,
+                });
+              })
+              .catch((err) => {
+                addSessionMessage(sid, { type: "system", sender: "SYSTEM", content: `Stop failed: ${err instanceof Error ? err.message : "Unknown error"}` });
+              });
+            return;
+          }
+          addSessionMessage(sid, { type: "user", sender: "DIRECTOR", content: trimmed });
+          setIsLoading(true);
+          apiFetch<{ success: boolean; data?: { status: string; maxIterations: number } }>("/api/autonomous/start", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ sessionId: sid, projectId: pid, maxIterations: 50 }),
+          })
+            .then((result) => {
+              setIsLoading(false);
+              if (result.success) {
+                addSessionMessage(sid, {
+                  type: "system",
+                  sender: "SYSTEM",
+                  content: `Autonomous production loop started. Max iterations: ${result.data?.maxIterations ?? 50}. The Producer will now orchestrate the pipeline without human intervention.`,
+                });
+              } else {
+                addSessionMessage(sid, { type: "system", sender: "SYSTEM", content: `Autonomous loop already running or failed to start.` });
+              }
+            })
+            .catch((err) => {
+              setIsLoading(false);
+              addSessionMessage(sid, { type: "system", sender: "SYSTEM", content: `Failed to start autonomous loop: ${err instanceof Error ? err.message : "Unknown error"}` });
+            });
+          return;
+        }
+        case "consult": {
+          if (!args) {
+            addSessionMessage(producerSessionIdRef.current, { type: "system", sender: "SYSTEM", content: "Usage: /consult <director-role> (e.g., /consult creative-director)" });
+            return;
+          }
+          const director = args.trim().toLowerCase();
+          const validDirectors = ["creative-director", "technical-director", "art-director", "narrative-director", "audio-director"];
+          if (!validDirectors.includes(director)) {
+            addSessionMessage(producerSessionIdRef.current, { type: "system", sender: "SYSTEM", content: `Unknown director: ${director}. Valid: ${validDirectors.join(", ")}` });
+            return;
+          }
+          addSessionMessage(producerSessionIdRef.current, { type: "user", sender: "DIRECTOR", content: trimmed });
+          spawnAgent(director, "Consultation session — awaiting director's expertise.");
+          return;
+        }
+        case "mcp": {
+          addSessionMessage(producerSessionIdRef.current, { type: "user", sender: "DIRECTOR", content: trimmed });
+          const pid = currentProjectId;
+          if (!pid) {
+            addSessionMessage(producerSessionIdRef.current, { type: "system", sender: "SYSTEM", content: "No project selected." });
+            return;
+          }
+          apiFetch<{ success: boolean; data: { status: string; projectInfo?: { name: string; version: string }; error?: string } }>(
+            `/api/dashboard/projects/${pid}/mcp-health`
+          )
+            .then((result) => {
+              const data = result.data;
+              let msg = `Godot MCP Status\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+              msg += `Status: ${data.status.toUpperCase()}\n`;
+              if (data.projectInfo) {
+                msg += `Project: ${data.projectInfo.name} (${data.projectInfo.version})\n`;
+              }
+              if (data.error) {
+                msg += `Error: ${data.error}\n`;
+              }
+              msg += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
+              addSessionMessage(producerSessionIdRef.current, { type: "agent", sender: "producer", content: msg, showActions: false });
+            })
+            .catch((err) => {
+              addSessionMessage(producerSessionIdRef.current, { type: "system", sender: "SYSTEM", content: `MCP check failed: ${err instanceof Error ? err.message : "Unknown error"}` });
+            });
+          return;
+        }
+        case "export": {
+          addSessionMessage(producerSessionIdRef.current, { type: "user", sender: "DIRECTOR", content: trimmed });
+          const targetSession = currentSessionRef.current;
+          const session = sessionsRef.current.get(targetSession);
+          if (!session || session.messages.length === 0) {
+            addSessionMessage(producerSessionIdRef.current, { type: "system", sender: "SYSTEM", content: "No messages to export in current session." });
+            return;
+          }
+          let md = `# Chat Export — ${session.role}\n\n`;
+          md += `Generated: ${new Date().toISOString()}\n\n`;
+          md += `---\n\n`;
+          for (const m of session.messages) {
+            const time = new Date(m.timestamp).toLocaleString();
+            md += `**${m.sender}** — ${time}\n\n`;
+            md += `${m.content}\n\n`;
+            md += `---\n\n`;
+          }
+          navigator.clipboard.writeText(md).then(() => {
+            addSessionMessage(producerSessionIdRef.current, {
+              type: "agent",
+              sender: "producer",
+              content: `Exported ${session.messages.length} messages to clipboard as markdown.`,
+              showActions: false,
+            });
+          }).catch(() => {
+            addSessionMessage(producerSessionIdRef.current, {
+              type: "agent",
+              sender: "producer",
+              content: `Export ready (${session.messages.length} messages):\n\n\`\`\`markdown\n${md.slice(0, 2000)}${md.length > 2000 ? "\n... (truncated)" : ""}\n\`\`\``,
+              showActions: false,
+            });
+          });
+          return;
+        }
+        case "plan":
+        case "sprint":
+        case "verify":
+        case "inject": {
+          const sid = producerSessionIdRef.current;
+          let prompt = "";
+          if (cmd === "plan") {
+            if (!args) {
+              addSessionMessage(producerSessionIdRef.current, { type: "system", sender: "SYSTEM", content: "Usage: /plan <query> — e.g., /plan design a combat system" });
+              return;
+            }
+            prompt = `[PLAN REQUEST] ${args}`;
+          } else if (cmd === "sprint") {
+            prompt = "[SPRINT SUMMARY] Summarize the current sprint progress, active tickets, and recent completions.";
+          } else if (cmd === "verify") {
+            prompt = `[VERIFY REQUEST] Run auto-verification on ticket: ${args || "all pending"}`;
+          } else if (cmd === "inject") {
+            if (!args) {
+              addSessionMessage(producerSessionIdRef.current, { type: "system", sender: "SYSTEM", content: "Usage: /inject <context-text> — inject custom context into the producer prompt" });
+              return;
+            }
+            prompt = `[CONTEXT INJECTION] ${args}`;
+          }
+          addSessionMessage(producerSessionIdRef.current, { type: "user", sender: "DIRECTOR", content: trimmed });
+          setIsLoading(true);
+          apiFetch<{ assistantMessage?: { content: string; type: string; sender: string } }>(
+            `/api/chat/sessions/${sid}/messages`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ type: "user", sender: "DIRECTOR", content: prompt }),
+            }
+          )
+            .then((result) => {
+              setIsLoading(false);
+              if (result.assistantMessage) {
+                addSessionMessage(sid, {
+                  type: result.assistantMessage.type as ChatMessage["type"],
+                  sender: result.assistantMessage.sender,
+                  content: result.assistantMessage.content,
+                  showActions: false,
+                });
+              }
+            })
+            .catch((err) => {
+              setIsLoading(false);
+              addSessionMessage(sid, { type: "system", sender: "SYSTEM", content: `/${cmd} failed: ${err instanceof Error ? err.message : "Unknown error"}` });
+            });
           return;
         }
         default: {
@@ -1551,6 +1846,18 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
     // Default: normal message routed to current session
     // F2: Capture ref value for async callbacks
     const session = currentSessionRef.current;
+
+    // If already processing, queue the message instead of sending immediately
+    if (isLoadingRef.current) {
+      setMessageQueue((prev) => [...prev, { input: trimmed, images }]);
+      addSessionMessage(session, {
+        type: "system",
+        sender: "SYSTEM",
+        content: `Queued (${messageQueueRef.current.length + 1}): "${trimmed.slice(0, 40)}${trimmed.length > 40 ? "..." : ""}"`,
+      });
+      return;
+    }
+
     addSessionMessage(session, { type: "user", sender: "DIRECTOR", content: trimmed, images });
 
     setIsLoading(true);
@@ -1563,6 +1870,13 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
         sender: "SYSTEM",
         content: "Response is still processing in the background. You can send another message.",
       });
+      // Process next in queue after timeout
+      const queue = messageQueueRef.current;
+      if (queue.length > 0) {
+        const [next, ...rest] = queue;
+        setMessageQueue(rest);
+        setTimeout(() => executeCommandRef.current(next.input, next.images), 100);
+      }
     }, 5 * 60 * 1000);
 
     // Call real API for current session
@@ -1610,6 +1924,13 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
             content: result.errorMessage.content,
           });
         }
+        // Process next in queue
+        const queue = messageQueueRef.current;
+        if (queue.length > 0) {
+          const [next, ...rest] = queue;
+          setMessageQueue(rest);
+          setTimeout(() => executeCommandRef.current(next.input, next.images), 100);
+        }
       })
       .catch((error) => {
         clearTimeout(loadingTimeout);
@@ -1620,8 +1941,18 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
           sender: "SYSTEM",
           content: `Error: ${error instanceof Error ? error.message : "Failed to get response"}`,
         });
+        // Process next in queue even on error
+        const queue = messageQueueRef.current;
+        if (queue.length > 0) {
+          const [next, ...rest] = queue;
+          setMessageQueue(rest);
+          setTimeout(() => executeCommandRef.current(next.input, next.images), 100);
+        }
       });
   }, [addSessionMessage, spawnAgent, approveAgent, currentSession]);
+
+  // Keep ref updated for queue processing
+  executeCommandRef.current = executeCommand;
 
   const closeSession = useCallback((role: string) => {
     // Delete from backend so it doesn't reappear on refresh
@@ -1738,6 +2069,7 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
     initialized,
     connected,
     isLoading,
+    messageQueue,
     producerSessionId,
   };
 }

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useCallback, useEffect } from "react";
+import { createPortal } from "react-dom";
 import type { GameAsset, AssetType, AssetCategory } from "@game-studio/types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
@@ -51,7 +52,13 @@ export function AssetCard({ asset, onDelete }: AssetCardProps) {
     y: number;
   } | null>(null);
   const [imgError, setImgError] = useState(false);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [mounted, setMounted] = useState(false);
   const cardRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   const handleContextMenu = useCallback(
     (e: React.MouseEvent) => {
@@ -88,15 +95,19 @@ export function AssetCard({ asset, onDelete }: AssetCardProps) {
       ? `${API_BASE}/api/assets/${asset.id}/thumbnail`
       : null;
 
+  // Full-size image for preview (use thumbnail as fallback)
+  const fullImageSrc = thumbnailSrc;
+
   return (
     <>
       <div
         ref={cardRef}
         onContextMenu={handleContextMenu}
+        onClick={() => thumbnailSrc && setPreviewOpen(true)}
         className="border-2 border-black bg-white flex flex-col group cursor-pointer hover:-translate-y-1 hover:shadow-[4px_4px_0_0_rgba(0,0,0,1)] transition-all"
       >
         {/* Thumbnail Area */}
-        <div className="aspect-square border-b-2 border-black bg-[#e1e1ef] relative overflow-hidden flex items-center justify-center p-4">
+        <div className="aspect-square border-b-2 border-black bg-[#e1e1ef] relative overflow-hidden">
           {thumbnailSrc ? (
             <img
               src={thumbnailSrc}
@@ -106,9 +117,11 @@ export function AssetCard({ asset, onDelete }: AssetCardProps) {
               style={{ imageRendering: "pixelated" }}
             />
           ) : (
-            <span className="material-symbols-outlined text-6xl text-[#737688] select-none">
-              {TYPE_ICONS[asset.type]}
-            </span>
+            <div className="w-full h-full flex items-center justify-center">
+              <span className="material-symbols-outlined text-6xl text-[#737688] select-none">
+                {TYPE_ICONS[asset.type]}
+              </span>
+            </div>
           )}
 
           {/* AI Generated Badge */}
@@ -126,6 +139,18 @@ export function AssetCard({ asset, onDelete }: AssetCardProps) {
 
           {/* Hover Actions */}
           <div className="absolute inset-0 bg-black/70 flex items-center justify-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+            {thumbnailSrc && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setPreviewOpen(true);
+                }}
+                className="w-10 h-10 border-2 border-white bg-white text-black flex items-center justify-center hover:bg-[#0055FF] hover:text-white hover:border-[#0055FF] transition-colors"
+                title="Preview"
+              >
+                <span className="material-symbols-outlined text-lg">zoom_in</span>
+              </button>
+            )}
             {onDelete && (
               <button
                 onClick={(e) => {
@@ -187,6 +212,75 @@ export function AssetCard({ asset, onDelete }: AssetCardProps) {
           </button>
         </div>
       )}
+
+      {/* Preview Modal */}
+      {previewOpen && mounted && fullImageSrc && (
+        <PreviewModal
+          src={fullImageSrc}
+          filename={asset.filename}
+          onClose={() => setPreviewOpen(false)}
+        />
+      )}
     </>
   );
+}
+
+/** Full-screen image preview modal */
+function PreviewModal({
+  src,
+  filename,
+  onClose,
+}: {
+  src: string;
+  filename: string;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const modal = (
+    <div
+      className="fixed inset-0 z-[70] flex items-center justify-center p-4"
+      onClick={onClose}
+    >
+      {/* Backdrop */}
+      <div className="absolute inset-0 bg-black/80" />
+
+      {/* Modal Content */}
+      <div
+        className="relative bg-white border-2 border-black shadow-[8px_8px_0_0_rgba(0,0,0,1)] flex flex-col max-w-[90vw] max-h-[90vh]"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex justify-between items-center border-b-2 border-black p-3 shrink-0">
+          <h2 className="font-[var(--font-headline)] text-sm font-bold uppercase truncate max-w-[60vw]">
+            {filename}
+          </h2>
+          <button
+            onClick={onClose}
+            className="w-7 h-7 border-2 border-black flex items-center justify-center hover:bg-black hover:text-white transition-colors shrink-0"
+          >
+            <span className="material-symbols-outlined text-sm">close</span>
+          </button>
+        </div>
+
+        {/* Image */}
+        <div className="flex-1 flex items-center justify-center p-4 bg-[#191B25] overflow-hidden">
+          <img
+            src={src}
+            alt={filename}
+            className="max-w-full max-h-[70vh] object-contain"
+            style={{ imageRendering: "pixelated" }}
+          />
+        </div>
+      </div>
+    </div>
+  );
+
+  return createPortal(modal, document.body);
 }

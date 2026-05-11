@@ -40,6 +40,21 @@ const SAMPLE_PROMPTS: { icon: string; label: string; prompt: string }[] = [
     label: "Plan sprint 1",
     prompt: "Plan out sprint 1 for this project. Break the milestone into discrete tasks across design, programming, art, and QA.",
   },
+  {
+    icon: "palette",
+    label: "Generate game assets",
+    prompt: "Generate a batch of game assets for this project. Use the asset pipeline to create UI icons, character sprites, and environment textures.",
+  },
+  {
+    icon: "architecture",
+    label: "Review architecture",
+    prompt: "Review the current codebase architecture. Identify any structural issues, missing abstractions, or areas that need refactoring.",
+  },
+  {
+    icon: "psychology",
+    label: "Consult creative director",
+    prompt: "I need a creative consultation on the game's visual direction and tone. Bring the creative director online for a session.",
+  },
 ];
 
 const TOOL_ICONS: Record<string, string> = {
@@ -228,26 +243,57 @@ const WelcomeMessage = memo(function WelcomeMessage({ msg }: { msg: ChatMessage 
           </span>
         </div>
         <div className="p-5">
-          <p className="font-[var(--font-terminal)] text-base mb-4">
-            Welcome, Director. Producer is online and ready to orchestrate your team.
+          <p className="font-[var(--font-terminal)] text-base mb-1">
+            Hi, Game Director.
           </p>
-          <div className="border-2 border-black bg-[#f3f2ff] p-4">
-            <span className="font-[var(--font-label)] text-[10px] uppercase text-[#434656] tracking-widest block mb-3">Quick Reference</span>
-            <div className="space-y-2 font-[var(--font-terminal)] text-sm text-[#434656]">
-              <div className="flex gap-3 items-baseline">
-                <code className="text-[#0055FF] font-bold bg-white border border-black px-2 py-0.5 text-xs whitespace-nowrap">spawn &lt;agent&gt;</code>
-                <span>Bring an agent online</span>
+          <p className="font-[var(--font-terminal)] text-lg font-bold mb-4">
+            What do you want to do today?
+          </p>
+
+          <div className="border-2 border-black bg-[#f3f2ff] p-4 mb-4">
+            <span className="font-[var(--font-label)] text-[10px] uppercase text-[#434656] tracking-widest block mb-3">
+              Quick Commands
+            </span>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2 font-[var(--font-terminal)] text-sm text-[#434656]">
+              <div className="flex gap-2 items-baseline">
+                <code className="text-[#0055FF] font-bold bg-white border border-black px-1.5 py-0.5 text-[10px] whitespace-nowrap">/plan</code>
+                <span className="text-xs">Create execution plan</span>
               </div>
-              <div className="flex gap-3 items-baseline">
-                <code className="text-[#0055FF] font-bold bg-white border border-black px-2 py-0.5 text-xs whitespace-nowrap">approve</code>
-                <span>Approve last agent&apos;s request</span>
+              <div className="flex gap-2 items-baseline">
+                <code className="text-[#0055FF] font-bold bg-white border border-black px-1.5 py-0.5 text-[10px] whitespace-nowrap">/autonomous</code>
+                <span className="text-xs">Start production loop</span>
               </div>
-              <div className="flex gap-3 items-baseline">
-                <code className="text-[#0055FF] font-bold bg-white border border-black px-2 py-0.5 text-xs whitespace-nowrap">done &lt;agent&gt;</code>
-                <span>Despawn an agent</span>
+              <div className="flex gap-2 items-baseline">
+                <code className="text-[#0055FF] font-bold bg-white border border-black px-1.5 py-0.5 text-[10px] whitespace-nowrap">/consult</code>
+                <span className="text-xs">Consult a director</span>
+              </div>
+              <div className="flex gap-2 items-baseline">
+                <code className="text-[#0055FF] font-bold bg-white border border-black px-1.5 py-0.5 text-[10px] whitespace-nowrap">/tree</code>
+                <span className="text-xs">Show agent hierarchy</span>
+              </div>
+              <div className="flex gap-2 items-baseline">
+                <code className="text-[#0055FF] font-bold bg-white border border-black px-1.5 py-0.5 text-[10px] whitespace-nowrap">/context</code>
+                <span className="text-xs">Check context usage</span>
+              </div>
+              <div className="flex gap-2 items-baseline">
+                <code className="text-[#0055FF] font-bold bg-white border border-black px-1.5 py-0.5 text-[10px] whitespace-nowrap">/export</code>
+                <span className="text-xs">Export session</span>
               </div>
             </div>
+            <div className="mt-3 pt-2 border-t border-[#e1e1ef]">
+              <span className="font-[var(--font-terminal)] text-[10px] text-[#737688]">
+                Type <code className="text-[#0055FF] font-bold">/help</code> to see all {19} commands
+              </span>
+            </div>
           </div>
+
+          <div className="flex items-start gap-2">
+            <span className="material-symbols-outlined text-xs text-[#737688] mt-0.5">lightbulb</span>
+            <p className="font-[var(--font-terminal)] text-xs text-[#737688]">
+              Tip: Describe what you want — the Producer orchestrates everything. It decides which agents to spawn, delegates tasks, and manages the pipeline. No need to micromanage.
+            </p>
+          </div>
+
           <span className="font-[var(--font-terminal)] text-[10px] text-[#737688] block mt-3 text-right">
             {formatTime(msg.timestamp)} UTC
           </span>
@@ -596,7 +642,7 @@ export default function ChatThread({ messages, sessions, threadId, threadTitle, 
         {showSamplePrompts && (
           <div className="border-2 border-black bg-white shadow-[4px_4px_0_0_rgba(0,0,0,1)] p-5 self-start max-w-2xl">
             <div className="font-[var(--font-terminal)] text-xs uppercase tracking-widest text-[#737688] mb-3">
-              Try one of these to get started:
+              Or pick a starting point:
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               {SAMPLE_PROMPTS.map((sp) => (

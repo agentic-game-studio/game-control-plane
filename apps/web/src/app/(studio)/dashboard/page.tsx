@@ -27,7 +27,7 @@ interface ServerStatus {
 }
 
 export default function DashboardPage() {
-  const { data, loading, error, retry, createProject } = useDashboard();
+  const { data, loading, error, retry, createProject, deleteProject } = useDashboard();
   const { currentProject, selectProject } = useProject();
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [mcpStatuses, setMcpStatuses] = useState<Record<string, MCPStatus>>({});
@@ -186,6 +186,7 @@ export default function DashboardPage() {
               currentProject={currentProject}
               onSelectProject={(project) => selectProject(project.id)}
               onNewProject={() => setIsModalOpen(true)}
+              onDeleteProject={deleteProject}
               mcpStatuses={mcpStatuses}
               onLaunchEditor={launchEditor}
             />

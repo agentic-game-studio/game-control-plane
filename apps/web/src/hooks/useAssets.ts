@@ -24,15 +24,17 @@ const DEFAULT_ASSETS: AssetsData = {
   },
 };
 
-export function useAssets() {
+export function useAssets(projectId?: string) {
   const [data, setData] = useState<AssetsData>(DEFAULT_ASSETS);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const lastProjectId = useRef<string | undefined>(projectId);
 
   const fetchAssets = useCallback(async () => {
     try {
-      const result = await apiFetch<AssetsData>("/api/assets");
+      const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+      const result = await apiFetch<AssetsData>(`/api/assets${qs}`);
       setData(result);
       setError(null);
     } catch (err) {
@@ -42,11 +44,21 @@ export function useAssets() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [projectId]);
 
   useEffect(() => {
+    setLoading(true);
     fetchAssets();
   }, [fetchAssets]);
+
+  // Auto-refresh when projectId changes
+  useEffect(() => {
+    if (lastProjectId.current !== projectId) {
+      lastProjectId.current = projectId;
+      setLoading(true);
+      fetchAssets();
+    }
+  }, [projectId, fetchAssets]);
 
   const onWSEvent = useCallback(
     (event: WSEvent) => {
@@ -87,7 +99,8 @@ export function useAssets() {
 
   const updateAsset = useCallback(
     async (id: string, updates: UpdateAssetRequest) => {
-      const updated = await apiFetch<GameAsset>(`/api/assets/${id}`, {
+      const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+      const updated = await apiFetch<GameAsset>(`/api/assets/${id}${qs}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(updates),
@@ -95,7 +108,7 @@ export function useAssets() {
       await fetchAssets();
       return updated;
     },
-    [fetchAssets]
+    [fetchAssets, projectId]
   );
 
   const deleteAsset = useCallback(
@@ -173,6 +186,20 @@ export function useAssets() {
     [fetchAssets]
   );
 
+  const rescan = useCallback(async () => {
+    setLoading(true);
+    const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+    try {
+      const result = await apiFetch<AssetsData>(`/api/assets${qs}`);
+      setData(result);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Rescan failed");
+    } finally {
+      setLoading(false);
+    }
+  }, [projectId]);
+
   const retry = useCallback(() => {
     setLoading(true);
     fetchAssets();
@@ -183,6 +210,7 @@ export function useAssets() {
     loading,
     error,
     retry,
+    rescan,
     createAsset,
     updateAsset,
     deleteAsset,

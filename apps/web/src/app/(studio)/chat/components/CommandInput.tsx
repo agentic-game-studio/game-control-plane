@@ -5,20 +5,32 @@ import { useState, useRef, useEffect, type KeyboardEvent } from "react";
 interface CommandInputProps {
   onSend: (input: string, images?: string[]) => void;
   isLoading?: boolean;
+  queueCount?: number;
 }
 
 const COMMANDS = [
-  { cmd: "/spawn", desc: "Bring an agent online" },
+  { cmd: "/autonomous", desc: "Start autonomous production loop" },
+  { cmd: "/spawn", desc: "Bring an agent online (manual)" },
   { cmd: "/approve", desc: "Approve last agent request" },
   { cmd: "/done", desc: "Complete agent task" },
   { cmd: "/compact", desc: "Compact session into new generation" },
   { cmd: "/clear", desc: "Clear the chat" },
+  { cmd: "/stop", desc: "Stop processing + clear queue" },
   { cmd: "/help", desc: "Show available commands" },
-  { cmd: "/cost", desc: "Show mock token usage" },
+  { cmd: "/cost", desc: "Show token usage (legacy)" },
   { cmd: "/diff", desc: "Show recent changes" },
+  { cmd: "/plan", desc: "Create execution plan" },
+  { cmd: "/sprint", desc: "Summarize current sprint" },
+  { cmd: "/verify", desc: "Run auto-verification" },
+  { cmd: "/context", desc: "Show context window usage" },
+  { cmd: "/inject", desc: "Inject context into producer" },
+  { cmd: "/consult", desc: "Consult a director" },
+  { cmd: "/tree", desc: "Show agent hierarchy" },
+  { cmd: "/mcp", desc: "Check Godot MCP status" },
+  { cmd: "/export", desc: "Export session as markdown" },
 ];
 
-export default function CommandInput({ onSend, isLoading }: CommandInputProps) {
+export default function CommandInput({ onSend, isLoading, queueCount = 0 }: CommandInputProps) {
   const [value, setValue] = useState("");
   const [showHints, setShowHints] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -148,11 +160,14 @@ export default function CommandInput({ onSend, isLoading }: CommandInputProps) {
               onChange={handleChange}
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
-              disabled={isLoading}
-              className={`w-full h-12 border-2 border-black bg-white p-3 font-[var(--font-terminal)] text-base focus:outline-none focus:ring-2 focus:ring-[#0055FF] resize-none ${
-                isLoading ? "opacity-50 cursor-not-allowed bg-[#f3f2ff]" : ""
-              }`}
-              placeholder={isLoading ? "Processing..." : "Enter command or reply..."}
+              className="w-full h-12 border-2 border-black bg-white p-3 font-[var(--font-terminal)] text-base focus:outline-none focus:ring-2 focus:ring-[#0055FF] resize-none"
+              placeholder={
+                queueCount > 0
+                  ? `${queueCount} in queue — type to add more...`
+                  : isLoading
+                    ? "Processing... (type to queue next)"
+                    : "Enter command or reply..."
+              }
             />
 
             {/* Slash command hints */}
@@ -183,19 +198,16 @@ export default function CommandInput({ onSend, isLoading }: CommandInputProps) {
           </div>
           <button
             onClick={() => handleSend()}
-            disabled={isLoading}
             className={`h-12 px-6 border-2 border-black font-[var(--font-label)] text-xs font-bold uppercase retro-press flex items-center gap-2 transition-colors ${
               isLoading
-                ? "bg-[#e7e7f5] text-[#737688] cursor-not-allowed shadow-none"
+                ? "bg-[#0055FF] text-white shadow-[2px_2px_0_0_rgba(0,85,255,1)]"
                 : "bg-black text-white hover:bg-[#0055FF] shadow-[2px_2px_0_0_rgba(0,85,255,1)]"
             }`}
           >
-            <span
-              className={`material-symbols-outlined text-sm ${isLoading ? "animate-spin" : ""}`}
-            >
-              {isLoading ? "sync" : "send"}
+            <span className="material-symbols-outlined text-sm">
+              {queueCount > 0 ? "playlist_add" : isLoading ? "sync" : "send"}
             </span>
-            {isLoading ? "WORKING..." : "EXECUTE"}
+            {queueCount > 0 ? `QUEUE +${queueCount}` : isLoading ? "WORKING..." : "EXECUTE"}
           </button>
         </div>
       </div>

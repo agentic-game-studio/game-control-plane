@@ -13,6 +13,7 @@ import { startWorkflow, advanceStage, completeWorkflow, cleanupWorkflow, getWork
 import { triggerVerification } from "../services/verification-service.js";
 import { getOrCreateGodotMCPService, removeGodotMCPService, launchGodotEditor, type GodotMCPServiceOptions } from "../services/godot-mcp-service.js";
 import { logger } from "../utils/logger.js";
+import { resolveProjectWorkspace } from "../utils/workspace.js";
 import { loadConfig } from "../config.js";
 import { getModelContextWindow, getZaiModel, MAX_CONTEXT_TOKENS, CHARS_PER_TOKEN_ESTIMATE } from "../config/model-mapping.js";
 
@@ -429,8 +430,7 @@ chatRouter.get("/sessions/producer/:projectId", async (req: Request, res: Respon
 
     // Auto-launch Godot editor
     if (project.workspacePath) {
-      const config = loadConfig();
-      const projectDir = join(config.WORKSPACE_DIR, project.workspacePath);
+      const projectDir = resolveProjectWorkspace(project.workspacePath);
       const launchResult = launchGodotEditor(projectDir);
       if (launchResult.success) {
         logger.info({ projectId, pid: launchResult.pid, event: "godot_editor_launched" }, "Godot editor auto-launched");
@@ -1322,8 +1322,7 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
 
     // Auto-launch Godot editor
     if (project.workspacePath) {
-      const config = loadConfig();
-      const projectDir = join(config.WORKSPACE_DIR, project.workspacePath);
+      const projectDir = resolveProjectWorkspace(project.workspacePath);
       const launchResult = launchGodotEditor(projectDir);
       if (launchResult.success) {
         logger.info({ projectId, pid: launchResult.pid, event: "godot_editor_launched" }, "Godot editor auto-launched for agent spawn");

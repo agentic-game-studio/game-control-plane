@@ -4,6 +4,7 @@ import { useState } from "react";
 import type { Project } from "@game-studio/types";
 import { ProjectCard } from "./ProjectCard";
 import { ConfirmSwitchModal } from "./ConfirmSwitchModal";
+import { DeleteConfirmModal } from "./DeleteConfirmModal";
 
 interface MCPStatus {
   status: "not_running" | "connected" | "disconnected";
@@ -18,6 +19,7 @@ interface ProjectGridProps {
   currentProject: Project | null;
   onSelectProject: (project: Project) => void;
   onNewProject: () => void;
+  onDeleteProject?: (id: string) => void;
   mcpStatuses?: Record<string, MCPStatus>;
   onLaunchEditor?: (projectId: string) => void;
 }
@@ -27,10 +29,16 @@ export function ProjectGrid({
   currentProject,
   onSelectProject,
   onNewProject,
+  onDeleteProject,
   mcpStatuses = {},
   onLaunchEditor,
 }: ProjectGridProps) {
   const [pendingProject, setPendingProject] = useState<Project | null>(null);
+  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
+
+  const pendingDeleteProject = pendingDeleteId
+    ? projects.find((p) => p.id === pendingDeleteId) ?? null
+    : null;
 
   const handleCardClick = (project: Project) => {
     if (project.id === currentProject?.id) return;
@@ -41,6 +49,13 @@ export function ProjectGrid({
     if (pendingProject) {
       onSelectProject(pendingProject);
       setPendingProject(null);
+    }
+  };
+
+  const handleConfirmDelete = () => {
+    if (pendingDeleteId && onDeleteProject) {
+      onDeleteProject(pendingDeleteId);
+      setPendingDeleteId(null);
     }
   };
 
@@ -100,6 +115,7 @@ export function ProjectGrid({
             project={project}
             isSelected={project.id === currentProject?.id}
             onClick={() => handleCardClick(project)}
+            onRequestDelete={onDeleteProject ? (id) => setPendingDeleteId(id) : undefined}
             mcpStatus={mcpStatuses[project.id]}
             onLaunchEditor={onLaunchEditor ? () => onLaunchEditor(project.id) : undefined}
           />
@@ -136,6 +152,14 @@ export function ProjectGrid({
         isOpen={pendingProject !== null}
         onClose={() => setPendingProject(null)}
         onConfirm={handleConfirmSwitch}
+      />
+
+      {/* Delete Confirm Modal */}
+      <DeleteConfirmModal
+        project={pendingDeleteProject}
+        isOpen={pendingDeleteId !== null}
+        onClose={() => setPendingDeleteId(null)}
+        onConfirm={handleConfirmDelete}
       />
     </div>
   );

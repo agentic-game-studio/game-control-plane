@@ -3,6 +3,8 @@
 import { useState, useCallback } from "react";
 import { Modal, FormField } from "@/components/Modal";
 import type { ProjectIcon, CreateProjectRequest } from "@game-studio/types";
+import { apiFetch } from "@/lib/api";
+import { DirectoryBrowser } from "./DirectoryBrowser";
 
 const PROJECT_ICONS: ProjectIcon[] = [
   "folder",
@@ -19,6 +21,14 @@ const PROJECT_ICONS: ProjectIcon[] = [
   "animation",
 ];
 
+interface PathValidation {
+  valid: boolean;
+  resolved: string;
+  exists: boolean;
+  isDirectory: boolean;
+  error?: string;
+}
+
 interface NewProjectModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -30,24 +40,45 @@ export function NewProjectModal({ isOpen, onClose, onSubmit }: NewProjectModalPr
   const [description, setDescription] = useState("");
   const [icon, setIcon] = useState<ProjectIcon>("folder");
   const [workspacePath, setWorkspacePath] = useState<string | null>(null);
-  const [pickerError, setPickerError] = useState<string | null>(null);
+  const [pathValidation, setPathValidation] = useState<PathValidation | null>(null);
+  const [validating, setValidating] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [browserOpen, setBrowserOpen] = useState(false);
 
-  const handlePickFolder = useCallback(async () => {
-    setPickerError(null);
-    const w = window as typeof window & { showDirectoryPicker?: () => Promise<{ name: string }> };
-    if (typeof window === "undefined" || typeof w.showDirectoryPicker !== "function") {
-      setPickerError("Browser does not support folder picker. Use text input below.");
+  const validatePath = useCallback(async (path: string) => {
+    if (!path.trim()) {
+      setPathValidation(null);
       return;
     }
+    setValidating(true);
     try {
-      const handle = await w.showDirectoryPicker();
-      setWorkspacePath(handle.name);
+      const result = await apiFetch<{ success: boolean; data: PathValidation }>(
+        "/api/dashboard/validate-path",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: path.trim() }),
+        }
+      );
+      setPathValidation(result.data);
     } catch {
-      // User cancelled or denied permission
-      setPickerError("Folder selection cancelled. Use text input below.");
+      setPathValidation(null);
+    } finally {
+      setValidating(false);
     }
+  }, []);
+
+  const handlePathBlur = useCallback(() => {
+    if (workspacePath) {
+      validatePath(workspacePath);
+    }
+  }, [workspacePath, validatePath]);
+
+  const handlePathChange = useCallback((value: string) => {
+    setWorkspacePath(value || null);
+    setPathValidation(null);
+    setSubmitError(null);
   }, []);
 
   const handleSubmit = useCallback(async () => {
@@ -64,6 +95,17 @@ export function NewProjectModal({ isOpen, onClose, onSubmit }: NewProjectModalPr
       return;
     }
 
+    // Validate absolute path before submit
+    if (workspacePath && workspacePath.startsWith("/")) {
+      if (!pathValidation) {
+        await validatePath(workspacePath);
+      }
+      if (pathValidation && !pathValidation.valid) {
+        setSubmitError(pathValidation.error ?? "Invalid workspace path");
+        return;
+      }
+    }
+
     setSubmitting(true);
     setSubmitError(null);
 
@@ -73,29 +115,30 @@ export function NewProjectModal({ isOpen, onClose, onSubmit }: NewProjectModalPr
         description: description.trim() || undefined,
         icon,
         workspacePath,
-        engine: undefined, // null by default on backend
+        engine: undefined,
       });
       // Reset form
       setName("");
       setDescription("");
       setIcon("folder");
       setWorkspacePath(null);
-      setPickerError(null);
+      setPathValidation(null);
       onClose();
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : "Failed to create project");
     } finally {
       setSubmitting(false);
     }
-  }, [name, description, icon, workspacePath, onSubmit, onClose]);
+  }, [name, description, icon, workspacePath, pathValidation, validatePath, onSubmit, onClose]);
 
   const handleClose = useCallback(() => {
     setSubmitError(null);
-    setPickerError(null);
+    setPathValidation(null);
     onClose();
   }, [onClose]);
 
   return (
+    <>
     <Modal
       isOpen={isOpen}
       onClose={handleClose}
@@ -150,39 +193,60 @@ export function NewProjectModal({ isOpen, onClose, onSubmit }: NewProjectModalPr
           </div>
         </FormField>
 
-        {/* Folder Picker */}
+        {/* Workspace Directory */}
         <FormField label="Workspace Directory">
           <div className="flex flex-col gap-2">
             <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={workspacePath ?? ""}
+                onChange={(e) => handlePathChange(e.target.value)}
+                onBlur={handlePathBlur}
+                className="flex-1 border-2 border-black bg-[#faf8ff] p-2 font-[var(--font-mono)] text-sm focus:outline-none focus:bg-white"
+                placeholder="/Users/you/my-game or my-game (relative)"
+              />
               <button
                 type="button"
-                onClick={handlePickFolder}
-                className="border-2 border-black bg-[#f3f2ff] px-4 py-2 font-[var(--font-label)] text-xs font-bold uppercase hover:bg-black hover:text-white transition-colors"
+                onClick={() => setBrowserOpen(true)}
+                className="shrink-0 border-2 border-black bg-[#f3f2ff] px-3 py-2 font-[var(--font-label)] text-[10px] font-bold uppercase hover:bg-black hover:text-white transition-colors"
               >
-                Select Folder
+                BROWSE
               </button>
-              {workspacePath ? (
-                <span className="font-[var(--font-terminal)] text-xs text-[#434656] truncate">
-                  {workspacePath}
-                </span>
-              ) : (
-                <span className="font-[var(--font-terminal)] text-xs text-[#737688]">
-                  No directory selected
-                </span>
+              {workspacePath && (
+                <button
+                  type="button"
+                  onClick={() => workspacePath && validatePath(workspacePath)}
+                  disabled={validating}
+                  className="shrink-0 border-2 border-black bg-[#f3f2ff] px-3 py-2 font-[var(--font-label)] text-[10px] font-bold uppercase hover:bg-black hover:text-white transition-colors disabled:opacity-50"
+                >
+                  {validating ? "..." : "CHECK"}
+                </button>
               )}
             </div>
-            {pickerError && (
-              <span className="font-[var(--font-terminal)] text-xs text-[#737688]">
-                {pickerError}
-              </span>
+            {/* Path validation feedback */}
+            {pathValidation && workspacePath && (
+              <div className={`flex items-center gap-2 px-2 py-1 border ${
+                pathValidation.valid
+                  ? "border-[#2ECC71] bg-[#2ECC71]/10"
+                  : "border-[#df2b31] bg-[#df2b31]/10"
+              }`}>
+                <span className={`material-symbols-outlined text-sm ${
+                  pathValidation.valid ? "text-[#2ECC71]" : "text-[#df2b31]"
+                }`}>
+                  {pathValidation.valid ? "check_circle" : "cancel"}
+                </span>
+                <span className={`font-[var(--font-terminal)] text-[10px] ${
+                  pathValidation.valid ? "text-[#2ECC71]" : "text-[#df2b31]"
+                }`}>
+                  {pathValidation.valid
+                    ? pathValidation.resolved
+                    : pathValidation.error ?? "Invalid path"}
+                </span>
+              </div>
             )}
-            <input
-              type="text"
-              value={workspacePath ?? ""}
-              onChange={(e) => setWorkspacePath(e.target.value || null)}
-              className="w-full border-2 border-black bg-[#faf8ff] p-2 font-[var(--font-terminal)] text-sm focus:outline-none focus:bg-white"
-              placeholder="Or enter directory path manually..."
-            />
+            <span className="font-[var(--font-terminal)] text-[10px] text-[#737688]">
+              Absolute path to link an existing project, or relative name to create inside workspace.
+            </span>
           </div>
         </FormField>
 
@@ -196,6 +260,18 @@ export function NewProjectModal({ isOpen, onClose, onSubmit }: NewProjectModalPr
           </div>
         )}
       </div>
-    </Modal>
+
+      </Modal>
+
+      <DirectoryBrowser
+        isOpen={browserOpen}
+        onClose={() => setBrowserOpen(false)}
+        onSelect={(selectedPath) => {
+          handlePathChange(selectedPath);
+          validatePath(selectedPath);
+        }}
+        initialPath={workspacePath?.startsWith("/") ? workspacePath : undefined}
+      />
+    </>
   );
 }
