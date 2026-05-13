@@ -205,6 +205,10 @@ function hashToolInput(input: Record<string, unknown>): string {
   }
 }
 
+// Exploration tools legitimately call many different files/patterns in a row.
+// Only flag them as looping when the exact same call repeats (identical args).
+const EXPLORATION_TOOLS = new Set(["Read", "Glob", "Grep"]);
+
 function detectRepetitiveLoop(recentCalls: Array<{ name: string; inputHash: string }>): { detected: boolean; message?: string } {
   if (recentCalls.length < MAX_CONSECUTIVE_SAME_TOOL_CALLS) return { detected: false };
 
@@ -220,9 +224,11 @@ function detectRepetitiveLoop(recentCalls: Array<{ name: string; inputHash: stri
     };
   }
 
-  // Check for same tool name 4+ times
+  // Check for same tool name 6+ times — skip exploration tools since reading
+  // many different files or globbing many patterns is normal.
   const toolCounts = new Map<string, number>();
   for (const call of recentCalls) {
+    if (EXPLORATION_TOOLS.has(call.name)) continue;
     toolCounts.set(call.name, (toolCounts.get(call.name) || 0) + 1);
   }
   const maxCount = Math.max(...Array.from(toolCounts.values()));
