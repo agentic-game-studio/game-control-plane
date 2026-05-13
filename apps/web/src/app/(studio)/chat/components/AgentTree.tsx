@@ -3,13 +3,14 @@
 import { useState, useMemo } from "react";
 import { AGENT_TREE, getAgentIcon } from "@/lib/agent-icons";
 import type { AgentTreeNode } from "@/lib/agent-icons";
-import type { AgentSession, SubagentInfo } from "@/hooks/useCommandRoom";
+import type { AgentSession, ProducerUIState, SubagentInfo } from "@/hooks/useCommandRoom";
 
 interface AgentTreeProps {
   sessions: Map<string, AgentSession>;
   subagents: Map<string, SubagentInfo>;
   currentSession: string;
   totalProgress: number;
+  producerState?: ProducerUIState;
   onSelectSession: (sessionId: string) => void;
   onCloseSession?: (sessionId: string) => void;
   onSelectSubagent?: (subagent: SubagentInfo) => void;
@@ -210,7 +211,7 @@ function SubagentCard({ subagent, onSelect }: { subagent: SubagentInfo; onSelect
 
 /* ─── Main Sidebar ─── */
 
-export default function AgentTree({ sessions, subagents, currentSession, totalProgress, onSelectSession, onCloseSession, onSelectSubagent }: AgentTreeProps) {
+export default function AgentTree({ sessions, subagents, currentSession, totalProgress, producerState, onSelectSession, onCloseSession, onSelectSubagent }: AgentTreeProps) {
   const [showHierarchy, setShowHierarchy] = useState(false);
   const entries = useMemo(() => [...sessions.entries()], [sessions]);
   const producerEntry = useMemo(() => entries.find(([, s]) => s.role === "producer"), [entries]);
@@ -232,6 +233,10 @@ export default function AgentTree({ sessions, subagents, currentSession, totalPr
   const backgroundTasks = useMemo(() =>
     entries.filter(([, s]) => s.role !== "producer"),
     [entries]);
+
+  const activeBackgroundTasks = useMemo(() =>
+    backgroundTasks.filter(([, s]) => s.status === "active"),
+    [backgroundTasks]);
 
   const treeData = showHierarchy ? AGENT_TREE : [];
 
@@ -272,12 +277,93 @@ export default function AgentTree({ sessions, subagents, currentSession, totalPr
               </div>
               <div className="text-left flex-1 min-w-0">
                 <div className="font-[var(--font-label)] text-xs font-bold uppercase">PRODUCER</div>
-                <div className="font-[var(--font-terminal)] text-[10px] flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 bg-[#df2b31] border border-black inline-block animate-pulse" />
-                  ORCHESTRATOR — ONLINE
+                <div className="font-[var(--font-terminal)] text-[10px] flex items-center gap-1.5 flex-wrap">
+                  <span
+                    className={`w-1.5 h-1.5 border border-black inline-block ${
+                      producerState?.mode === "thinking"
+                        ? "bg-[#df2b31] animate-pulse"
+                        : producerState?.mode === "delegated"
+                          ? "bg-[#FF9500]"
+                          : "bg-[#2ECC71]"
+                    }`}
+                  />
+                  <span>
+                    {producerState?.mode === "thinking"
+                      ? "THINKING"
+                      : producerState?.mode === "delegated"
+                        ? "AVAILABLE · DELEGATED WORK IN FLIGHT"
+                        : "AVAILABLE"}
+                  </span>
                 </div>
+                {producerState && (
+                  <div className="mt-1 flex items-center gap-1.5 flex-wrap">
+                    <span className="px-1.5 py-0.5 border border-black bg-black text-white font-[var(--font-terminal)] text-[9px] uppercase">
+                      {producerState.label}
+                    </span>
+                    {(producerState.activeDelegatedSessions > 0 || producerState.activeDelegatedSubagents > 0) && (
+                      <span className="font-[var(--font-terminal)] text-[9px] uppercase opacity-80">
+                        {producerState.activeDelegatedSessions} agents · {producerState.activeDelegatedSubagents} subagents
+                      </span>
+                    )}
+                  </div>
+                )}
+                {producerState && (
+                  <div className="font-[var(--font-terminal)] text-[9px] mt-1 opacity-80 line-clamp-2">
+                    {producerState.detail}
+                  </div>
+                )}
               </div>
             </button>
+          </div>
+        )}
+
+        {(activeBackgroundTasks.length > 0 || activeSubagents.length > 0) && (
+          <div className="px-4 pb-3">
+            <div className="border-2 border-black bg-[#fffdf7] shadow-[3px_3px_0_0_rgba(0,0,0,1)]">
+              <div className="px-3 py-2 border-b-2 border-black bg-[#191b25] text-white flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="material-symbols-outlined text-sm">hub</span>
+                  <span className="font-[var(--font-label)] text-[10px] font-bold uppercase tracking-[0.16em]">
+                    In Flight
+                  </span>
+                </div>
+                <span className="font-[var(--font-terminal)] text-[10px] uppercase opacity-80">
+                  {activeBackgroundTasks.length + activeSubagents.length} active
+                </span>
+              </div>
+              <div className="px-3 py-2 space-y-2">
+                {activeBackgroundTasks.slice(0, 3).map(([id, session]) => (
+                  <button
+                    key={id}
+                    onClick={() => onSelectSession(id)}
+                    className="w-full flex items-center gap-2 text-left border border-black bg-white px-2 py-1.5 hover:bg-[#f3f2ff] transition-colors"
+                  >
+                    <span className="material-symbols-outlined text-sm">{getAgentIcon(session.role)}</span>
+                    <span className="font-[var(--font-label)] text-[10px] font-bold uppercase truncate flex-1">
+                      {session.role.replace(/-/g, "_")}
+                    </span>
+                    <span className="font-[var(--font-terminal)] text-[9px] uppercase text-[#737688]">
+                      {session.progress > 0 ? `${session.progress}%` : "running"}
+                    </span>
+                  </button>
+                ))}
+                {activeSubagents.slice(0, 2).map((subagent) => (
+                  <button
+                    key={subagent.id}
+                    onClick={() => onSelectSubagent?.(subagent)}
+                    className="w-full flex items-center gap-2 text-left border border-black bg-[#f9f8ff] px-2 py-1.5 hover:bg-[#f3f2ff] transition-colors"
+                  >
+                    <span className="material-symbols-outlined text-sm">{getAgentIcon(subagent.role)}</span>
+                    <span className="font-[var(--font-label)] text-[10px] font-bold uppercase truncate flex-1">
+                      {subagent.role.replace(/-/g, "_")}
+                    </span>
+                    <span className="font-[var(--font-terminal)] text-[9px] uppercase text-[#737688]">
+                      subagent
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
         )}
 

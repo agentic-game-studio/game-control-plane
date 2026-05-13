@@ -1,6 +1,7 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
-import { readData, writeData, broadcastEvent } from "../services/data-store.js";
+import { broadcastEvent } from "../services/data-store.js";
+import { DEFAULT_TICKETS_BOARD, readTicketsBoard, writeTicketsBoard } from "../services/ticket-board.js";
 import type {
   TicketsBoard,
   Ticket,
@@ -11,36 +12,32 @@ import type {
 } from "@game-studio/types";
 import type { WSEvent } from "@game-studio/types";
 
-const DEFAULT_BOARD: TicketsBoard = {
-  sprint: "Sprint_01",
-  milestone: "Alpha_Milestone",
-  columns: [
-    { id: "available", label: "Available", tickets: [] },
-    { id: "in_progress", label: "Processing", tickets: [] },
-    { id: "qa", label: "Verify", tickets: [] },
-    { id: "completed", label: "Archived", tickets: [] },
-  ],
-};
-
 export const ticketsRouter: Router = Router();
 
-// GET /api/tickets - Get all tickets board
-ticketsRouter.get("/", async (_req: Request, res: Response) => {
+function getProjectId(req: Request): string | null {
+  const queryProjectId = typeof req.query.projectId === "string" ? req.query.projectId : null;
+  const bodyProjectId = req.body && typeof req.body.projectId === "string" ? req.body.projectId : null;
+  return queryProjectId ?? bodyProjectId ?? null;
+}
+
+// GET /api/tickets - Get all tickets board for the specified project
+ticketsRouter.get("/", async (req: Request, res: Response) => {
+  const projectId = getProjectId(req);
   try {
-    const data = await readData<TicketsBoard>("tickets.json");
+    const data = await readTicketsBoard(projectId);
     res.json({ success: true, data });
   } catch {
-    // Initialize with default data if file doesn't exist
-    await writeData("tickets.json", DEFAULT_BOARD);
-    res.json({ success: true, data: DEFAULT_BOARD });
+    await writeTicketsBoard(DEFAULT_TICKETS_BOARD, projectId);
+    res.json({ success: true, data: DEFAULT_TICKETS_BOARD });
   }
 });
 
 // GET /api/tickets/:id - Get ticket by ID
 ticketsRouter.get("/:id", async (req: Request, res: Response) => {
   const { id } = req.params;
+  const projectId = getProjectId(req);
   try {
-    const data = await readData<TicketsBoard>("tickets.json");
+    const data = await readTicketsBoard(projectId);
     const ticket = data.columns.flatMap((col) => col.tickets).find((t) => t.id === id);
     if (!ticket) {
       res.status(404).json({ success: false, error: "Ticket not found" });
@@ -65,12 +62,14 @@ ticketsRouter.post("/", async (req: Request, res: Response) => {
   }
 
   try {
-    const data = await readData<TicketsBoard>("tickets.json");
+    const projectId = getProjectId(req);
+    const data = await readTicketsBoard(projectId);
     const now = new Date().toISOString();
     const status: TicketStatus = body.status ?? "available";
 
     const newTicket: Ticket = {
       id: `ticket-${Date.now()}`,
+      projectId: projectId ?? undefined,
       title: body.title,
       description: body.description ?? "",
       area: body.area,
@@ -93,12 +92,13 @@ ticketsRouter.post("/", async (req: Request, res: Response) => {
       data.columns[0].tickets.push(newTicket);
     }
 
-    await writeData("tickets.json", data);
+    await writeTicketsBoard(data, projectId);
 
     // Broadcast event
     broadcastEvent({
       type: "ticket:created",
       ticket: newTicket,
+      projectId,
     } as WSEvent);
 
     res.status(201).json({ success: true, data: newTicket });
@@ -111,9 +111,10 @@ ticketsRouter.post("/", async (req: Request, res: Response) => {
 ticketsRouter.patch("/:id", async (req: Request, res: Response) => {
   const { id } = req.params;
   const updates = req.body as UpdateTicketRequest;
+  const projectId = getProjectId(req);
 
   try {
-    const data = await readData<TicketsBoard>("tickets.json");
+    const data = await readTicketsBoard(projectId);
 
     // Find the ticket
     let ticket: Ticket | undefined;
@@ -139,17 +140,19 @@ ticketsRouter.patch("/:id", async (req: Request, res: Response) => {
     const updatedTicket: Ticket = {
       ...ticket,
       ...updates,
+      projectId: ticket.projectId ?? projectId ?? undefined,
       id: ticketId, // Ensure ID cannot be changed
       updatedAt: new Date().toISOString(),
     };
 
     data.columns[ticketColumn].tickets[ticketIndex] = updatedTicket;
-    await writeData("tickets.json", data);
+    await writeTicketsBoard(data, projectId);
 
     // Broadcast event
     broadcastEvent({
       type: "ticket:updated",
       ticket: updatedTicket,
+      projectId,
     } as WSEvent);
 
     res.json({ success: true, data: updatedTicket });
@@ -162,6 +165,7 @@ ticketsRouter.patch("/:id", async (req: Request, res: Response) => {
 ticketsRouter.patch("/:id/move", async (req: Request, res: Response) => {
   const { id } = req.params;
   const { status } = req.body as MoveTicketRequest;
+  const projectId = getProjectId(req);
 
   if (!status) {
     res.status(400).json({ success: false, error: "status is required" });
@@ -169,7 +173,7 @@ ticketsRouter.patch("/:id/move", async (req: Request, res: Response) => {
   }
 
   try {
-    const data = await readData<TicketsBoard>("tickets.json");
+    const data = await readTicketsBoard(projectId);
 
     // Find the ticket
     let ticket: Ticket | undefined;
@@ -205,12 +209,13 @@ ticketsRouter.patch("/:id/move", async (req: Request, res: Response) => {
     // Update status and add to new column
     const updatedTicket: Ticket = {
       ...ticket,
+      projectId: ticket.projectId ?? projectId ?? undefined,
       status,
       updatedAt: new Date().toISOString(),
     };
 
     data.columns[toColumnIndex].tickets.push(updatedTicket);
-    await writeData("tickets.json", data);
+    await writeTicketsBoard(data, projectId);
 
     // Broadcast event
     broadcastEvent({
@@ -218,6 +223,7 @@ ticketsRouter.patch("/:id/move", async (req: Request, res: Response) => {
       ticket: updatedTicket,
       fromColumn: fromColumnId,
       toColumn: status,
+      projectId,
     } as WSEvent);
 
     res.json({ success: true, data: updatedTicket });
@@ -229,9 +235,10 @@ ticketsRouter.patch("/:id/move", async (req: Request, res: Response) => {
 // DELETE /api/tickets/:id - Delete ticket
 ticketsRouter.delete("/:id", async (req: Request, res: Response) => {
   const { id } = req.params;
+  const projectId = getProjectId(req);
 
   try {
-    const data = await readData<TicketsBoard>("tickets.json");
+    const data = await readTicketsBoard(projectId);
 
     let found = false;
     for (const column of data.columns) {
@@ -248,12 +255,13 @@ ticketsRouter.delete("/:id", async (req: Request, res: Response) => {
       return;
     }
 
-    await writeData("tickets.json", data);
+    await writeTicketsBoard(data, projectId);
 
     // Broadcast event
     broadcastEvent({
       type: "ticket:deleted",
       ticketId: id,
+      projectId,
     } as WSEvent);
 
     res.json({ success: true });

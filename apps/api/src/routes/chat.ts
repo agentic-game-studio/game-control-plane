@@ -2,6 +2,7 @@ import { Router } from "express";
 import type { Request, Response } from "express";
 import { join } from "node:path";
 import type { AgentRole, ChatSession, ChatMessage, CreateMessageRequest, CreateChatSessionRequest, ContextUsage, DashboardData, Project, ProjectEngine } from "@game-studio/types";
+import { emptyProducerSummarySnapshot, ingestProducerSummaryFact } from "../services/producer-summary.js";
 import type { LLMMessage } from "../llm/zai-client.js";
 import { broadcastEvent, readData, writeData } from "../services/data-store.js";
 import { invokeAgent, continueConversation, type ProjectContext, detectEngineFromWorkspace } from "../services/llm-service.js";
@@ -15,7 +16,7 @@ import { getOrCreateGodotMCPService, removeGodotMCPService, launchGodotEditor, t
 import { logger } from "../utils/logger.js";
 import { resolveProjectWorkspace } from "../utils/workspace.js";
 import { loadConfig } from "../config.js";
-import { getModelContextWindow, getZaiModel, MAX_CONTEXT_TOKENS, CHARS_PER_TOKEN_ESTIMATE } from "../config/model-mapping.js";
+import { getModelContextWindow, getModelForTier, MAX_CONTEXT_TOKENS, CHARS_PER_TOKEN_ESTIMATE } from "../config/model-mapping.js";
 
 export const chatRouter: Router = Router();
 
@@ -155,10 +156,10 @@ function pruneConversationHistory(history: LLMMessage[]): LLMMessage[] {
   if (!history || history.length === 0) return history;
 
   const estTokens = Math.ceil(
-    history.reduce(
-      (sum, m) => sum + (typeof m.content === "string" ? m.content.length : 0),
-      0
-    ) / CHARS_PER_TOKEN_ESTIMATE
+    history.reduce((sum, m) => {
+      if (typeof m.content === "string") return sum + m.content.length;
+      return sum + m.content.reduce((s, c) => s + (c.type === "text" ? c.text.length : 1000), 0);
+    }, 0) / CHARS_PER_TOKEN_ESTIMATE
   );
   if (estTokens <= MAX_CONTEXT_TOKENS) return history;
 
@@ -216,6 +217,9 @@ async function loadChatState(): Promise<ChatState> {
       if (!session.currentTask) session.currentTask = "";
       if (session.cumulativeInputTokens === undefined) session.cumulativeInputTokens = 0;
       if (session.cumulativeOutputTokens === undefined) session.cumulativeOutputTokens = 0;
+      if (!session.producerSummary) {
+        session.producerSummary = emptyProducerSummarySnapshot();
+      }
       state.sessions[key] = session;
     }
     if (migrateLegacyProducer(state)) {
@@ -244,6 +248,11 @@ async function saveChatState(): Promise<void> {
   await writeData(CHAT_STATE_FILE, chatStore);
 }
 
+/** Persist chat store (for producer summary and other orchestration fields). */
+export async function persistChatStore(): Promise<void> {
+  await saveChatState();
+}
+
 export function producerSessionId(projectId: string): string {
   return `producer-${projectId}`;
 }
@@ -253,7 +262,7 @@ function toProjectContext(project: Project): ProjectContext {
     name: project.name,
     description: project.description,
     engine: project.engine,
-    workspacePath: project.workspacePath,
+    workspacePath: project.workspacePath ?? project.id,
     projectId: project.id,
   };
 }
@@ -265,8 +274,9 @@ async function getProjectContextForSession(session: ExtendedChatSession): Promis
 
   // Auto-detect engine if not set
   let engine: ProjectEngine | null = project.engine;
-  if (!engine && project.workspacePath) {
-    const detected = await detectEngineFromWorkspace(project.workspacePath);
+  const effectiveWorkspacePath = project.workspacePath ?? project.id;
+  if (!engine && effectiveWorkspacePath) {
+    const detected = await detectEngineFromWorkspace(effectiveWorkspacePath);
     if (detected) {
       engine = detected as ProjectEngine;
       // Update project with detected engine
@@ -278,7 +288,7 @@ async function getProjectContextForSession(session: ExtendedChatSession): Promis
     name: project.name,
     description: project.description,
     engine,
-    workspacePath: project.workspacePath,
+    workspacePath: effectiveWorkspacePath,
     projectId: project.id,
   };
 }
@@ -501,6 +511,7 @@ chatRouter.get("/sessions/producer/:projectId", async (req: Request, res: Respon
     cumulativeInputTokens: 0,
     cumulativeOutputTokens: 0,
     generation: 1,
+    producerSummary: emptyProducerSummarySnapshot(),
   };
 
   chatStore.sessions[sessionId] = newSession;
@@ -706,6 +717,13 @@ chatRouter.post("/sessions/:id/close", async (req: Request, res: Response) => {
     showActions: false,
   });
 
+  void ingestProducerSummaryFact(projectId, {
+    kind: "consultation_closed",
+    at: new Date().toISOString(),
+    title: session.role,
+    detail: roleDisplay,
+  });
+
   // Delete the consultation session after forwarding summary
   delete chatStore.sessions[id];
 
@@ -898,15 +916,24 @@ ${conversationText}
 Max 4000 characters. Respond ONLY with the summary.`;
 
     const config = loadConfig();
-    const summaryResponse = await fetch(`${config.ZAI_BASE_URL}/v1/messages`, {
+    const summaryModel = config.DEFAULT_MODEL;
+    const isKimi = summaryModel.startsWith("kimi-");
+    const summaryBaseUrl = isKimi ? config.KIMI_BASE_URL : config.ZAI_BASE_URL;
+    const summaryApiKey = isKimi ? config.KIMI_API_KEY : config.ZAI_API_KEY;
+    const summaryHeaders: Record<string, string> = {
+      "Content-Type": "application/json",
+      "anthropic-version": "2023-06-01",
+    };
+    if (isKimi) {
+      summaryHeaders["Authorization"] = `Bearer ${summaryApiKey}`;
+    } else {
+      summaryHeaders["x-api-key"] = summaryApiKey;
+    }
+    const summaryResponse = await fetch(`${summaryBaseUrl}/v1/messages`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": config.ZAI_API_KEY,
-        "anthropic-version": "2023-06-01",
-      },
+      headers: summaryHeaders,
       body: JSON.stringify({
-        model: "glm-4.7-flash",
+        model: summaryModel,
         max_tokens: 2048,
         messages: [{ role: "user", content: summaryPrompt }],
       }),
@@ -1037,19 +1064,32 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
 
   session.messages.push(userMessage);
 
-  // Add to conversation history
-  session.conversationHistory.push({
-    role: "user",
-    content: body.content,
-  });
+  // Add to conversation history (with images as multimodal content if present)
+  const userHistoryMessage: LLMMessage = { role: "user", content: body.content };
+  if (body.images && body.images.length > 0) {
+    const contentBlocks: Array<{ type: "text"; text: string } | { type: "image"; source: { type: "base64"; media_type: string; data: string } }> = [
+      { type: "text", text: body.content },
+    ];
+    for (const imgDataUrl of body.images) {
+      const match = imgDataUrl.match(/^data:([^;]+);base64,(.+)$/);
+      if (match) {
+        contentBlocks.push({
+          type: "image",
+          source: { type: "base64", media_type: match[1], data: match[2] },
+        });
+      }
+    }
+    userHistoryMessage.content = contentBlocks;
+  }
+  session.conversationHistory.push(userHistoryMessage);
 
   await saveChatState();
 
   // Note: We do NOT broadcast the user message here because the frontend
   // already adds it optimistically. Broadcasting would create a duplicate.
 
-  // If this is a system message or no auto-response needed, return early
-  if (body.type === "system" || body.type === "progress") {
+  // If this is a system / orchestration message or no auto-response needed, return early
+  if (body.type === "system" || body.type === "progress" || body.type === "producer_update") {
     broadcast({
       type: "chat:message",
       sessionId: id,
@@ -1125,7 +1165,7 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
     };
 
     // Track token usage from API responses
-    const model = getZaiModel(agentRole);
+    const model = getModelForTier(agentRole);
     const onTokenUsage = (usage: { input_tokens: number; output_tokens: number }) => {
       updateSessionTokenUsage(session as ExtendedChatSession, usage, model);
     };
@@ -1393,6 +1433,13 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
     showActions: false,
   });
 
+  void ingestProducerSummaryFact(projectId, {
+    kind: "agent_spawned",
+    at: now,
+    agentRole,
+    detail: sessionId,
+  });
+
   // If a task is provided, execute it immediately
   if (task) {
     // Create a progress message for this invocation
@@ -1425,11 +1472,28 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
       await moveQuestTicket(ticketId, "in_progress", agentRole);
     }
 
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
     try {
       // Don't broadcast agent events from invokeAgent — we handle them ourselves here
       const projectContext = toProjectContext(project);
-      const spawnModel = getZaiModel(agentRole);
+      const spawnModel = getModelForTier(agentRole);
       logger.info({ event: "spawn_invoke_start", agentRole, taskLength: task?.length ?? 0, sessionId }, `Invoking agent ${agentRole}`);
+
+      // Heartbeat: broadcast periodic progress updates during long agent runs
+      let heartbeatCount = 0;
+      heartbeat = setInterval(() => {
+        heartbeatCount++;
+        const elapsed = heartbeatCount * 2;
+        const pct = Math.min(85, 10 + heartbeatCount * 3);
+        broadcast({
+          type: "chat:progress",
+          sessionId,
+          progressMsgId,
+          progress: pct,
+          content: `${agentRole} is working... (${elapsed}s)`,
+        } as WSEvent);
+      }, 2000);
+
       const result = await invokeAgent(
         agentRole,
         task,
@@ -1450,6 +1514,8 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
           updateSessionTokenUsage(newSession as ExtendedChatSession, usage, spawnModel);
         },
       );
+
+      clearInterval(heartbeat);
       logger.info({ event: "spawn_invoke_complete", agentRole, contentLength: result.content.length, sessionId }, `Agent ${agentRole} completed with ${result.content.length} chars`);
 
       // Handle empty content
@@ -1517,6 +1583,13 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
         showActions: true,
       });
 
+      void ingestProducerSummaryFact(projectId, {
+        kind: "spawn_task_complete",
+        at: new Date().toISOString(),
+        agentRole,
+        title: task?.slice(0, 120),
+      });
+
       // Update agent session status to done
       newSession.progress = 100;
       newSession.status = "completed";
@@ -1539,6 +1612,7 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
         }
       }
     } catch (err: unknown) {
+      clearInterval(heartbeat);
       const error = err as Error;
       logger.error({ event: "spawn_failed", agentRole, sessionId, error: error.message, stack: error.stack }, `Agent ${agentRole} failed: ${error.message}`);
 
@@ -1557,6 +1631,13 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
         content: `${agentRole.toUpperCase()} failed: ${error.message}`,
         timestamp: new Date().toISOString(),
         showActions: false,
+      });
+
+      void ingestProducerSummaryFact(projectId, {
+        kind: "spawn_task_failed",
+        at: new Date().toISOString(),
+        agentRole,
+        detail: error.message,
       });
 
       // Quest Bridge: move ticket back to available on failure

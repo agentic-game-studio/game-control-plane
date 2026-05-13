@@ -30,7 +30,7 @@ function normalizeToolCalls(toolCalls?: { tool?: string; name?: string; args?: R
 
 export interface ChatMessage {
   id: string;
-  type: "system" | "agent" | "user" | "progress" | "welcome" | "diff" | "navigate" | "question" | "plan" | "workflow";
+  type: "system" | "agent" | "user" | "progress" | "welcome" | "diff" | "navigate" | "question" | "plan" | "workflow" | "producer_update";
   sender: string;
   content: string;
   timestamp: string;
@@ -86,6 +86,22 @@ export interface AgentSession {
   fileOps?: FileOp[];
 }
 
+export interface ProducerUIState {
+  mode: "thinking" | "delegated" | "available";
+  label: string;
+  detail: string;
+  activeDelegatedSessions: number;
+  activeDelegatedSubagents: number;
+}
+
+export interface ActivityItem {
+  id: string;
+  kind: "spawned" | "completed" | "failed" | "status";
+  title: string;
+  detail: string;
+  timestamp: string;
+}
+
 export interface SubagentInfo {
   id: string;
   role: string;
@@ -98,10 +114,17 @@ export interface SubagentInfo {
   spawnedAt: string;
 }
 
+interface QueuedMessage {
+  input: string;
+  images?: string[];
+  targetSessionId?: string;
+}
+
 /* ─── localStorage Cache ─── */
 
-const CACHE_VERSION = 3;
+const CACHE_VERSION = 5;
 const CACHE_KEY_PREFIX = "chat-cache-v";
+const CACHE_PURGE_MARKER = `chat-cache-purged-v${CACHE_VERSION}`;
 
 interface CachedChatData {
   version: number;
@@ -111,6 +134,10 @@ interface CachedChatData {
   currentSession: string;
   threadId: string;
   threadTitle: string;
+  /** Persist loading state so "thinking" indicator survives page navigation */
+  isLoading?: boolean;
+  /** Persist message queue so queued messages survive page navigation */
+  messageQueue?: QueuedMessage[];
   cachedAt: string;
 }
 
@@ -120,7 +147,7 @@ function getCacheKey(projectId: string): string {
 
 function purgeStaleCacheKeys(): void {
   try {
-    if (localStorage.getItem("chat-cache-purged-v3")) return;
+    if (localStorage.getItem(CACHE_PURGE_MARKER)) return;
     const keysToRemove: string[] = [];
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i);
@@ -132,7 +159,7 @@ function purgeStaleCacheKeys(): void {
     if (keysToRemove.length > 0) {
       console.log("[Cache] Purged", keysToRemove.length, "stale keys");
     }
-    localStorage.setItem("chat-cache-purged-v3", "1");
+    localStorage.setItem(CACHE_PURGE_MARKER, "1");
   } catch { /* ignore */ }
 }
 
@@ -750,11 +777,13 @@ export function useCommandRoom() {
   const [threadTitle, setThreadTitle] = useState("Board Room");
   const [initialized, setInitialized] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
-  const [messageQueue, setMessageQueue] = useState<Array<{ input: string; images?: string[] }>>([]);
+  const [messageQueue, setMessageQueue] = useState<QueuedMessage[]>([]);
   const [subagents, setSubagents] = useState<Map<string, SubagentInfo>>(new Map());
   const [contextUsageMap, setContextUsageMap] = useState<Map<string, ContextUsage>>(new Map());
   const [contextPressure, setContextPressure] = useState<Map<string, number>>(new Map());
   const [compactingSessionId, setCompactingSessionId] = useState<string | null>(null);
+  const [activityFeed, setActivityFeed] = useState<ActivityItem[]>([]);
+  const [toastNotifications, setToastNotifications] = useState<ActivityItem[]>([]);
   const lastSpawnedRef = useRef<string | null>(null);
   const activityLogRef = useRef<string[]>([]);
   const addSessionMessageRef = useRef<(role: string, msg: Omit<ChatMessage, "id" | "timestamp">) => void | undefined>(undefined);
@@ -778,7 +807,7 @@ export function useCommandRoom() {
   const messageQueueRef = useRef(messageQueue);
   messageQueueRef.current = messageQueue;
   // Ref for executeCommand to avoid stale closures when dequeuing
-  const executeCommandRef = useRef<(input: string, images?: string[]) => void>(() => {});
+  const executeCommandRef = useRef<(input: string, images?: string[], targetSessionId?: string) => void>(() => {});
 
   // Filter sessions visible for the active project. The producer session
   // for the current project plus any specialist sessions tagged with
@@ -816,6 +845,8 @@ export function useCommandRoom() {
         currentSession,
         threadId,
         threadTitle,
+        isLoading: isLoadingRef.current,
+        messageQueue: messageQueueRef.current,
         cachedAt: new Date().toISOString(),
       });
     };
@@ -848,6 +879,13 @@ export function useCommandRoom() {
       if (cached.subagents?.length) {
         const allowedParents = new Set(sessionMap.keys());
         setSubagents(new Map(subagentsForProjectParents(new Map(cached.subagents), allowedParents)));
+      }
+      // Restore loading state and queue so they survive navigation
+      if (cached.isLoading) {
+        setIsLoading(true);
+      }
+      if (cached.messageQueue?.length) {
+        setMessageQueue(cached.messageQueue);
       }
       setInitialized(true); // Show cached data immediately
     }
@@ -909,6 +947,15 @@ export function useCommandRoom() {
             return next;
           });
         }
+
+        // Reset isLoading if no session has an active progress message (agent finished while away)
+        const anyProgress = [...sessionMap.values()].some(
+          (s) => s.messages.some((m) => m.type === "progress")
+        );
+        if (!anyProgress) {
+          setIsLoading(false);
+          setMessageQueue([]);
+        }
       } catch (error) {
         if (cancelled) return;
         console.error("Failed to fetch chat sessions:", error);
@@ -936,6 +983,8 @@ export function useCommandRoom() {
         currentSession,
         threadId,
         threadTitle,
+        isLoading,
+        messageQueue,
         cachedAt: new Date().toISOString(),
       });
     }, 500);
@@ -952,10 +1001,17 @@ export function useCommandRoom() {
         currentSession: currentSessionRef.current,
         threadId,
         threadTitle,
+        isLoading,
+        messageQueue,
         cachedAt: new Date().toISOString(),
       });
     };
-  }, [sessions, subagents, currentSession, threadId, threadTitle, currentProjectId, initialized]);
+  }, [sessions, subagents, currentSession, threadId, threadTitle, currentProjectId, initialized, isLoading, messageQueue]);
+
+  useEffect(() => {
+    setActivityFeed([]);
+    setToastNotifications([]);
+  }, [currentProjectId]);
 
   const addSessionMessage = useCallback((sessionRole: string, msg: Omit<ChatMessage, "id" | "timestamp">) => {
     setAllSessions((prev) => {
@@ -986,6 +1042,18 @@ export function useCommandRoom() {
 
   // WebSocket integration — use functional update to avoid stale closure
   const onWSEvent = useCallback((event: WSEvent) => {
+    const recordActivity = (item: Omit<ActivityItem, "id" | "timestamp">, toast = false) => {
+      const entry: ActivityItem = {
+        id: uid(),
+        timestamp: timestamp(),
+        ...item,
+      };
+      setActivityFeed((prev) => [entry, ...prev].slice(0, 24));
+      if (toast) {
+        setToastNotifications((prev) => [entry, ...prev].slice(0, 4));
+      }
+    };
+
     // Specialist chat sessions — avoid brief filter gap before chat:session:created arrives
     if (event.type === "agent:spawned") {
       const pid = event.projectId;
@@ -1001,6 +1069,11 @@ export function useCommandRoom() {
     // Handle subagent events separately (they don't create full sessions)
     switch (event.type) {
       case "subagent:spawned": {
+        recordActivity({
+          kind: "spawned",
+          title: `${event.agentRole} started`,
+          detail: event.task,
+        });
         setSubagents((prev) => {
           const next = new Map(prev);
           next.set(event.ticketId, {
@@ -1017,6 +1090,11 @@ export function useCommandRoom() {
         break;
       }
       case "subagent:completed": {
+        recordActivity({
+          kind: "completed",
+          title: `${event.agentRole} completed`,
+          detail: event.output || "Subagent finished its task.",
+        }, true);
         setSubagents((prev) => {
           const existing = prev.get(event.ticketId);
           if (!existing) return prev;
@@ -1031,6 +1109,11 @@ export function useCommandRoom() {
         break;
       }
       case "subagent:failed": {
+        recordActivity({
+          kind: "failed",
+          title: `${event.agentRole} failed`,
+          detail: event.error,
+        }, true);
         setSubagents((prev) => {
           const existing = prev.get(event.ticketId);
           if (!existing) return prev;
@@ -1047,7 +1130,16 @@ export function useCommandRoom() {
 
       // ── Autonomous loop events ────────────────────────────────────────────
       case "autonomous:iteration:started": {
-        addSessionMessage(producerSessionIdRef.current, {
+        const targetSessionId = event.sessionId;
+        const isCurrentProjectEvent = targetSessionId === producerSessionIdRef.current;
+        if (isCurrentProjectEvent) {
+          recordActivity({
+            kind: "status",
+            title: `Loop iteration ${event.iteration}`,
+            detail: `${event.agentRole} started ${event.title}`,
+          });
+        }
+        addSessionMessage(targetSessionId, {
           type: "system",
           sender: "SYSTEM",
           content: `[Loop] Iteration ${event.iteration} started — ${event.agentRole} is working on: ${event.title}`,
@@ -1055,7 +1147,16 @@ export function useCommandRoom() {
         break;
       }
       case "autonomous:iteration:completed": {
-        addSessionMessage(producerSessionIdRef.current, {
+        const targetSessionId = event.sessionId;
+        const isCurrentProjectEvent = targetSessionId === producerSessionIdRef.current;
+        if (isCurrentProjectEvent) {
+          recordActivity({
+            kind: "completed",
+            title: `Loop iteration ${event.iteration} completed`,
+            detail: `${event.agentRole} finished ticket ${event.ticketId}`,
+          }, true);
+        }
+        addSessionMessage(targetSessionId, {
           type: "system",
           sender: "SYSTEM",
           content: `[Loop] Iteration ${event.iteration} done — ${event.agentRole} completed ticket ${event.ticketId}. Total done: ${event.completedCount}`,
@@ -1063,7 +1164,16 @@ export function useCommandRoom() {
         break;
       }
       case "autonomous:iteration:failed": {
-        addSessionMessage(producerSessionIdRef.current, {
+        const targetSessionId = event.sessionId;
+        const isCurrentProjectEvent = targetSessionId === producerSessionIdRef.current;
+        if (isCurrentProjectEvent) {
+          recordActivity({
+            kind: "failed",
+            title: `Loop iteration ${event.iteration} failed`,
+            detail: `${event.agentRole} on ${event.ticketId}: ${event.error}`,
+          }, true);
+        }
+        addSessionMessage(targetSessionId, {
           type: "system",
           sender: "SYSTEM",
           content: `[Loop] Iteration ${event.iteration} failed — ${event.agentRole} on ${event.ticketId}: ${event.error}`,
@@ -1071,7 +1181,16 @@ export function useCommandRoom() {
         break;
       }
       case "autonomous:completed": {
-        addSessionMessage(producerSessionIdRef.current, {
+        const targetSessionId = event.sessionId;
+        const isCurrentProjectEvent = targetSessionId === producerSessionIdRef.current;
+        if (isCurrentProjectEvent) {
+          recordActivity({
+            kind: "completed",
+            title: "Autonomous loop finished",
+            detail: `${event.completedCount} completed, ${event.failedCount} failed`,
+          }, true);
+        }
+        addSessionMessage(targetSessionId, {
           type: "system",
           sender: "SYSTEM",
           content: `[Loop] Autonomous loop finished. Completed: ${event.completedCount}, Failed: ${event.failedCount}, Total: ${event.totalIterations}`,
@@ -1079,7 +1198,16 @@ export function useCommandRoom() {
         break;
       }
       case "autonomous:stopped": {
-        addSessionMessage(producerSessionIdRef.current, {
+        const targetSessionId = event.sessionId;
+        const isCurrentProjectEvent = targetSessionId === producerSessionIdRef.current;
+        if (isCurrentProjectEvent) {
+          recordActivity({
+            kind: "status",
+            title: "Autonomous loop stopped",
+            detail: `${event.completedCount} completed, ${event.failedCount} failed`,
+          });
+        }
+        addSessionMessage(targetSessionId, {
           type: "system",
           sender: "SYSTEM",
           content: `[Loop] Autonomous loop stopped by user. Completed: ${event.completedCount}, Failed: ${event.failedCount}`,
@@ -1087,7 +1215,16 @@ export function useCommandRoom() {
         break;
       }
       case "autonomous:error": {
-        addSessionMessage(producerSessionIdRef.current, {
+        const targetSessionId = event.sessionId;
+        const isCurrentProjectEvent = targetSessionId === producerSessionIdRef.current;
+        if (isCurrentProjectEvent) {
+          recordActivity({
+            kind: "failed",
+            title: "Autonomous loop error",
+            detail: event.error,
+          }, true);
+        }
+        addSessionMessage(targetSessionId, {
           type: "system",
           sender: "SYSTEM",
           content: `[Loop] Error: ${event.error}`,
@@ -1097,7 +1234,16 @@ export function useCommandRoom() {
 
       // ── GDD ingestion event ─────────────────────────────────────────────────
       case "gdd:ingested": {
-        addSessionMessage(producerSessionIdRef.current, {
+        const targetSessionId = event.sessionId;
+        const isCurrentProjectEvent = targetSessionId === producerSessionIdRef.current;
+        if (isCurrentProjectEvent) {
+          recordActivity({
+            kind: "status",
+            title: "GDD ingested",
+            detail: `${event.created} tickets created, ${event.skipped} skipped`,
+          });
+        }
+        addSessionMessage(targetSessionId, {
           type: "system",
           sender: "SYSTEM",
           content: `[GDD] Ingested ${event.total} items — created ${event.created} tickets, skipped ${event.skipped} duplicates.`,
@@ -1387,9 +1533,13 @@ export function useCommandRoom() {
     }
   }, [addSessionMessage]);
 
-  const executeCommand = useCallback((input: string, images?: string[]) => {
-    const trimmed = input.trim();
+  const executeCommand = useCallback((input: string, images?: string[], targetSessionId?: string) => {
+    let trimmed = input.trim();
     if (!trimmed && (!images || images.length === 0)) return;
+    // Backend requires non-empty content; attach placeholder when only images are sent
+    if (!trimmed && images && images.length > 0) {
+      trimmed = "[Image attached]";
+    }
 
     const lower = trimmed.toLowerCase();
 
@@ -1407,7 +1557,11 @@ export function useCommandRoom() {
           apiFetch(`/api/chat/sessions/${targetSession}/clear`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-          }).catch((err) => console.error("Failed to clear session:", err));
+          }).catch((err) => {
+            // Silently ignore if session already gone
+            if (err instanceof Error && err.message.includes("Session not found")) return;
+            console.error("Failed to clear session:", err);
+          });
 
           setAllSessions((prev) => {
             const next = new Map(prev);
@@ -1466,6 +1620,9 @@ Session:
   /context             — Show context window usage
   /cost                — Show token usage (legacy)
   /export              — Export session as markdown
+
+Workflows:
+  /ralphloop <task>    — Run research→plan→code→verify loop
 
 Production:
   /plan [query]        — Create execution plan
@@ -1778,6 +1935,40 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
             });
           return;
         }
+        case "ralphloop": {
+          const sid = producerSessionIdRef.current;
+          if (!args) {
+            addSessionMessage(producerSessionIdRef.current, { type: "system", sender: "SYSTEM", content: "Usage: /ralphloop <task> — e.g., /ralphloop implement player combat system" });
+            return;
+          }
+          addSessionMessage(producerSessionIdRef.current, { type: "user", sender: "DIRECTOR", content: trimmed });
+          setIsLoading(true);
+          const prompt = `[RALPHLOOP REQUEST] ${args}`;
+          apiFetch<{ assistantMessage?: { content: string; type: string; sender: string } }>(
+            `/api/chat/sessions/${sid}/messages`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ type: "user", sender: "DIRECTOR", content: prompt }),
+            }
+          )
+            .then((result) => {
+              setIsLoading(false);
+              if (result.assistantMessage) {
+                addSessionMessage(sid, {
+                  type: result.assistantMessage.type as ChatMessage["type"],
+                  sender: result.assistantMessage.sender,
+                  content: result.assistantMessage.content,
+                  showActions: false,
+                });
+              }
+            })
+            .catch((err) => {
+              setIsLoading(false);
+              addSessionMessage(sid, { type: "system", sender: "SYSTEM", content: `/ralphloop failed: ${err instanceof Error ? err.message : "Unknown error"}` });
+            });
+          return;
+        }
         default: {
           addSessionMessage(producerSessionIdRef.current, { type: "system", sender: "SYSTEM", content: `Unknown command: /${cmd}. Type /help for available commands.` });
           return;
@@ -1845,11 +2036,11 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
 
     // Default: normal message routed to current session
     // F2: Capture ref value for async callbacks
-    const session = currentSessionRef.current;
+    const session = targetSessionId ?? currentSessionRef.current;
 
     // If already processing, queue the message instead of sending immediately
     if (isLoadingRef.current) {
-      setMessageQueue((prev) => [...prev, { input: trimmed, images }]);
+      setMessageQueue((prev) => [...prev, { input: trimmed, images, targetSessionId }]);
       addSessionMessage(session, {
         type: "system",
         sender: "SYSTEM",
@@ -1875,7 +2066,7 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
       if (queue.length > 0) {
         const [next, ...rest] = queue;
         setMessageQueue(rest);
-        setTimeout(() => executeCommandRef.current(next.input, next.images), 100);
+        setTimeout(() => executeCommandRef.current(next.input, next.images, next.targetSessionId), 100);
       }
     }, 5 * 60 * 1000);
 
@@ -1929,13 +2120,15 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
         if (queue.length > 0) {
           const [next, ...rest] = queue;
           setMessageQueue(rest);
-          setTimeout(() => executeCommandRef.current(next.input, next.images), 100);
+          setTimeout(() => executeCommandRef.current(next.input, next.images, next.targetSessionId), 100);
         }
       })
       .catch((error) => {
         clearTimeout(loadingTimeout);
         setIsLoading(false);
-        console.error("Failed to send message:", error);
+        if (!(error instanceof Error && error.message.includes("Session not found"))) {
+          console.error("Failed to send message:", error);
+        }
         addSessionMessage(session, {
           type: "system",
           sender: "SYSTEM",
@@ -1946,7 +2139,7 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
         if (queue.length > 0) {
           const [next, ...rest] = queue;
           setMessageQueue(rest);
-          setTimeout(() => executeCommandRef.current(next.input, next.images), 100);
+          setTimeout(() => executeCommandRef.current(next.input, next.images, next.targetSessionId), 100);
         }
       });
   }, [addSessionMessage, spawnAgent, approveAgent, currentSession]);
@@ -1954,11 +2147,19 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
   // Keep ref updated for queue processing
   executeCommandRef.current = executeCommand;
 
+  const requestProducerAction = useCallback((input: string) => {
+    const sid = producerSessionIdRef.current;
+    if (!sid) return;
+    executeCommandRef.current(input, undefined, sid);
+  }, []);
+
   const closeSession = useCallback((role: string) => {
     // Delete from backend so it doesn't reappear on refresh
-    apiFetch(`/api/chat/sessions/${role}`, { method: "DELETE" }).catch((err) =>
-      console.error("Failed to delete session:", err)
-    );
+    apiFetch(`/api/chat/sessions/${role}`, { method: "DELETE" }).catch((err) => {
+      // Silently ignore if session already gone — stale cache or already closed
+      if (err instanceof Error && err.message.includes("Session not found")) return;
+      console.error("Failed to delete session:", err);
+    });
     setAllSessions((prev) => {
       const next = new Map(prev);
       next.delete(role);
@@ -2018,6 +2219,51 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
     return out;
   }, [subagents, sessions]);
 
+  const producerUIState = useMemo<ProducerUIState>(() => {
+    const activeDelegatedSessions = [...sessions.entries()].filter(
+      ([id, session]) => !isProducerSession(id) && session.status === "active"
+    ).length;
+    const activeDelegatedSubagents = [...visibleSubagents.values()].filter(
+      (subagent) => subagent.status === "active"
+    ).length;
+    const producerThinking = currentSession === producerSessionId && isLoading;
+
+    if (producerThinking) {
+      return {
+        mode: "thinking",
+        label: "Producer Thinking",
+        detail: "The board room is actively reasoning right now. You can keep typing and your next message will queue.",
+        activeDelegatedSessions,
+        activeDelegatedSubagents,
+      };
+    }
+
+    if (activeDelegatedSessions > 0 || activeDelegatedSubagents > 0) {
+      const parts: string[] = [];
+      if (activeDelegatedSessions > 0) {
+        parts.push(`${activeDelegatedSessions} agent session${activeDelegatedSessions === 1 ? "" : "s"}`);
+      }
+      if (activeDelegatedSubagents > 0) {
+        parts.push(`${activeDelegatedSubagents} subagent${activeDelegatedSubagents === 1 ? "" : "s"}`);
+      }
+      return {
+        mode: "delegated",
+        label: "Delegated Work In Flight",
+        detail: `Producer is available while ${parts.join(" and ")} continue in the background.`,
+        activeDelegatedSessions,
+        activeDelegatedSubagents,
+      };
+    }
+
+    return {
+      mode: "available",
+      label: "Producer Available",
+      detail: "No active producer reasoning loop and no delegated work currently running.",
+      activeDelegatedSessions,
+      activeDelegatedSubagents,
+    };
+  }, [sessions, visibleSubagents, currentSession, producerSessionId, isLoading]);
+
   const compactSession = useCallback(async (sessionId: string) => {
     console.log("[Compact] Requested for sessionId:", sessionId, "producerRef:", producerSessionIdRef.current);
     setCompactingSessionId(sessionId);
@@ -2049,6 +2295,10 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
     }
   }, []);
 
+  const dismissToast = useCallback((id: string) => {
+    setToastNotifications((prev) => prev.filter((toast) => toast.id !== id));
+  }, []);
+
   return {
     sessions,
     subagents: visibleSubagents,
@@ -2062,6 +2312,7 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
     threadTitle,
     totalProgress,
     executeCommand,
+    requestProducerAction,
     selectSession: setCurrentSession,
     approveAgent,
     closeSession,
@@ -2071,5 +2322,9 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
     isLoading,
     messageQueue,
     producerSessionId,
+    producerUIState,
+    activityFeed,
+    toastNotifications,
+    dismissToast,
   };
 }

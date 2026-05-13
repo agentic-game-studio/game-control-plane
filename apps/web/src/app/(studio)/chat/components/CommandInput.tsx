@@ -6,6 +6,7 @@ interface CommandInputProps {
   onSend: (input: string, images?: string[]) => void;
   isLoading?: boolean;
   queueCount?: number;
+  statusHint?: string;
 }
 
 const COMMANDS = [
@@ -28,9 +29,10 @@ const COMMANDS = [
   { cmd: "/tree", desc: "Show agent hierarchy" },
   { cmd: "/mcp", desc: "Check Godot MCP status" },
   { cmd: "/export", desc: "Export session as markdown" },
+  { cmd: "/ralphloop", desc: "Run research→plan→code→verify loop" },
 ];
 
-export default function CommandInput({ onSend, isLoading, queueCount = 0 }: CommandInputProps) {
+export default function CommandInput({ onSend, isLoading, queueCount = 0, statusHint }: CommandInputProps) {
   const [value, setValue] = useState("");
   const [showHints, setShowHints] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -50,7 +52,6 @@ export default function CommandInput({ onSend, isLoading, queueCount = 0 }: Comm
   const handleSend = (text?: string) => {
     const input = text ?? value;
     if (!input.trim() && pendingImages.length === 0) return;
-    if (isLoading) return;
     onSend(input, pendingImages.length > 0 ? pendingImages : undefined);
     setValue("");
     setShowHints(false);
@@ -166,7 +167,7 @@ export default function CommandInput({ onSend, isLoading, queueCount = 0 }: Comm
                   ? `${queueCount} in queue — type to add more...`
                   : isLoading
                     ? "Processing... (type to queue next)"
-                    : "Enter command or reply..."
+                    : statusHint ?? "Enter command or reply..."
               }
             />
 

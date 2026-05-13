@@ -3,6 +3,7 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "./useWebSocket";
+import { useProject } from "@/contexts/ProjectContext";
 import type {
   TicketsBoard,
   Ticket,
@@ -22,6 +23,7 @@ const DEFAULT_BOARD: TicketsBoard = {
 };
 
 export function useTickets() {
+  const { currentProjectId } = useProject();
   const [data, setData] = useState<TicketsBoard>(DEFAULT_BOARD);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -29,7 +31,8 @@ export function useTickets() {
 
   const fetchTickets = useCallback(async () => {
     try {
-      const result = await apiFetch<TicketsBoard>("/api/tickets");
+      const query = currentProjectId ? `?projectId=${encodeURIComponent(currentProjectId)}` : "";
+      const result = await apiFetch<TicketsBoard>(`/api/tickets${query}`);
       setData(result);
       setError(null);
     } catch (err) {
@@ -39,7 +42,7 @@ export function useTickets() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [currentProjectId]);
 
   useEffect(() => {
     fetchTickets();
@@ -47,19 +50,19 @@ export function useTickets() {
 
   const onWSEvent = useCallback(
     (event: WSEvent) => {
-      if (
-        event.type === "ticket:created" ||
-        event.type === "ticket:updated" ||
-        event.type === "ticket:moved" ||
-        event.type === "ticket:deleted"
-      ) {
+      if (event.type === "ticket:created" || event.type === "ticket:updated" || event.type === "ticket:moved" || event.type === "ticket:deleted") {
+        const eventProjectId =
+          event.type === "ticket:deleted" ? event.projectId ?? null : event.projectId ?? event.ticket.projectId ?? null;
+        if (eventProjectId !== currentProjectId) {
+          return;
+        }
         if (debounceRef.current) clearTimeout(debounceRef.current);
         debounceRef.current = setTimeout(() => {
           fetchTickets();
         }, 300);
       }
     },
-    [fetchTickets]
+    [currentProjectId, fetchTickets]
   );
 
   useWebSocket(onWSEvent);
@@ -72,15 +75,16 @@ export function useTickets() {
 
   const acknowledgeTicket = useCallback(
     async (id: string) => {
-      const updated = await apiFetch<Ticket>(`/api/tickets/${id}`, {
+      const query = currentProjectId ? `?projectId=${encodeURIComponent(currentProjectId)}` : "";
+      const updated = await apiFetch<Ticket>(`/api/tickets/${id}${query}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ acknowledged: true } as UpdateTicketRequest),
+        body: JSON.stringify({ acknowledged: true, projectId: currentProjectId ?? undefined } as UpdateTicketRequest),
       });
       await fetchTickets();
       return updated;
     },
-    [fetchTickets]
+    [currentProjectId, fetchTickets]
   );
 
   const retry = useCallback(() => {

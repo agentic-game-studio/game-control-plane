@@ -24,10 +24,10 @@ export type WSEvent =
   | { type: "project:created"; project: Project }
   | { type: "project:updated"; project: Project }
   | { type: "project:deleted"; projectId: string }
-  | { type: "ticket:created"; ticket: Ticket }
-  | { type: "ticket:updated"; ticket: Ticket }
-  | { type: "ticket:deleted"; ticketId: string }
-  | { type: "ticket:moved"; ticket: Ticket; fromColumn: string; toColumn: string }
+  | { type: "ticket:created"; ticket: Ticket; projectId?: string | null }
+  | { type: "ticket:updated"; ticket: Ticket; projectId?: string | null }
+  | { type: "ticket:deleted"; ticketId: string; projectId?: string | null }
+  | { type: "ticket:moved"; ticket: Ticket; fromColumn: string; toColumn: string; projectId?: string | null }
   | { type: "asset:created"; asset: GameAsset }
   | { type: "asset:updated"; asset: GameAsset }
   | { type: "asset:deleted"; assetId: string }

@@ -10,6 +10,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { readData } from "./data-store.js";
+import { readTicketsBoard, writeTicketsBoard } from "./ticket-board.js";
 import type { TicketsBoard, Ticket } from "@game-studio/types";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -2347,13 +2348,25 @@ function ticketExistsByAreaAndKeyword(board: TicketsBoard, area: string, keyword
 export async function generateTickets(projectId: string, workspacePath?: string): Promise<Ticket[]> {
   const effectivePath = workspacePath ?? projectId;
   const projectPath = join(WORKSPACE, effectivePath);
+  if (!workspacePath || !existsSync(projectPath)) {
+    return [];
+  }
+
   // Re-read board fresh (passed-in board may be stale)
-  const board = await readData<TicketsBoard>("tickets.json");
+  const board = await readTicketsBoard(projectId);
   const newTickets: Ticket[] = [];
+  const projectLabel = effectivePath;
+  const pathNeedle = `${WORKSPACE}/pixel-platformer-1/`;
 
   for (const [key, template] of Object.entries(TICKET_TEMPLATES)) {
+    const projectTemplate: TicketTemplate = {
+      ...template,
+      title: template.title.replaceAll("pixel-platformer-1", projectLabel),
+      description: template.description.replaceAll("pixel-platformer-1", projectLabel),
+    };
+
     // Skip if exact title already exists
-    if (ticketExistsByTitle(board, template.title)) {
+    if (ticketExistsByTitle(board, projectTemplate.title)) {
       continue;
     }
 
@@ -2363,9 +2376,13 @@ export async function generateTickets(projectId: string, workspacePath?: string)
     );
 
     if (featureCheck) {
+      const filesMustExist = featureCheck.filesMustExist.map((filePath) =>
+        filePath.replace(pathNeedle, `${WORKSPACE}/${projectLabel}/`)
+      );
+
       // Files must exist check
-      if (featureCheck.filesMustExist.length > 0) {
-        const allExist = filesExist(featureCheck.filesMustExist);
+      if (filesMustExist.length > 0) {
+        const allExist = filesExist(filesMustExist);
         if (allExist) {
           // Files exist — generate ticket (for fix/enhancement)
         } else {
@@ -2389,11 +2406,12 @@ export async function generateTickets(projectId: string, workspacePath?: string)
 
     const ticket: Ticket = {
       id: generateId("ticket"),
-      title: template.title,
-      description: template.description,
-      area: template.area,
-      subarea: template.subarea,
-      credits: template.credits,
+      projectId,
+      title: projectTemplate.title,
+      description: projectTemplate.description,
+      area: projectTemplate.area,
+      subarea: projectTemplate.subarea,
+      credits: projectTemplate.credits,
       status: "available",
       acknowledged: false,
       createdAt: new Date().toISOString(),
@@ -2413,17 +2431,16 @@ export async function generateTickets(projectId: string, workspacePath?: string)
 /**
  * addTicketsToBoard — Adds generated tickets to the available column.
  */
-export async function addTicketsToBoard(tickets: Ticket[]): Promise<void> {
+export async function addTicketsToBoard(projectId: string, tickets: Ticket[]): Promise<void> {
   if (tickets.length === 0) return;
 
-  const data = await readData<TicketsBoard>("tickets.json");
+  const data = await readTicketsBoard(projectId);
   const availableCol = data.columns.find((c) => c.id === "available");
-  if (!availableCol) throw new Error("No 'available' column found in tickets.json");
+  if (!availableCol) throw new Error("No 'available' column found in project ticket board");
 
   for (const ticket of tickets) {
     availableCol.tickets.push(ticket);
   }
 
-  const { writeData } = await import("./data-store.js");
-  await writeData("tickets.json", data);
+  await writeTicketsBoard(data, projectId);
 }

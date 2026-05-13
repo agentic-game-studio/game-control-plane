@@ -1,4 +1,62 @@
-export type MessageType = "system" | "agent" | "user" | "progress" | "welcome" | "diff" | "navigate" | "question" | "plan" | "workflow";
+export type MessageType =
+  | "system"
+  | "agent"
+  | "user"
+  | "progress"
+  | "welcome"
+  | "diff"
+  | "navigate"
+  | "question"
+  | "plan"
+  | "workflow"
+  /** Rolling orchestration summary persisted on the producer thread */
+  | "producer_update";
+
+/** Fact ingested into the producer rolling summary reducer (backend). */
+export type ProducerSummaryFactKind =
+  | "subagent_spawned"
+  | "subagent_completed"
+  | "subagent_failed"
+  | "ticket_created"
+  | "ticket_moved"
+  | "ticket_updated"
+  | "workflow_stage"
+  | "workflow_complete"
+  | "autonomous_iteration_started"
+  | "autonomous_iteration_completed"
+  | "autonomous_iteration_failed"
+  | "autonomous_iteration_boot_check_failed"
+  | "autonomous_loop_completed"
+  | "autonomous_loop_stopped"
+  | "autonomous_error"
+  | "gdd_ingested"
+  | "consultation_closed"
+  | "agent_spawned"
+  | "spawn_task_complete"
+  | "spawn_task_failed";
+
+export interface ProducerSummaryFact {
+  kind: ProducerSummaryFactKind;
+  /** ISO timestamp */
+  at: string;
+  title?: string;
+  ticketId?: string;
+  agentRole?: string;
+  sessionId?: string;
+  detail?: string;
+  fromColumn?: string;
+  toColumn?: string;
+}
+
+/** Persisted on producer chat session — durable summary memory for hybrid rollups */
+export interface ProducerSummarySnapshot {
+  version: 1;
+  recentFacts: ProducerSummaryFact[];
+  lastEmittedAt: number | null;
+  lastEmittedContentHash: string | null;
+  /** Short line for autonomous activity */
+  autonomousHint?: string | null;
+}
 export type ChatSessionStatus = "active" | "done" | "completed";
 
 export interface QuestionOption {
@@ -136,6 +194,8 @@ export interface ChatSession {
   // Session compaction (Claude Code style)
   compactedFrom?: string;
   generation?: number;
+  /** Rolling producer summary state (API-only extended field; persisted in chat-state.json) */
+  producerSummary?: ProducerSummarySnapshot;
 }
 
 export interface CreateChatSessionRequest {

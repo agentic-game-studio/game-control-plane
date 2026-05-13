@@ -169,21 +169,21 @@ export function useAutonomousLoop() {
   // Poll status for a given sessionId (call after start)
   const pollStatus = useCallback(async (sessionId: string) => {
     try {
-      const res = await apiFetch<{ data: LoopState | { status: "not_found" } }>(
+      const res = await apiFetch<LoopState | { status: "not_found" }>(
         `/api/autonomous/status?sessionId=${encodeURIComponent(sessionId)}`
       );
-      setStatus(mapStateToStatus(res.data));
+      setStatus(mapStateToStatus(res));
     } catch {
       /* ignore — loop may not have been started */
     }
   }, []);
 
   const startLoop = useCallback(async (sessionId: string, projectId: string): Promise<string> => {
-    const result = await apiFetch<{ data: { sessionId: string } }>("/api/autonomous/start", {
+    const result = await apiFetch<LoopState>("/api/autonomous/start", {
       method: "POST",
       body: JSON.stringify({ sessionId, projectId }),
     });
-    const loopSessionId = result.data.sessionId;
+    const loopSessionId = result.sessionId;
     // Immediately poll to sync UI state with freshly started loop
     await pollStatus(loopSessionId);
     return loopSessionId;
@@ -197,8 +197,8 @@ export function useAutonomousLoop() {
   }, []);
 
   const getHistory = useCallback(async (): Promise<LoopRunSummary[]> => {
-    const result = await apiFetch<{ data: LoopRunRecord[] }>("/api/autonomous/history");
-    return result.data.map((r) => ({
+    const result = await apiFetch<LoopRunRecord[]>("/api/autonomous/history");
+    return result.map((r) => ({
       sessionId: r.runId,
       startedAt: r.startedAt,
       completedAt: r.completedAt,

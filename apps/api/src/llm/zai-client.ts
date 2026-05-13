@@ -44,17 +44,15 @@ class Semaphore {
 }
 
 /**
- * Per-model concurrency limits (from ZAI API specs):
- *   glm-5.1      → 10 concurrent
- *   glm-5        →  2 concurrent
- *   glm-4.7      →  2 concurrent
- *   glm-4.7-flash → 1 concurrent (used for summarization — most constrained)
- *
- * glm-4.7-flash uses 2x tokens vs other models, so keeping it at limit=1
- * ensures summarization doesn't consume excessive token budget while
- * not blocking glm-5.1 agents which have 10x more capacity.
+ * Per-model concurrency limits.
+ * Kimi K2.6 supports 10 concurrent requests.
+ * Legacy GLM limits kept for backward compatibility.
  */
 const MODEL_CONCURRENCY_LIMITS: Record<string, number> = {
+  "kimi-for-coding": 10,
+  "kimi-k2.6": 10,
+  "kimi-k2.5": 5,
+  "kimi-k2-turbo-preview": 2,
   "glm-5.1": 10,
   "glm-5": 2,
   "glm-4.7": 2,
@@ -74,9 +72,25 @@ function getSemaphore(model: string): Semaphore {
   return modelSemaphores.get(model)!;
 }
 
+export interface TextContent {
+  type: "text";
+  text: string;
+}
+
+export interface ImageContent {
+  type: "image";
+  source: {
+    type: "base64";
+    media_type: string;
+    data: string;
+  };
+}
+
+export type MessageContent = string | Array<TextContent | ImageContent>;
+
 export interface LLMMessage {
   role: "system" | "user" | "assistant" | "tool";
-  content: string | ToolResultContent[];
+  content: MessageContent;
   tool_calls?: LLMToolCall[];
   tool_call_id?: string;
 }
@@ -137,7 +151,14 @@ const DEFAULT_TOOL_IMPORTANCE = 40;
 const MAX_TOOL_RESULT_BYTES = 15_000;
 const KEEP_RECENT_MESSAGES = 10;       // Never prune last N messages
 
-const FETCH_TIMEOUT_MS = 60_000;
+function getFetchTimeoutMs(): number {
+  try {
+    const config = loadConfig();
+    return config.API_TIMEOUT_MS;
+  } catch {
+    return 120_000;
+  }
+}
 
 async function fetchWithRetry(url: string, options: RequestInit, retries = MAX_RETRIES): Promise<Response> {
   let lastError: Error | null = null;
@@ -145,7 +166,7 @@ async function fetchWithRetry(url: string, options: RequestInit, retries = MAX_R
     try {
       const response = await fetch(url, {
         ...options,
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        signal: AbortSignal.timeout(getFetchTimeoutMs()),
       });
       if (response.status === 429 && attempt < retries) {
         const delay = RETRY_DELAY_MS * Math.pow(2, attempt) + Math.random() * 1000;
@@ -184,6 +205,10 @@ function hashToolInput(input: Record<string, unknown>): string {
   }
 }
 
+// Exploration tools legitimately call many different files/patterns in a row.
+// Only flag them as looping when the exact same call repeats (identical args).
+const EXPLORATION_TOOLS = new Set(["Read", "Glob", "Grep"]);
+
 function detectRepetitiveLoop(recentCalls: Array<{ name: string; inputHash: string }>): { detected: boolean; message?: string } {
   if (recentCalls.length < MAX_CONSECUTIVE_SAME_TOOL_CALLS) return { detected: false };
 
@@ -199,9 +224,11 @@ function detectRepetitiveLoop(recentCalls: Array<{ name: string; inputHash: stri
     };
   }
 
-  // Check for same tool name 4+ times
+  // Check for same tool name 6+ times — skip exploration tools since reading
+  // many different files or globbing many patterns is normal.
   const toolCounts = new Map<string, number>();
   for (const call of recentCalls) {
+    if (EXPLORATION_TOOLS.has(call.name)) continue;
     toolCounts.set(call.name, (toolCounts.get(call.name) || 0) + 1);
   }
   const maxCount = Math.max(...Array.from(toolCounts.values()));
@@ -216,12 +243,12 @@ function detectRepetitiveLoop(recentCalls: Array<{ name: string; inputHash: stri
   return { detected: false };
 }
 
-/** Count total characters in messages */
+/** Count total characters in messages (images estimated at ~1k chars each for token counting) */
 function countMessageChars(messages: LLMMessage[]): number {
-  return messages.reduce(
-    (sum, m) => sum + (typeof m.content === "string" ? m.content.length : 0),
-    0
-  );
+  return messages.reduce((sum, m) => {
+    if (typeof m.content === "string") return sum + m.content.length;
+    return sum + m.content.reduce((cSum, c) => cSum + (c.type === "text" ? c.text.length : 1000), 0);
+  }, 0);
 }
 
 /** Rough token estimate from messages (pre-emptive check before API call) */
@@ -243,7 +270,12 @@ async function summarizeOldMessages(messages: LLMMessage[]): Promise<string | nu
 
   // Build summary prompt
   const conversationText = oldMsgs
-    .map(m => `${m.role}: ${typeof m.content === "string" ? m.content.slice(0, 2000) : "[tool content]"}`)
+    .map(m => {
+      if (typeof m.content === "string") return `${m.role}: ${m.content.slice(0, 2000)}`;
+      const textParts = m.content.filter((c): c is TextContent => c.type === "text").map(c => c.text).join(" ");
+      const hasImage = m.content.some(c => c.type === "image");
+      return `${m.role}: ${textParts.slice(0, 2000)}${hasImage ? " [image attached]" : ""}`;
+    })
     .join("\n");
 
   const summaryPrompt = `Summarize this conversation history concisely.
@@ -255,31 +287,29 @@ ${conversationText}
 
 Respond ONLY with the summary, nothing else. Max 2000 characters.`;
 
-  // Use a lightweight model for summarization (glm-4.7-flash, limit=1)
+  // Use the default model for summarization
   const config = loadConfig();
-  const flashSemaphore = getSemaphore("glm-4.7-flash");
+  const summaryModel = config.DEFAULT_MODEL;
+  const summaryProvider = resolveProviderConfig(config, summaryModel);
+  const summarySemaphore = getSemaphore(summaryModel);
   try {
-    await flashSemaphore.acquire();
+    await summarySemaphore.acquire();
     let summaryResponse: Response;
     try {
       summaryResponse = await fetchWithRetry(
-        `${config.ZAI_BASE_URL}/v1/messages`,
+        `${summaryProvider.baseUrl}/v1/messages`,
         {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-api-key": config.ZAI_API_KEY,
-            "anthropic-version": "2023-06-01",
-          },
+          headers: summaryProvider.headers,
           body: JSON.stringify({
-            model: "glm-4.7-flash",
+            model: summaryModel,
             max_tokens: 1024,
             messages: [{ role: "user", content: summaryPrompt }],
           }),
         }
       );
     } finally {
-      flashSemaphore.release();
+      summarySemaphore.release();
     }
 
     if (summaryResponse.ok) {
@@ -324,7 +354,9 @@ function pruneMessages(messages: LLMMessage[]): LLMMessage[] {
 
   for (let i = 0; i < recent.length; i++) {
     const msg = recent[i];
-    const charCount = typeof msg.content === "string" ? msg.content.length : 0;
+    const charCount = typeof msg.content === "string"
+      ? msg.content.length
+      : msg.content.reduce((s, c) => s + (c.type === "text" ? c.text.length : 1000), 0);
     const tokenCount = Math.ceil(charCount / CHARS_PER_TOKEN_ESTIMATE);
 
     if (usedTokens + tokenCount <= MAX_CONTEXT_TOKENS) {
@@ -334,7 +366,15 @@ function pruneMessages(messages: LLMMessage[]): LLMMessage[] {
       const remainingTokens = MAX_CONTEXT_TOKENS - usedTokens;
       const remainingChars = remainingTokens * CHARS_PER_TOKEN_ESTIMATE;
       if (remainingChars > 100) {
-        result.push({ ...msg, content: truncate(typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content), remainingChars) });
+        if (typeof msg.content === "string") {
+          result.push({ ...msg, content: truncate(msg.content, remainingChars) });
+        } else {
+          // For multimodal: truncate text parts only, preserve image blocks
+          const truncated = msg.content.map((c) =>
+            c.type === "text" ? { type: "text" as const, text: truncate(c.text, remainingChars) } : c
+          );
+          result.push({ ...msg, content: truncated });
+        }
       }
       break;
     }
@@ -364,18 +404,23 @@ export async function callZAI(request: LLMRequest): Promise<LLMResponse> {
     .filter((m) => m.role !== "system")
     .map((m) => {
       if (Array.isArray(m.content)) {
-        const toolResult = m.content[0] as ToolResultContent | undefined;
-        if (toolResult?.type === "tool_result") {
+        const first = m.content[0] as unknown as ToolResultContent | undefined;
+        if (first?.type === "tool_result") {
           return {
             role: "tool" as const,
-            tool_call_id: toolResult.tool_use_id,
-            content: toolResult.content,
+            tool_call_id: first.tool_use_id,
+            content: first.content,
           };
         }
+        // Multimodal content (text + images) — pass through to API as-is
+        return {
+          role: m.role as "user" | "assistant",
+          content: m.content,
+        };
       }
       return {
         role: m.role as "user" | "assistant",
-        content: typeof m.content === "string" ? m.content : JSON.stringify(m.content),
+        content: m.content,
       };
     });
 
@@ -399,18 +444,15 @@ export async function callZAI(request: LLMRequest): Promise<LLMResponse> {
     }));
   }
 
-  const url = `${config.ZAI_BASE_URL}/v1/messages`;
+  const provider = resolveProviderConfig(config, model);
+  const url = `${provider.baseUrl}/v1/messages`;
   const modelSem = getSemaphore(model);
   await modelSem.acquire();
   let response: Response;
   try {
     response = await fetchWithRetry(url, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": config.ZAI_API_KEY,
-        "anthropic-version": "2023-06-01",
-      },
+      headers: provider.headers,
       body: JSON.stringify(body),
     });
   } finally {
@@ -419,14 +461,17 @@ export async function callZAI(request: LLMRequest): Promise<LLMResponse> {
 
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(`ZAI API error ${response.status}: ${text.slice(0, 200)}`);
+    throw new Error(`LLM API error ${response.status}: ${text.slice(0, 200)}`);
   }
 
   const data = await response.json() as {
     id: string;
+    model?: string;
     content?: Array<{ type: string; text?: string; id?: string; name?: string; input?: Record<string, unknown> }>;
     usage?: { input_tokens?: number; output_tokens?: number };
   };
+  const respText = data.content?.find((c) => c.type === "text")?.text ?? "";
+  logger.debug({ model: data.model ?? "unknown", preview: respText.slice(0, 100), event: "llm_response" }, "LLM response received");
 
   let content = "";
   const toolCalls: LLMToolCall[] = [];
@@ -452,6 +497,24 @@ export async function callZAI(request: LLMRequest): Promise<LLMResponse> {
   } as LLMResponse;
 }
 
+/** Resolve provider config (base URL, API key, headers) from model name */
+function resolveProviderConfig(config: ReturnType<typeof loadConfig>, model: string) {
+  const isKimi = model.startsWith("kimi-");
+  const baseUrl = isKimi ? config.KIMI_BASE_URL : config.ZAI_BASE_URL;
+  const apiKey = isKimi ? config.KIMI_API_KEY : config.ZAI_API_KEY;
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "anthropic-version": "2023-06-01",
+  };
+  if (isKimi) {
+    headers["Authorization"] = `Bearer ${apiKey}`;
+  } else {
+    headers["x-api-key"] = apiKey;
+  }
+  logger.debug({ provider: isKimi ? "Kimi" : "Z.ai", model, baseUrl, event: "llm_provider_config" }, "LLM provider config resolved");
+  return { baseUrl, apiKey, headers };
+}
+
 /** Progress callback for tool execution loop */
 export type ProgressCallback = (info: {
   iteration: number;
@@ -466,6 +529,20 @@ export type FileOperationCallback = (op: { tool: string; path?: string; result: 
 
 /** Callback for real-time token usage updates from API responses */
 export type TokenUsageCallback = (usage: { input_tokens: number; output_tokens: number }) => void;
+
+/** Detect if LLM text indicates intent to act but no tool was called */
+function looksLikeIntentToAct(text: string): boolean {
+  const lower = text.toLowerCase();
+  const intentPhrases = [
+    "i'll", "i will", "let me", "let's", "starting", "updating", "creating",
+    "writing", "editing", "reading", "checking", "generating", "building",
+    "implementing", "fixing", "adding", "removing", "proceeding",
+    "ผมจะ", "ฉันจะ", "เริ่ม", "ต่อ", "กำลัง", "จะทำ", "จะอัพเดต",
+    "จะสร้าง", "จะแก้ไข", "จะอ่าน", "จะเขียน", "จะเพิ่ม", "จะลบ",
+    "now i", "next i", "first i", "then i", "okay i", "sure i",
+  ];
+  return intentPhrases.some((p) => lower.includes(p));
+}
 
 /** Call LLM with tool execution loop */
 export async function callLLMWithTools(
@@ -485,6 +562,8 @@ export async function callLLMWithTools(
   let lastCheckpointIteration = 0;
   let messages = [...request.messages];
   let recentToolCalls: Array<{ name: string; inputHash: string }> = [];
+  let noToolRetries = 0;
+  const MAX_NO_TOOL_RETRIES = 2;
 
   while (iteration < 200) {
     iteration++;
@@ -500,9 +579,21 @@ export async function callLLMWithTools(
     onProgress?.({ iteration, totalTools, phase: "thinking", thinking: response.content.slice(0, 500) });
 
     if (!response.tool_calls || response.tool_calls.length === 0) {
+      // If the LLM says it will do something but doesn't call a tool, nudge it to act
+      if (looksLikeIntentToAct(response.content) && noToolRetries < MAX_NO_TOOL_RETRIES) {
+        noToolRetries++;
+        logger.info({ iteration, noToolRetries, event: "nudge_tool_call" }, "LLM indicated intent but emitted no tools — nudging");
+        messages.push({ role: "assistant", content: response.content });
+        messages.push({
+          role: "user",
+          content: `You indicated you would take action but did not call any tools. Please proceed with the tool call now. Do not explain — just act.`,
+        });
+        continue;
+      }
       onProgress?.({ iteration, totalTools, phase: "responding", thinking: response.content.slice(0, 500) });
       return response;
     }
+    noToolRetries = 0; // Reset on successful tool call
 
     totalTools += response.tool_calls.length;
     if (totalTools >= maxTools) {
@@ -760,11 +851,12 @@ export const GAME_STUDIO_TOOLS: LLMTool[] = [
       "The pipeline: AI image generation -> background removal -> post-processing -> Godot-ready PNG. " +
       "Returns the file path and auto-registers in the asset inventory. " +
       "Use for: UI icons, character sprites, props, textures, VFX sprites. " +
+      "For MVPs and prototypes, prefer quick pixel-art placeholder/concept assets through this Python pipeline before committing to final art direction. " +
       "For sprite sheets, set spriteSheet=true with cols/rows.",
     input_schema: {
       type: "object",
       properties: {
-        prompt: { type: "string", description: "Detailed image generation prompt describing the game asset" },
+        prompt: { type: "string", description: "Detailed image generation prompt describing the game asset. For MVP placeholders, explicitly say pixel art / retro / low-detail if that is the intended direction." },
         name: { type: "string", description: "Asset name, slug-safe (e.g. 'health-potion')" },
         type: { type: "string", description: "Asset type: 2d, 3d, vfx, audio, texture (default: 2d)" },
         category: { type: "string", description: "Category: prop, character, env, weapon, ui, tex, sfx, music (default: prop)" },

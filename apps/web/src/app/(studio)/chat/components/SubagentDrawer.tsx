@@ -7,9 +7,11 @@ interface SubagentDrawerProps {
   subagent: SubagentInfo | null;
   onClose: () => void;
   onGotoParent: (sessionId: string) => void;
+  onRequestStop: (subagent: SubagentInfo) => void;
+  onPrioritize: (subagent: SubagentInfo) => void;
 }
 
-export default function SubagentDrawer({ subagent, onClose, onGotoParent }: SubagentDrawerProps) {
+export default function SubagentDrawer({ subagent, onClose, onGotoParent, onRequestStop, onPrioritize }: SubagentDrawerProps) {
   if (!subagent) return null;
 
   const icon = getAgentIcon(subagent.role);
@@ -115,16 +117,36 @@ export default function SubagentDrawer({ subagent, onClose, onGotoParent }: Suba
 
         {/* Footer */}
         <div className="shrink-0 border-t-2 border-black bg-[#f3f2ff] p-4">
-          <button
-            onClick={() => {
-              onGotoParent(subagent.parentSessionId);
-              onClose();
-            }}
-            className="w-full flex items-center justify-center gap-2 border-2 border-black bg-white hover:bg-[#0055FF] hover:text-white transition-colors py-2 font-[var(--font-label)] text-xs font-bold uppercase"
-          >
-            <span className="material-symbols-outlined text-sm">arrow_back</span>
-            Go to Parent Session
-          </button>
+          <div className="grid grid-cols-1 gap-2">
+            {isActive && (
+              <>
+                <button
+                  onClick={() => onPrioritize(subagent)}
+                  className="w-full flex items-center justify-center gap-2 border-2 border-black bg-[#fff7eb] hover:bg-[#FF9500] transition-colors py-2 font-[var(--font-label)] text-xs font-bold uppercase"
+                >
+                  <span className="material-symbols-outlined text-sm">priority_high</span>
+                  Prioritize This Work
+                </button>
+                <button
+                  onClick={() => onRequestStop(subagent)}
+                  className="w-full flex items-center justify-center gap-2 border-2 border-black bg-white hover:bg-black hover:text-white transition-colors py-2 font-[var(--font-label)] text-xs font-bold uppercase"
+                >
+                  <span className="material-symbols-outlined text-sm">pause_circle</span>
+                  Ask Producer To Stop
+                </button>
+              </>
+            )}
+            <button
+              onClick={() => {
+                onGotoParent(subagent.parentSessionId);
+                onClose();
+              }}
+              className="w-full flex items-center justify-center gap-2 border-2 border-black bg-white hover:bg-[#0055FF] hover:text-white transition-colors py-2 font-[var(--font-label)] text-xs font-bold uppercase"
+            >
+              <span className="material-symbols-outlined text-sm">arrow_back</span>
+              Go to Parent Session
+            </button>
+          </div>
         </div>
       </div>
     </>

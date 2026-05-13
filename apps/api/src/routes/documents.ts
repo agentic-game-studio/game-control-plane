@@ -47,6 +47,9 @@ async function getProjectStore(projectId: string): Promise<DocumentStore | null>
   }
 
   const store = new DocumentStore(storeDir);
+  store.startWatching((event) => {
+    broadcast({ type: "document:updated", documentId: event.documentId, category: event.category, title: event.title });
+  });
   projectStores.set(projectId, store);
   return store;
 }
