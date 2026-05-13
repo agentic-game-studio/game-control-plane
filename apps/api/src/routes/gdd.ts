@@ -14,8 +14,9 @@ import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { loadConfig } from "../config.js";
 import { createQuestTicket } from "../services/quest-bridge.js";
-import { readData } from "../services/data-store.js";
+import { readTicketsBoard } from "../services/ticket-board.js";
 import { broadcast } from "../services/websocket.js";
+import { ingestProducerSummaryFact } from "../services/producer-summary.js";
 import type { TicketsBoard, WSEvent } from "@game-studio/types";
 import type { AgentRole } from "@game-studio/types";
 
@@ -261,9 +262,9 @@ gddRouter.post("/ingest", async (req: Request, res: Response) => {
   // Deduplicate against existing open tickets
   let board: TicketsBoard;
   try {
-    board = await readData<TicketsBoard>("tickets.json");
+    board = await readTicketsBoard(projectSlug);
   } catch {
-    board = { sprint: "Sprint 1", milestone: "Milestone 1", columns: [
+    board = { projectId: projectSlug, sprint: "Sprint 1", milestone: "Milestone 1", columns: [
       { id: "available", label: "Available", tickets: [] },
       { id: "in_progress", label: "Processing", tickets: [] },
       { id: "qa", label: "Verify", tickets: [] },
@@ -297,6 +298,7 @@ gddRouter.post("/ingest", async (req: Request, res: Response) => {
           item.description || `From GDD section: ${section}`,
           meta.area,
           meta.subarea,
+          projectSlug,
         );
         results.created.push(ticket.title);
         void ticket; // ticket already written by createQuestTicket
@@ -316,6 +318,12 @@ gddRouter.post("/ingest", async (req: Request, res: Response) => {
     skipped: results.skipped.length,
     errors: results.errors.length,
   } as WSEvent);
+
+  void ingestProducerSummaryFact(projectSlug, {
+    kind: "gdd_ingested",
+    at: new Date().toISOString(),
+    detail: `total=${totalItems} created=${results.created.length} skipped=${results.skipped.length} errors=${results.errors.length}`,
+  });
 
   res.json({
     success: true,

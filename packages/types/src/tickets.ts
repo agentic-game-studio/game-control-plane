@@ -4,6 +4,7 @@ export type WorkflowStage = "plan" | "decompose" | "execute" | "verify" | "fix";
 
 export interface Ticket {
   id: string;
+  projectId?: string;
   title: string;
   description: string;
   area: string;
@@ -23,6 +24,7 @@ export interface Ticket {
 }
 
 export interface CreateTicketRequest {
+  projectId?: string;
   title: string;
   description?: string;
   area: string;
@@ -35,6 +37,7 @@ export interface CreateTicketRequest {
 }
 
 export interface UpdateTicketRequest {
+  projectId?: string;
   title?: string;
   description?: string;
   area?: string;
@@ -47,6 +50,7 @@ export interface UpdateTicketRequest {
 }
 
 export interface MoveTicketRequest {
+  projectId?: string;
   status: TicketStatus;
 }
 
@@ -57,6 +61,7 @@ export interface TicketsColumn {
 }
 
 export interface TicketsBoard {
+  projectId?: string;
   sprint: string;
   milestone: string;
   columns: TicketsColumn[];

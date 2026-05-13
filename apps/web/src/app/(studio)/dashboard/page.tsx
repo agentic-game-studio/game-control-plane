@@ -37,8 +37,8 @@ export default function DashboardPage() {
   // Check server status
   const checkServerStatus = useCallback(async () => {
     try {
-      const result = await apiFetch<{ success: boolean; data: ServerStatus }>("/api/dashboard/server-status");
-      setServerStatus(result.data);
+      const result = await apiFetch<ServerStatus>("/api/dashboard/server-status");
+      setServerStatus(result);
     } catch {
       setServerStatus({ found: false, installed: false, built: false, error: "Failed to check" });
     }
@@ -48,13 +48,11 @@ export default function DashboardPage() {
   const setupServer = async () => {
     setSettingUp(true);
     try {
-      const result = await apiFetch<{ success: boolean; data: { installed: boolean; built: boolean } }>(
+      await apiFetch<{ installed: boolean; built: boolean }>(
         "/api/dashboard/setup-server",
         { method: "POST" }
       );
-      if (result.success) {
-        await checkServerStatus();
-      }
+      await checkServerStatus();
     } catch (err) {
       console.error("Server setup failed:", err);
     } finally {
@@ -89,10 +87,10 @@ export default function DashboardPage() {
     await Promise.all(
       godotProjects.map(async (project) => {
         try {
-          const result = await apiFetch<{ success: boolean; data: MCPStatus }>(
+          const result = await apiFetch<MCPStatus>(
             `/api/dashboard/projects/${project.id}/mcp-health`
           );
-          statuses[project.id] = result.data;
+          statuses[project.id] = result;
         } catch {
           statuses[project.id] = { status: "disconnected", error: "Failed to check" };
         }

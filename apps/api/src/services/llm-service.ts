@@ -15,7 +15,7 @@ import { getAgentSystemPrompt, loadAgentPrompts } from "../prompts/agent-prompt-
 import { callLLMWithTools, GAME_STUDIO_TOOLS, type LLMMessage, type ProgressCallback, type FileOperationCallback } from "../llm/zai-client.js";
 import { broadcast, broadcastSessionUpdate } from "./websocket.js";
 import { readData, writeData, broadcastEvent } from "./data-store.js";
-import { getZaiModel } from "../config/model-mapping.js";
+import { getModelForTier } from "../config/model-mapping.js";
 import type { WSEvent, AgentRole, GameAsset, AssetsData, AssetGenerationMeta } from "@game-studio/types";
 import {
   GodotMCPService,
@@ -123,6 +123,7 @@ ${godotInstructions}`;
   return base;
 }
 import { getWorkflow, createQuestTicket, moveQuestTicket } from "./quest-bridge.js";
+import { ingestProducerSummaryFromSession } from "./producer-summary.js";
 
 /** Helper to broadcast log entries with timestamp */
 function logEntry(sessionId: string, level: string, message: string, agent?: AgentRole) {
@@ -197,6 +198,14 @@ export function makeProgressCallback(sessionId: string, progressMsgId: string): 
   return (info) => {
     if (info.phase === "executing" && info.currentTool) {
       logEntry(sessionId, "info", `[TOOL] ${info.currentTool} (iteration ${info.iteration})`);
+      // Broadcast tool execution progress so frontend shows activity
+      broadcast({
+        type: "chat:progress",
+        sessionId,
+        progressMsgId,
+        progress: Math.min(85, 10 + info.iteration * 2),
+        content: `${info.currentTool} (iteration ${info.iteration})`,
+      } as WSEvent);
     }
     // Broadcast thinking content updates with special progress value -1
     if (info.thinking) {
@@ -382,6 +391,14 @@ async function executeTool(
           task: task.slice(0, 80),
         } as WSEvent);
 
+        void ingestProducerSummaryFromSession(sessionId, {
+          kind: "subagent_spawned",
+          at: new Date().toISOString(),
+          agentRole: agent,
+          title: task.slice(0, 80),
+          ticketId,
+        });
+
         // Recursively invoke subagent (don't broadcast events — subagent runs inline within parent session)
         let subResult: InvokeResult;
         try {
@@ -395,6 +412,15 @@ async function executeTool(
             ticketId,
             error: errorMsg,
           } as WSEvent);
+
+          void ingestProducerSummaryFromSession(sessionId, {
+            kind: "subagent_failed",
+            at: new Date().toISOString(),
+            agentRole: agent,
+            ticketId,
+            detail: errorMsg,
+          });
+
           throw err;
         }
 
@@ -406,6 +432,13 @@ async function executeTool(
           ticketId,
           output: subResult.content.slice(0, 200),
         } as WSEvent);
+
+        void ingestProducerSummaryFromSession(sessionId, {
+          kind: "subagent_completed",
+          at: new Date().toISOString(),
+          agentRole: agent,
+          ticketId,
+        });
 
         // Quest Bridge: move ticket to QA and trigger auto-verification
         await moveQuestTicket(ticketId, "qa", agent);
@@ -1072,7 +1105,7 @@ export async function invokeAgent(
     // Get model tier and map to Z.ai model
     const agentPrompt = prompts.get(agentRole);
     const modelTier = agentPrompt?.model ?? "sonnet";
-    const model = getZaiModel(modelTier);
+    const model = getModelForTier(modelTier);
 
     // Build initial messages
     const messages: LLMMessage[] = [];
@@ -1178,7 +1211,7 @@ export async function continueConversation(
     // Get model tier and map to Z.ai model
     const agentPrompt = prompts.get(agentRole);
     const modelTier = agentPrompt?.model ?? "sonnet";
-    const model = getZaiModel(modelTier);
+    const model = getModelForTier(modelTier);
 
     // Build tool list — inject Godot MCP tools for godot projects
     const godotTools = projectContext?.engine === "godot"
@@ -1212,8 +1245,6 @@ export async function continueConversation(
     };
   } catch (err: unknown) {
     const error = err as Error;
-    return {
-      content: `Error: ${error.message}`,
-    };
+    throw error;
   }
 }

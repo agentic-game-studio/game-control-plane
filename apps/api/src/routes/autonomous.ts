@@ -20,13 +20,18 @@ import { loadConfig } from "../config.js";
 import { invokeAgent, detectEngineFromWorkspace, type ProjectContext } from "../services/llm-service.js";
 import { readData, writeData, broadcastEvent } from "../services/data-store.js";
 import { generateTickets, addTicketsToBoard } from "../services/ticket-generator.js";
+import { readTicketsBoard, writeTicketsBoard } from "../services/ticket-board.js";
 import { broadcast } from "../services/websocket.js";
 import { logger } from "../utils/logger.js";
+import { resolveProjectWorkspace } from "../utils/workspace.js";
 import type { AgentRole, WSEvent } from "@game-studio/types";
 import type { TicketsBoard, Ticket, DashboardData, Project } from "@game-studio/types";
 import { getOrCreateGodotMCPService, launchGodotEditor, type GodotMCPServiceOptions } from "../services/godot-mcp-service.js";
+import { ingestProducerSummaryFact } from "../services/producer-summary.js";
 
 import { execSync } from "child_process";
+
+type ReadyProjectContext = ProjectContext & { workspacePath: string };
 
 const DEBUG_FILE = "/tmp/autonomous-debug.txt";
 function debugLog(msg: string) {
@@ -61,7 +66,7 @@ function killOrphanedSubprocesses(): void {
     for (const pid of pids) {
       try {
         // Kill the python3 parent (this also kills its child godot subprocess)
-        execSync(`kill -9 ${pid}`, { timeout: 5000 });
+        process.kill(parseInt(pid, 10), "SIGKILL");
         logger.info({ pid, event: "killed_orphaned_subprocess" }, `Killed orphaned subprocess pid=${pid}`);
       } catch {
         // Process may have already exited
@@ -283,7 +288,7 @@ const STALE_IN_PROGRESS_THRESHOLD_MS = 30 * 60 * 1000; // 30 minutes
  * Archive tickets stuck in in_progress for too long (crashed/timed-out iterations).
  * Returns a fresh copy of the board with stale tickets moved to completed.
  */
-async function cleanupStaleInProgress(board: TicketsBoard): Promise<TicketsBoard> {
+async function cleanupStaleInProgress(board: TicketsBoard, projectId: string): Promise<TicketsBoard> {
   const now = Date.now();
   let changed = false;
 
@@ -318,7 +323,7 @@ async function cleanupStaleInProgress(board: TicketsBoard): Promise<TicketsBoard
     }
   }
 
-  await writeData("tickets.json", board);
+  await writeTicketsBoard(board, projectId);
   logger.info(`Archived ${toArchive.length} stale in_progress tickets`);
   return board;
 }
@@ -348,8 +353,8 @@ function assignTicketToAgent(ticket: Ticket): AgentRole {
   return areaMap[ticket.area] ?? "godot-specialist";
 }
 
-async function moveTicket(ticketId: string, status: string): Promise<void> {
-  const data = await readData<TicketsBoard>("tickets.json");
+async function moveTicket(projectId: string, ticketId: string, status: string): Promise<void> {
+  const data = await readTicketsBoard(projectId);
   for (const column of data.columns) {
     const idx = column.tickets.findIndex((t) => t.id === ticketId);
     if (idx !== -1) {
@@ -359,7 +364,7 @@ async function moveTicket(ticketId: string, status: string): Promise<void> {
       if (destCol) {
         destCol.tickets.push({ ...ticket, status: status as Ticket["status"], updatedAt: new Date().toISOString() });
       }
-      await writeData("tickets.json", data);
+      await writeTicketsBoard(data, projectId);
       return;
     }
   }
@@ -372,8 +377,9 @@ async function getProjectContext(projectId: string): Promise<ProjectContext | un
 
   let engine = project.engine;
   // Auto-detect engine if not set
-  if (!engine && project.workspacePath) {
-    const detected = await detectEngineFromWorkspace(project.workspacePath);
+  const effectiveWorkspacePath = project.workspacePath ?? project.id;
+  if (!engine && effectiveWorkspacePath) {
+    const detected = await detectEngineFromWorkspace(effectiveWorkspacePath);
     if (detected) engine = detected as "godot" | "unreal" | "unity" | "phaser" | "threejs";
   }
 
@@ -381,18 +387,18 @@ async function getProjectContext(projectId: string): Promise<ProjectContext | un
     name: project.name,
     description: project.description,
     engine,
-    workspacePath: project.workspacePath,
+    workspacePath: effectiveWorkspacePath,
     projectId: project.id,
   };
 }
 
 // ─── Core loop step ──────────────────────────────────────────────────────────
 
-async function runIteration(state: LoopState, board: TicketsBoard, projectContext: ProjectContext | undefined): Promise<{ ticket: Ticket | null; done: boolean; error?: string }> {
-  debugLog(`runIteration ENTRY iter=${state.currentIteration}, projectContext.engine=${projectContext?.engine}, workspacePath=${projectContext?.workspacePath}`);
+async function runIteration(state: LoopState, board: TicketsBoard, projectContext: ReadyProjectContext): Promise<{ ticket: Ticket | null; done: boolean; error?: string }> {
+  debugLog(`runIteration ENTRY iter=${state.currentIteration}, projectContext.engine=${projectContext.engine}, workspacePath=${projectContext.workspacePath}`);
 
   // Clean up stale in_progress tickets (from crashed/timed-out iterations)
-  board = await cleanupStaleInProgress(board);
+  board = await cleanupStaleInProgress(board, state.projectId);
 
   let ticket = getNextAvailableTicket(board);
   debugLog(`getNextAvailableTicket result: ${ticket ? `ticket.id=${ticket.id}, title=${ticket.title}` : "null (queue empty)"}`);
@@ -404,13 +410,13 @@ async function runIteration(state: LoopState, board: TicketsBoard, projectContex
 
       debugLog(`queue empty, completedCount=${totalCompleted}, generating tickets...`);
       try {
-        const newTickets = await generateTickets(state.projectId ?? "pixel-platformer-1", projectContext?.workspacePath ?? undefined);
+        const newTickets = await generateTickets(state.projectId, projectContext.workspacePath);
         debugLog(`generateTickets returned ${newTickets.length} tickets`);
 
         if (newTickets.length > 0) {
-          await addTicketsToBoard(newTickets);
+          await addTicketsToBoard(state.projectId, newTickets);
           logger.info(`Generated ${newTickets.length} new tickets`);
-          const refreshedBoard = await readData<TicketsBoard>("tickets.json");
+          const refreshedBoard = await readTicketsBoard(state.projectId);
           ticket = getNextAvailableTicket(refreshedBoard);
           debugLog(`queue replenished: ${newTickets.length} tickets added, getNextAvailableTicket=${ticket ? "got ticket" : "still null"}`);
         } else if (totalCompleted > 0) {
@@ -425,20 +431,27 @@ async function runIteration(state: LoopState, board: TicketsBoard, projectContex
           return { ticket: null, done: false };
         }
       } catch (err) {
-        logger.error("Ticket generation failed:", err);
+        logger.error({ err, event: "ticket_generation_failed" }, "Ticket generation failed");
         return { ticket: null, done: false };
       }
     }
 
-  state.currentTicketId = ticket.id;
-  state.currentAgentRole = assignTicketToAgent(ticket);
+  if (!ticket) {
+    debugLog("runIteration exiting without ticket after generation attempt");
+    return { ticket: null, done: false };
+  }
+
+  const activeTicket = ticket;
+
+  state.currentTicketId = activeTicket.id;
+  state.currentAgentRole = assignTicketToAgent(activeTicket);
   state.status = "running";
 
   const iteration: LoopIteration = {
     iteration: state.currentIteration,
-    ticketId: ticket.id,
+    ticketId: activeTicket.id,
     agentRole: state.currentAgentRole,
-    title: ticket.title,
+    title: activeTicket.title,
     status: "running",
     startedAt: new Date().toISOString(),
   };
@@ -449,14 +462,23 @@ async function runIteration(state: LoopState, board: TicketsBoard, projectContex
   broadcast({
     type: "autonomous:iteration:started",
     sessionId: state.sessionId,
-    ticketId: ticket.id,
+    ticketId: activeTicket.id,
     agentRole: state.currentAgentRole,
-    title: ticket.title,
+    title: activeTicket.title,
     iteration: state.currentIteration,
   } as WSEvent);
 
+  void ingestProducerSummaryFact(state.projectId, {
+    kind: "autonomous_iteration_started",
+    at: new Date().toISOString(),
+    ticketId: activeTicket.id,
+    title: activeTicket.title,
+    agentRole: state.currentAgentRole,
+    detail: `iteration ${state.currentIteration}`,
+  });
+
   // Move ticket to in_progress
-  await moveTicket(ticket.id, "in_progress");
+  await moveTicket(state.projectId, activeTicket.id, "in_progress");
 
   // Per-ticket retry with exponential backoff for transient fetch failures.
   // "fetch failed" = Node.js network error (ZAI API unreachable). These are often
@@ -466,6 +488,7 @@ async function runIteration(state: LoopState, board: TicketsBoard, projectContex
   let agentResult: { content?: string } | null = null;
   let agentError = "";
   let attempt = 0;
+  let agentRejected = false;
 
   while (attempt <= MAX_TICKET_RETRIES) {
     attempt++;
@@ -473,7 +496,7 @@ async function runIteration(state: LoopState, board: TicketsBoard, projectContex
 
     const agentPromise = invokeAgent(
       state.currentAgentRole as AgentRole,
-      `[AUTONOMOUS TICKET] ${ticket.description || ticket.title}${attempt > 1 ? ` (retry ${attempt}/${MAX_TICKET_RETRIES})` : ""}`,
+      `[AUTONOMOUS TICKET] ${activeTicket.description || activeTicket.title}${attempt > 1 ? ` (retry ${attempt}/${MAX_TICKET_RETRIES})` : ""}`,
       state.sessionId,
       attempt > 1 ? `Previous attempt failed with: ${agentError}. Fix the issue and retry.` : undefined,
       undefined, // conversationHistory
@@ -487,7 +510,7 @@ async function runIteration(state: LoopState, board: TicketsBoard, projectContex
       setTimeout(() => reject(new Error(`Agent timed out after ${AGENT_TIMEOUT_MS / 1000}s — godot-specialist likely hanging on a Godot MCP tool. The MCP per-tool timeout is 30s; if a tool hangs past that the MCP service kills it. Check that Godot editor is running with godot_mcp plugin and MCP port 6005 is reachable.`)), AGENT_TIMEOUT_MS)
     );
 
-    let agentRejected = false;
+    agentRejected = false;
     try {
       agentResult = await Promise.race([agentPromise, timeoutPromise]);
     } catch (err: unknown) {
@@ -506,7 +529,7 @@ async function runIteration(state: LoopState, board: TicketsBoard, projectContex
     const isBootFailure = agentError.includes("Boot check failed");
 
     if (isFetchFailure && attempt <= MAX_TICKET_RETRIES) {
-      logger.warn({ ticketId: ticket.id, attempt, error: agentError, event: "retry_fetch_failure" },
+      logger.warn({ ticketId: activeTicket.id, attempt, error: agentError, event: "retry_fetch_failure" },
         `ZAI fetch failure on attempt ${attempt}/${MAX_TICKET_RETRIES} — retrying in ${RETRY_DELAYS[attempt - 1] / 1000}s`);
       await new Promise((r) => setTimeout(r, RETRY_DELAYS[attempt - 1]));
       continue;
@@ -514,13 +537,13 @@ async function runIteration(state: LoopState, board: TicketsBoard, projectContex
 
     // Non-retryable or max retries exceeded — stop retrying
     if (attempt > MAX_TICKET_RETRIES) {
-      logger.warn({ ticketId: ticket.id, error: agentError, event: "max_retries_exceeded" },
-        `Ticket ${ticket.id} failed after ${MAX_TICKET_RETRIES} retries — giving up`);
+      logger.warn({ ticketId: activeTicket.id, error: agentError, event: "max_retries_exceeded" },
+        `Ticket ${activeTicket.id} failed after ${MAX_TICKET_RETRIES} retries — giving up`);
     }
     break;
   }
 
-  const agentRejected = agentError.length > 0 && !agentResult;
+  agentRejected = agentError.length > 0 && !agentResult;
 
   if (agentRejected) {
     // Kill any orphaned godot/python subprocesses left behind by timed-out agents
@@ -531,8 +554,8 @@ async function runIteration(state: LoopState, board: TicketsBoard, projectContex
     // Skip boot check only if we have no valid project path.
     let bootOk = true;
     let bootErrors: string[] = [];
-    if (projectContext?.workspacePath) {
-      const fullProjectPath = join(loadConfig().WORKSPACE_DIR, projectContext.workspacePath);
+    if (projectContext.workspacePath) {
+      const fullProjectPath = resolveProjectWorkspace(projectContext.workspacePath);
       const bootResult = await runBootCheck(fullProjectPath);
       bootOk = bootResult.bootOk;
       bootErrors = bootResult.errors;
@@ -558,7 +581,7 @@ async function runIteration(state: LoopState, board: TicketsBoard, projectContex
     state.lastHeartbeat = new Date().toISOString();
 
     // Route to QA for code reviewer to inspect the diff and identify what went wrong
-    await moveTicket(ticket.id, "qa");
+    await moveTicket(state.projectId, activeTicket.id, "qa");
 
     // Invoke code-reviewer to analyze what went wrong and provide diagnostic feedback.
     // This runs async (non-blocking) so the loop isn't slowed down by a second LLM call.
@@ -567,10 +590,10 @@ async function runIteration(state: LoopState, board: TicketsBoard, projectContex
       "code-reviewer" as AgentRole,
       `Code review task — analyze this failed ticket and provide diagnostic feedback.
 
-**Ticket:** ${ticket.title}
+**Ticket:** ${activeTicket.title}
 **Agent:** ${state.currentAgentRole}
 **Error:** ${combinedError}
-**Project workspace:** ${projectContext?.workspacePath ?? "unknown"}
+**Project workspace:** ${projectContext.workspacePath ?? "unknown"}
 
 Review the godot-specialist's recent changes in the project workspace above.
 Identify what likely caused the failure. Be specific — point to files, functions, or patterns.
@@ -582,23 +605,32 @@ If the failure is an infinite loop or hang (timeout), suggest a workaround.`,
       undefined, // no onProgress
       false,     // don't broadcast reviewer events — it's background analysis
     ).then((result) => {
-      logger.info({ ticketId: ticket.id, reviewLength: result.content.length, event: "code_review_done" },
-        `Code review for failed ticket ${ticket.id}: ${result.content.slice(0, 200)}`);
+      logger.info({ ticketId: activeTicket.id, reviewLength: result.content.length, event: "code_review_done" },
+        `Code review for failed ticket ${activeTicket.id}: ${result.content.slice(0, 200)}`);
     }).catch((err) => {
-      logger.warn({ ticketId: ticket.id, error: err.message, event: "code_review_error" },
-        `Code reviewer failed for ticket ${ticket.id}: ${err.message}`);
+      logger.warn({ ticketId: activeTicket.id, error: err.message, event: "code_review_error" },
+        `Code reviewer failed for ticket ${activeTicket.id}: ${err.message}`);
     });
 
     broadcast({
       type: "autonomous:iteration:failed",
       sessionId: state.sessionId,
-      ticketId: ticket.id,
-      agentRole: ticket.agentRole ?? "godot-specialist",
+      ticketId: activeTicket.id,
+      agentRole: activeTicket.agentRole ?? "godot-specialist",
       iteration: state.currentIteration,
       error: combinedError,
       bootOk,
       bootErrors,
     } as WSEvent);
+
+    void ingestProducerSummaryFact(state.projectId, {
+      kind: "autonomous_iteration_failed",
+      at: new Date().toISOString(),
+      ticketId: activeTicket.id,
+      title: activeTicket.title,
+      agentRole: state.currentAgentRole,
+      detail: combinedError.slice(0, 400),
+    });
   } else {
     // Agent completed — run godot-headless-boot-check before marking ticket done.
     // Boot check gate: Godot project files must parse cleanly before a ticket is marked done.
@@ -608,16 +640,13 @@ If the failure is an infinite loop or hang (timeout), suggest a workaround.`,
     let bootOk = true;
     let bootErrors: string[] = [];
 
-    if (!projectContext?.workspacePath) {
+    if (!projectContext.workspacePath) {
       logger.warn({ projectId: state.projectId, event: "boot_check_skipped_no_path" },
         "Cannot run Godot boot check: project workspacePath is not set. Ticket will be re-queued.");
       bootOk = false;
       bootErrors = [`Project workspacePath not configured — cannot validate Godot project (projectId=${state.projectId}). Set workspacePath in dashboard.json.`];
     } else {
-      const fullProjectPath = join(
-        loadConfig().WORKSPACE_DIR,
-        projectContext.workspacePath,
-      );
+      const fullProjectPath = resolveProjectWorkspace(projectContext.workspacePath);
       const bootResult = await runBootCheck(fullProjectPath);
       bootOk = bootResult.bootOk;
       bootErrors = bootResult.errors;
@@ -634,15 +663,23 @@ If the failure is an infinite loop or hang (timeout), suggest a workaround.`,
       state.lastHeartbeat = new Date().toISOString();
 
       // Return ticket to available queue for the agent to fix
-      await moveTicket(ticket.id, "available");
+      await moveTicket(state.projectId, activeTicket.id, "available");
 
       broadcast({
         type: "autonomous:iteration:boot_check_failed",
         sessionId: state.sessionId,
-        ticketId: ticket.id,
+        ticketId: activeTicket.id,
         iteration: state.currentIteration,
         errors: bootErrors,
       } as unknown as WSEvent);
+
+      void ingestProducerSummaryFact(state.projectId, {
+        kind: "autonomous_iteration_boot_check_failed",
+        at: new Date().toISOString(),
+        ticketId: activeTicket.id,
+        title: activeTicket.title,
+        detail: bootErrors.slice(0, 3).join("; "),
+      });
     } else {
       // Boot check passed — mark completed
       iteration.status = "completed";
@@ -651,15 +688,24 @@ If the failure is an infinite loop or hang (timeout), suggest a workaround.`,
       state.completedCount++;
       state.lastHeartbeat = new Date().toISOString();
 
-      await moveTicket(ticket.id, "completed");
+      await moveTicket(state.projectId, activeTicket.id, "completed");
 
       broadcast({
         type: "autonomous:iteration:completed",
         sessionId: state.sessionId,
-        ticketId: ticket.id,
+        ticketId: activeTicket.id,
         iteration: state.currentIteration,
         completedCount: state.completedCount,
       } as WSEvent);
+
+      void ingestProducerSummaryFact(state.projectId, {
+        kind: "autonomous_iteration_completed",
+        at: new Date().toISOString(),
+        ticketId: activeTicket.id,
+        title: activeTicket.title,
+        agentRole: state.currentAgentRole,
+        detail: `completedCount=${state.completedCount}`,
+      });
     }
   }
 
@@ -670,10 +716,10 @@ If the failure is an infinite loop or hang (timeout), suggest a workaround.`,
 
   // Check if we've hit max iterations
   if (state.currentIteration >= state.maxIterations) {
-    return { ticket, done: true };
+    return { ticket: activeTicket, done: true };
   }
 
-  return { ticket, done: false };
+  return { ticket: activeTicket, done: false };
 }
 
 // ─── Routes ──────────────────────────────────────────────────────────────────
@@ -691,6 +737,40 @@ autonomousRouter.post("/start", async (req: Request, res: Response) => {
     return;
   }
 
+  if (!projectId) {
+    res.status(400).json({ success: false, error: "projectId is required" });
+    return;
+  }
+
+  const projectContext = await getProjectContext(projectId);
+  if (!projectContext) {
+    res.status(404).json({ success: false, error: `Project ${projectId} not found` });
+    return;
+  }
+
+  const workspacePath = projectContext.workspacePath;
+  if (!workspacePath) {
+    res.status(400).json({
+      success: false,
+      error: `Project ${projectId} has no workspacePath. Configure a workspace before starting autonomous mode.`,
+    });
+    return;
+  }
+
+  const workspaceAbsPath = resolveProjectWorkspace(workspacePath);
+  if (!existsSync(workspaceAbsPath)) {
+    res.status(400).json({
+      success: false,
+      error: `Project workspace does not exist: ${workspacePath}`,
+    });
+    return;
+  }
+
+  const readyProjectContext: ReadyProjectContext = {
+    ...projectContext,
+    workspacePath,
+  };
+
   const existing = loadLoopState(sessionId);
 
   // Resume if already running
@@ -702,7 +782,7 @@ autonomousRouter.post("/start", async (req: Request, res: Response) => {
   const state: LoopState = existing && existing.status !== "idle"
     ? { ...existing, status: "running", maxIterations, lastHeartbeat: new Date().toISOString() }
     : {
-        projectId: projectId ?? "default",
+        projectId,
         sessionId,
         status: "running",
         startedAt: existing?.startedAt ?? new Date().toISOString(),
@@ -719,29 +799,15 @@ autonomousRouter.post("/start", async (req: Request, res: Response) => {
   // Kick off the loop asynchronously (don't block the HTTP response)
   (async () => {
     debugLog(`batch ${state.sessionId}] async loop started, projectId=${state.projectId}`);
-
-    // ── Setup phase ──────────────────────────────────────────────────────────
-    let projectContext: ReturnType<typeof getProjectContext> extends Promise<infer T> ? T : never | undefined;
-    try {
-      projectContext = await getProjectContext(state.projectId);
-      debugLog(`batch ${state.sessionId}] getProjectContext done, engine=${projectContext?.engine}, workspacePath=${projectContext?.workspacePath}`);
-    } catch (err: unknown) {
-      debugLog(`batch ${state.sessionId}] getProjectContext CRASHED: ${err}`);
-      const e = err instanceof Error ? err.message : String(err);
-      state.status = "error";
-      state.lastError = `getProjectContext failed: ${e}`;
-      state.lastHeartbeat = new Date().toISOString();
-      saveLoopState(state);
-      return;
-    }
+    debugLog(`batch ${state.sessionId}] validated projectContext engine=${readyProjectContext.engine}, workspacePath=${readyProjectContext.workspacePath}`);
 
     // Start Godot MCP service for godot projects (mirrors chat.ts logic)
-    if (projectContext?.engine === "godot") {
+    if (readyProjectContext.engine === "godot") {
       const mcpOptions: GodotMCPServiceOptions = {
-        projectPath: projectContext.workspacePath ?? undefined,
+        projectPath: readyProjectContext.workspacePath,
         mode: "lite",
       };
-      logger.info({ projectId: state.projectId, engine: projectContext.engine, event: "autonomous_mcp_starting" },
+      logger.info({ projectId: state.projectId, engine: readyProjectContext.engine, event: "autonomous_mcp_starting" },
         "Starting Godot MCP service for autonomous loop");
       getOrCreateGodotMCPService(state.projectId, mcpOptions).then((service) => {
         logger.info({ projectId: state.projectId, running: service.running(), event: "autonomous_mcp_started" },
@@ -752,17 +818,14 @@ autonomousRouter.post("/start", async (req: Request, res: Response) => {
       });
 
       // Auto-launch Godot editor if workspace path is known
-      if (projectContext.workspacePath) {
-        const config = loadConfig();
-        const projectDir = join(config.WORKSPACE_DIR, projectContext.workspacePath);
-        const launchResult = launchGodotEditor(projectDir);
-        if (launchResult.success) {
-          logger.info({ projectId: state.projectId, pid: launchResult.pid, event: "godot_editor_launched" },
-            `Godot editor launched (pid=${launchResult.pid})`);
-        } else {
-          logger.warn({ projectId: state.projectId, error: launchResult.error, event: "godot_editor_launch_failed" },
-            `Godot editor launch failed: ${launchResult.error}`);
-        }
+      const projectDir = resolveProjectWorkspace(readyProjectContext.workspacePath);
+      const launchResult = launchGodotEditor(projectDir);
+      if (launchResult.success) {
+        logger.info({ projectId: state.projectId, pid: launchResult.pid, event: "godot_editor_launched" },
+          `Godot editor launched (pid=${launchResult.pid})`);
+      } else {
+        logger.warn({ projectId: state.projectId, error: launchResult.error, event: "godot_editor_launch_failed" },
+          `Godot editor launch failed: ${launchResult.error}`);
       }
     }
 
@@ -773,8 +836,8 @@ autonomousRouter.post("/start", async (req: Request, res: Response) => {
     while (!done && currentState.status === "running") {
       try {
         debugLog(`batch ${state.sessionId}] calling runIteration`);
-        const board = await readData<TicketsBoard>("tickets.json");
-        const result = await runIteration(currentState, board, projectContext);
+        const board = await readTicketsBoard(state.projectId);
+        const result = await runIteration(currentState, board, readyProjectContext);
         debugLog(`batch ${state.sessionId}] runIteration returned, done=${result.done}`);
         currentState = loadLoopState(state.sessionId)!;
         done = result.done;
@@ -796,6 +859,12 @@ autonomousRouter.post("/start", async (req: Request, res: Response) => {
           sessionId: state.sessionId,
           error,
         } as WSEvent);
+
+        void ingestProducerSummaryFact(currentState.projectId, {
+          kind: "autonomous_error",
+          at: new Date().toISOString(),
+          detail: error,
+        });
       }
     }
 
@@ -822,6 +891,12 @@ autonomousRouter.post("/start", async (req: Request, res: Response) => {
         failedCount: currentState.failedCount,
         totalIterations: currentState.currentIteration,
       } as WSEvent);
+
+      void ingestProducerSummaryFact(currentState.projectId, {
+        kind: "autonomous_loop_completed",
+        at: new Date().toISOString(),
+        detail: `done=${currentState.completedCount} fail=${currentState.failedCount} iter=${currentState.currentIteration}`,
+      });
     }
   })().catch((err) => {
     debugLog(`batch ${state.sessionId}] CRASH in async loop: ${err}`);
@@ -867,6 +942,12 @@ autonomousRouter.post("/stop", async (req: Request, res: Response) => {
     completedCount: state.completedCount,
     failedCount: state.failedCount,
   } as WSEvent);
+
+  void ingestProducerSummaryFact(state.projectId, {
+    kind: "autonomous_loop_stopped",
+    at: new Date().toISOString(),
+    detail: `done=${state.completedCount} fail=${state.failedCount} iter=${state.currentIteration}`,
+  });
 
   res.json({ success: true, data: state });
 });

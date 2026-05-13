@@ -3,16 +3,17 @@
 import { useMemo } from "react";
 import { getAgentIcon } from "@/lib/agent-icons";
 import { useProject } from "@/contexts/ProjectContext";
-import type { AgentSession } from "@/hooks/useCommandRoom";
+import type { AgentSession, ProducerUIState } from "@/hooks/useCommandRoom";
 
 interface ChatTabsProps {
   sessions: Map<string, AgentSession>;
   currentSession: string;
   onSelectSession: (sessionId: string) => void;
   onCloseSession: (sessionId: string) => void;
+  producerState?: ProducerUIState;
 }
 
-export default function ChatTabs({ sessions, currentSession, onSelectSession, onCloseSession }: ChatTabsProps) {
+export default function ChatTabs({ sessions, currentSession, onSelectSession, onCloseSession, producerState }: ChatTabsProps) {
   const { currentProject } = useProject();
   const entries = useMemo(() => [...sessions.entries()], [sessions]);
   const producerEntry = entries.find(([, s]) => s.role === "producer");
@@ -38,6 +39,7 @@ export default function ChatTabs({ sessions, currentSession, onSelectSession, on
             isActive={currentSession === producerEntry[0]}
             isClosable={false}
             onSelect={() => onSelectSession(producerEntry[0])}
+            producerState={producerState}
           />
         )}
 
@@ -63,16 +65,33 @@ function TabButton({
   isClosable,
   onSelect,
   onClose,
+  producerState,
 }: {
   session: AgentSession;
   isActive: boolean;
   isClosable: boolean;
   onSelect: () => void;
   onClose?: () => void;
+  producerState?: ProducerUIState;
 }) {
   const icon = getAgentIcon(session.role);
   const label = session.role === "producer" ? "BOARD_ROOM" : session.role.replace(/-/g, "_").toUpperCase();
   const isDone = session.status === "done";
+  const isProducer = session.role === "producer";
+  const statusChip = isProducer
+    ? producerState?.mode === "thinking"
+      ? "THINKING"
+      : producerState?.mode === "delegated"
+        ? "IN FLIGHT"
+        : "READY"
+    : isDone
+      ? "DONE"
+      : session.status === "active"
+        ? "RUNNING"
+        : "IDLE";
+  const delegatedCount = isProducer
+    ? (producerState?.activeDelegatedSessions ?? 0) + (producerState?.activeDelegatedSubagents ?? 0)
+    : 0;
 
   return (
     <button
@@ -88,16 +107,27 @@ function TabButton({
       <span className="material-symbols-outlined text-sm">{icon}</span>
       <span>{label}</span>
 
-      {/* Status dot */}
       <span
-        className={`w-2 h-2 border border-black ${
-          session.role === "producer"
-            ? "bg-[#df2b31] animate-pulse"
+        className={`px-1.5 py-0.5 border border-black font-[var(--font-terminal)] text-[9px] leading-none ${
+          isProducer
+            ? producerState?.mode === "thinking"
+              ? "bg-[#0055FF] text-white"
+              : producerState?.mode === "delegated"
+                ? "bg-[#FF9500] text-black"
+                : "bg-[#2ECC71] text-white"
             : isDone
-            ? "bg-[#737688]"
-            : "bg-[#0055FF] animate-pulse"
+              ? "bg-[#737688] text-white"
+              : "bg-[#0055FF] text-white"
         }`}
-      />
+      >
+        {statusChip}
+      </span>
+
+      {delegatedCount > 0 && (
+        <span className="min-w-4 h-4 px-1 border border-black bg-black text-white font-[var(--font-terminal)] text-[9px] leading-[14px] text-center">
+          {delegatedCount}
+        </span>
+      )}
 
       {/* Close button */}
       {isClosable && (

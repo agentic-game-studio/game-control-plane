@@ -27,33 +27,18 @@ interface ChatThreadProps {
 const SAMPLE_PROMPTS: { icon: string; label: string; prompt: string }[] = [
   {
     icon: "swords",
-    label: "Design a combat system",
-    prompt: "I'd like to design the core combat system for this game. Help me sketch the mechanics, hit feedback, and balance levers.",
-  },
-  {
-    icon: "auto_stories",
-    label: "Write the opening cutscene",
-    prompt: "Help me draft the opening cutscene for this game — set the tone, introduce the world, and hook the player.",
-  },
-  {
-    icon: "checklist",
-    label: "Plan sprint 1",
-    prompt: "Plan out sprint 1 for this project. Break the milestone into discrete tasks across design, programming, art, and QA.",
-  },
-  {
-    icon: "palette",
-    label: "Generate game assets",
-    prompt: "Generate a batch of game assets for this project. Use the asset pipeline to create UI icons, character sprites, and environment textures.",
+    label: "Help with game design",
+    prompt: "Help me think through the game design for this project and propose clear next steps.",
   },
   {
     icon: "architecture",
-    label: "Review architecture",
-    prompt: "Review the current codebase architecture. Identify any structural issues, missing abstractions, or areas that need refactoring.",
+    label: "Review project now",
+    prompt: "Review the current project status across design, implementation, and risks, then recommend priorities.",
   },
   {
-    icon: "psychology",
-    label: "Consult creative director",
-    prompt: "I need a creative consultation on the game's visual direction and tone. Bring the creative director online for a session.",
+    icon: "checklist",
+    label: "Check task status",
+    prompt: "Check task and ticket status for this project, summarize what is in progress, blocked, and completed.",
   },
 ];
 
@@ -220,13 +205,98 @@ const ImageGallery = memo(function ImageGallery({ images }: { images?: string[] 
   );
 });
 
-const SystemMessage = memo(function SystemMessage({ msg }: { msg: ChatMessage }) {
+const ProducerUpdateMessage = memo(function ProducerUpdateMessage({ msg }: { msg: ChatMessage }) {
+  const renderedContent = useMemo(() => cachedRenderMarkdown(msg.content), [msg.content]);
+
   return (
-    <div className="flex justify-center my-2 px-8">
-      <div className="bg-[#e7e7f5] border-2 border-black px-5 py-1.5 text-center">
-        <span className="font-[var(--font-terminal)] text-xs uppercase text-[#434656]">
-          {msg.content}
-        </span>
+    <div className="flex justify-start my-3 px-8 w-full max-w-3xl min-w-0">
+      <div className="border-2 border-black bg-[#eef4ff] shadow-[3px_3px_0_0_rgba(0,85,255,0.35)] w-full min-w-0">
+        <div className="bg-[#0055FF] text-white px-3 py-1.5 flex items-center justify-between gap-2 border-b-2 border-black">
+          <span className="font-[var(--font-label)] text-[10px] font-bold uppercase tracking-widest">
+            Producer update
+          </span>
+          <span className="font-[var(--font-terminal)] text-[10px] opacity-90">{formatTime(msg.timestamp)}</span>
+        </div>
+        <div className="px-4 py-3 min-w-0">
+          <div
+            className="font-[var(--font-terminal)] text-sm prose prose-sm max-w-none min-w-0 break-words [overflow-wrap:anywhere] [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_code]:break-words [&_h2]:text-base [&_h2]:mt-0 [&_h2]:mb-2"
+            dangerouslySetInnerHTML={{ __html: renderedContent }}
+          />
+        </div>
+      </div>
+    </div>
+  );
+});
+
+const SystemMessage = memo(function SystemMessage({ msg }: { msg: ChatMessage }) {
+  const [expanded, setExpanded] = useState(false);
+  const [isOverflowing, setIsOverflowing] = useState(false);
+  const measureRef = useRef<HTMLSpanElement | null>(null);
+
+  useEffect(() => {
+    setExpanded(false);
+  }, [msg.content]);
+
+  useEffect(() => {
+    const measure = measureRef.current;
+    if (!measure) return;
+
+    const updateOverflowState = () => {
+      const computed = window.getComputedStyle(measure);
+      const fontSize = Number.parseFloat(computed.fontSize) || 12;
+      const lineHeight = Number.parseFloat(computed.lineHeight) || fontSize * 1.4;
+      setIsOverflowing(measure.offsetHeight > lineHeight * 4 + 1);
+    };
+
+    updateOverflowState();
+
+    if (typeof ResizeObserver !== "undefined") {
+      const observer = new ResizeObserver(updateOverflowState);
+      observer.observe(measure);
+      return () => observer.disconnect();
+    }
+
+    window.addEventListener("resize", updateOverflowState);
+    return () => window.removeEventListener("resize", updateOverflowState);
+  }, [msg.content]);
+
+  return (
+    <div className="flex justify-start my-2 px-8">
+      <div className="bg-[#e7e7f5] border-2 border-black px-5 py-1.5 text-left max-w-3xl">
+        <div className="relative">
+          <span
+            className="font-[var(--font-terminal)] text-xs uppercase text-[#434656] whitespace-pre-wrap break-words block"
+            style={
+              !expanded && isOverflowing
+                ? {
+                    display: "-webkit-box",
+                    WebkitBoxOrient: "vertical",
+                    WebkitLineClamp: 4,
+                    overflow: "hidden",
+                  }
+                : undefined
+            }
+          >
+            {msg.content}
+          </span>
+          <span
+            ref={measureRef}
+            aria-hidden="true"
+            className="font-[var(--font-terminal)] text-xs uppercase text-[#434656] whitespace-pre-wrap break-words block invisible pointer-events-none absolute inset-x-0 top-0"
+          >
+            {msg.content}
+          </span>
+        </div>
+        {isOverflowing && (
+          <div className="mt-2 pt-2 border-t border-[#b7b9c9]">
+            <button
+              onClick={() => setExpanded((value) => !value)}
+              className="font-[var(--font-label)] text-[10px] font-bold uppercase border border-black bg-white px-2 py-1 hover:bg-black hover:text-white transition-colors"
+            >
+              {expanded ? "Show less" : "Show more"}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -602,6 +672,8 @@ export default function ChatThread({ messages, sessions, threadId, threadTitle, 
           switch (msg.type) {
             case "system":
               return <SystemMessage key={msg.id} msg={msg} />;
+            case "producer_update":
+              return <ProducerUpdateMessage key={msg.id} msg={msg} />;
             case "welcome":
               return <WelcomeMessage key={msg.id} msg={msg} />;
             case "agent":

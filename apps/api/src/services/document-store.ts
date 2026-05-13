@@ -94,8 +94,9 @@ export class DocumentStore {
 
   /** Get category for a file path relative to workspace */
   private categorize(relPath: string): DocumentCategory {
+    const normalized = relPath.startsWith("docs/") ? relPath.slice(5) : relPath;
     for (const [dir, cat] of Object.entries(CATEGORY_DIRS)) {
-      if (relPath.startsWith(dir)) return cat;
+      if (normalized.startsWith(dir)) return cat;
     }
     return "other";
   }
@@ -105,51 +106,57 @@ export class DocumentStore {
     const docs = new Map<string, DocumentEntry>();
 
     for (const dir of Object.keys(CATEGORY_DIRS)) {
-      const fullDir = path.join(this.workspaceDir, dir);
-      let files: string[];
-      try {
-        files = await fs.readdir(fullDir);
-      } catch {
-        continue;
-      }
+      const candidates = [
+        { fullDir: path.join(this.workspaceDir, dir), relDir: dir },
+        { fullDir: path.join(this.workspaceDir, "docs", dir), relDir: path.join("docs", dir) },
+      ];
 
-      for (const file of files) {
-        if (!file.endsWith(".md")) continue;
-
-        const relPath = path.join(dir, file);
-        const filePath = path.join(this.workspaceDir, relPath);
-        const slug = slugify(file.replace(".md", ""));
-        const category = this.categorize(relPath);
-
-        let content: string;
+      for (const { fullDir, relDir } of candidates) {
+        let files: string[];
         try {
-          content = await fs.readFile(filePath, "utf-8");
+          files = await fs.readdir(fullDir);
         } catch {
           continue;
         }
 
-        const { frontmatter, body } = parseFrontmatter(content);
-        const links = extractWikilinks(body);
+        for (const file of files) {
+          if (!file.endsWith(".md")) continue;
 
-        const title =
-          (frontmatter.title as string) ??
-          (frontmatter.name as string) ??
-          file.replace(".md", "").replace(/[-_]/g, " ");
+          const relPath = path.join(relDir, file);
+          const filePath = path.join(this.workspaceDir, relPath);
+          const slug = slugify(file.replace(".md", ""));
+          const category = this.categorize(relPath);
 
-        const stat = await fs.stat(filePath).catch(() => null);
+          let content: string;
+          try {
+            content = await fs.readFile(filePath, "utf-8");
+          } catch {
+            continue;
+          }
 
-        docs.set(slug, {
-          id: slug,
-          title,
-          filename: file,
-          category,
-          path: relPath,
-          status: (frontmatter.status as string) ?? undefined,
-          links,
-          backlinks: [],
-          createdAt: stat?.birthtime?.toISOString(),
-          updatedAt: stat?.mtime?.toISOString(),
-        });
+          const { frontmatter, body } = parseFrontmatter(content);
+          const links = extractWikilinks(body);
+
+          const title =
+            (frontmatter.title as string) ??
+            (frontmatter.name as string) ??
+            file.replace(".md", "").replace(/[-_]/g, " ");
+
+          const stat = await fs.stat(filePath).catch(() => null);
+
+          docs.set(slug, {
+            id: slug,
+            title,
+            filename: file,
+            category,
+            path: relPath,
+            status: (frontmatter.status as string) ?? undefined,
+            links,
+            backlinks: [],
+            createdAt: stat?.birthtime?.toISOString(),
+            updatedAt: stat?.mtime?.toISOString(),
+          });
+        }
       }
     }
 
@@ -308,8 +315,10 @@ export class DocumentStore {
       this.watcher = fsp.watch(this.workspaceDir, { recursive: true }, (eventType, filename) => {
         if (!filename || !filename.endsWith(".md")) return;
 
-        // Check if file is in a tracked directory
-        const isTracked = Object.keys(CATEGORY_DIRS).some((dir) => filename.startsWith(dir));
+        // Check if file is in a tracked directory (direct or docs/ prefixed)
+        const isTracked = Object.keys(CATEGORY_DIRS).some(
+          (dir) => filename.startsWith(dir) || filename.startsWith(`docs/${dir}`)
+        );
         if (!isTracked) return;
 
         // Debounce rapid changes

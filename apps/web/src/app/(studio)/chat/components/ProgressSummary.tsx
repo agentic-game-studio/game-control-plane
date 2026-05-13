@@ -3,6 +3,7 @@
 import { useEffect, useState, useRef } from "react";
 import type { ContextUsage } from "@game-studio/types";
 import { apiFetch } from "@/lib/api";
+import { useProject } from "@/contexts/ProjectContext";
 import {
   PRODUCER_MODEL_CONTEXT_TOKENS,
   countConversationHistoryChars,
@@ -51,6 +52,7 @@ interface SessionPayload {
 }
 
 export default function ProgressSummary({ activeAgents, producerSessionId, currentSession, contextUsageMap, contextPressure, onCompact, compactingSessionId }: ProgressSummaryProps) {
+  const { currentProjectId } = useProject();
   /** Which session to show context for — active tab, falling back to producer. */
   const targetSession = currentSession || producerSessionId;
   const [tickets, setTickets] = useState<TicketSummary | null>(null);
@@ -85,7 +87,8 @@ export default function ProgressSummary({ activeAgents, producerSessionId, curre
   useEffect(() => {
     const fetchTickets = async () => {
       try {
-        const board = await apiFetch<TicketsResponse>(`/api/tickets`);
+        const query = currentProjectId ? `?projectId=${encodeURIComponent(currentProjectId)}` : "";
+        const board = await apiFetch<TicketsResponse>(`/api/tickets${query}`);
         if (board.columns) {
           const summary: TicketSummary = { available: 0, in_progress: 0, qa: 0, completed: 0 };
           board.columns.forEach((col) => {
@@ -103,7 +106,7 @@ export default function ProgressSummary({ activeAgents, producerSessionId, curre
     fetchTickets();
     const interval = setInterval(fetchTickets, 30000);
     return () => clearInterval(interval);
-  }, []);
+  }, [currentProjectId]);
 
   useEffect(() => {
     if (!targetSession) {

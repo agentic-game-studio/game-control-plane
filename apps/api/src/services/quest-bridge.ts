@@ -4,8 +4,11 @@
  * When a workflow is active, every Task call automatically creates and tracks a ticket.
  */
 
-import { readData, writeData, broadcastEvent } from "./data-store.js";
-import type { TicketsBoard, Ticket, TicketStatus, AgentRole, WSEvent, WorkflowStage } from "@game-studio/types";
+import { broadcastEvent } from "./data-store.js";
+import { readData } from "./data-store.js";
+import { DEFAULT_TICKETS_BOARD, readTicketsBoard, resolveProjectIdForSession, writeTicketsBoard } from "./ticket-board.js";
+import type { TicketsBoard, Ticket, TicketStatus, AgentRole, WSEvent, WorkflowStage, DashboardData } from "@game-studio/types";
+import { ingestProducerSummaryFact, ingestProducerSummaryFromSession } from "./producer-summary.js";
 
 // ─── Workflow State (in-memory, per session) ───
 
@@ -52,6 +55,15 @@ export function advanceStage(sessionId: string, stage: WorkflowStage, ticketId?:
     ticketId,
     agentRole,
   } as WSEvent);
+
+  void ingestProducerSummaryFromSession(sessionId, {
+    kind: "workflow_stage",
+    at: new Date().toISOString(),
+    detail: stage,
+    ticketId,
+    agentRole,
+    sessionId,
+  });
 }
 
 export function completeWorkflow(sessionId: string, success: boolean): void {
@@ -66,6 +78,13 @@ export function completeWorkflow(sessionId: string, success: boolean): void {
   } as WSEvent);
 
   activeWorkflows.delete(sessionId);
+
+  void ingestProducerSummaryFromSession(sessionId, {
+    kind: "workflow_complete",
+    at: new Date().toISOString(),
+    detail: String(success),
+    sessionId,
+  });
 }
 
 export function cleanupWorkflow(sessionId: string): void {
@@ -74,25 +93,12 @@ export function cleanupWorkflow(sessionId: string): void {
 
 // ─── Ticket CRUD (direct file access, same as REST routes) ───
 
-const TICKETS_FILE = "tickets.json";
-
-const DEFAULT_BOARD: TicketsBoard = {
-  sprint: "Sprint 1",
-  milestone: "Milestone 1",
-  columns: [
-    { id: "available", label: "Available", tickets: [] },
-    { id: "in_progress", label: "Processing", tickets: [] },
-    { id: "qa", label: "Verify", tickets: [] },
-    { id: "completed", label: "Completed", tickets: [] },
-  ],
-};
-
-async function getBoard(): Promise<TicketsBoard> {
+async function getBoard(projectId?: string | null): Promise<TicketsBoard> {
   try {
-    return await readData<TicketsBoard>(TICKETS_FILE);
+    return await readTicketsBoard(projectId);
   } catch {
-    await writeData(TICKETS_FILE, DEFAULT_BOARD);
-    return DEFAULT_BOARD;
+    await writeTicketsBoard(DEFAULT_TICKETS_BOARD, projectId);
+    return structuredClone(DEFAULT_TICKETS_BOARD);
   }
 }
 
@@ -116,11 +122,14 @@ export async function createQuestTicket(
   description: string,
   area: string,
   subarea: string,
+  projectId?: string | null,
 ): Promise<Ticket> {
-  const board = await getBoard();
+  const resolvedProjectId = projectId ?? await resolveProjectIdForSession(sessionId);
+  const board = await getBoard(resolvedProjectId);
   const now = new Date().toISOString();
   const ticket: Ticket = {
     id: `ticket-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    projectId: resolvedProjectId ?? undefined,
     title,
     description,
     area,
@@ -141,9 +150,9 @@ export async function createQuestTicket(
     availableCol.tickets.push(ticket);
   }
 
-  await writeData(TICKETS_FILE, board);
+  await writeTicketsBoard(board, resolvedProjectId);
 
-  broadcastEvent({ type: "ticket:created", ticket } as WSEvent);
+  broadcastEvent({ type: "ticket:created", ticket, projectId: resolvedProjectId } as WSEvent);
 
   broadcastEvent({
     type: "quest:linked",
@@ -158,11 +167,23 @@ export async function createQuestTicket(
     wf.tickets.set(ticket.id, agentRole as string);
   }
 
+  if (resolvedProjectId) {
+    void ingestProducerSummaryFact(resolvedProjectId, {
+      kind: "ticket_created",
+      at: now,
+      title,
+      ticketId: ticket.id,
+      agentRole: agentRole as string,
+      sessionId,
+    });
+  }
+
   return ticket;
 }
 
 export async function moveQuestTicket(ticketId: string, status: TicketStatus, assignee?: string): Promise<void> {
-  const board = await getBoard();
+  const projectId = await resolveProjectIdForTicket(ticketId);
+  const board = await getBoard(projectId);
   const found = findTicketInBoard(board, ticketId);
   if (!found) return;
 
@@ -181,18 +202,42 @@ export async function moveQuestTicket(ticketId: string, status: TicketStatus, as
     // Add to target column
     targetCol.tickets.push(ticket);
 
-    await writeData(TICKETS_FILE, board);
+    await writeTicketsBoard(board, projectId);
 
     broadcastEvent({
       type: "ticket:moved",
       ticket,
       fromColumn: board.columns[col].id,
       toColumn: status,
+      projectId,
     } as WSEvent);
+
+    if (projectId) {
+      void ingestProducerSummaryFact(projectId, {
+        kind: "ticket_moved",
+        at: ticket.updatedAt,
+        ticketId,
+        title: ticket.title,
+        fromColumn: board.columns[col].id,
+        toColumn: status,
+        agentRole: ticket.assignee,
+      });
+    }
   } else {
     // Same column, just update
-    await writeData(TICKETS_FILE, board);
-    broadcastEvent({ type: "ticket:updated", ticket } as WSEvent);
+    await writeTicketsBoard(board, projectId);
+    broadcastEvent({ type: "ticket:updated", ticket, projectId } as WSEvent);
+
+    if (projectId) {
+      void ingestProducerSummaryFact(projectId, {
+        kind: "ticket_updated",
+        at: ticket.updatedAt,
+        ticketId,
+        title: ticket.title,
+        detail: `status=${status}${assignee !== undefined ? ` assignee=${assignee}` : ""}`,
+        agentRole: ticket.assignee,
+      });
+    }
   }
 }
 
@@ -206,4 +251,23 @@ export async function createFixTicket(
   const ticket = await createQuestTicket(sessionId, title, agentRole, description, "WORKFLOW", "fix");
   ticket.parentTicketId = parentTicketId;
   return ticket;
+}
+
+async function resolveProjectIdForTicket(ticketId: string): Promise<string | null> {
+  const legacyBoard = await getBoard(null);
+  const legacyFound = findTicketInBoard(legacyBoard, ticketId);
+  if (legacyFound) return legacyFound.ticket.projectId ?? null;
+
+  try {
+    const dashboard = await readData<DashboardData>("dashboard.json");
+    for (const project of dashboard.projects) {
+      const board = await getBoard(project.id);
+      const found = findTicketInBoard(board, ticketId);
+      if (found) return project.id;
+    }
+  } catch {
+    // Ignore scan failures and fall back to null.
+  }
+
+  return null;
 }
