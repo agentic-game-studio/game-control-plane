@@ -10,12 +10,13 @@
 
 import { Router } from "express";
 import type { Request, Response } from "express";
-import { existsSync, readFileSync } from "fs";
+import { existsSync, readFileSync, statSync } from "fs";
 import { join } from "path";
 import { loadConfig } from "../config.js";
 import { createQuestTicket } from "../services/quest-bridge.js";
 import { readTicketsBoard } from "../services/ticket-board.js";
 import { broadcast } from "../services/websocket.js";
+import { logger } from "../utils/logger.js";
 import { ingestProducerSummaryFact } from "../services/producer-summary.js";
 import type { TicketsBoard, WSEvent } from "@game-studio/types";
 import type { AgentRole } from "@game-studio/types";
@@ -230,9 +231,16 @@ gddRouter.post("/ingest", async (req: Request, res: Response) => {
   let gddContent = "";
   let usedPath = "";
 
+  const MAX_GDD_SIZE = 2 * 1024 * 1024; // 2MB max — prevent parsing oversized files
+
   for (const p of altPaths) {
     if (existsSync(p)) {
       try {
+        const stat = statSync(p);
+        if (stat.size > MAX_GDD_SIZE) {
+          res.status(422).json({ success: false, error: `GDD file too large (${Math.round(stat.size / 1024)}KB). Maximum is 2MB.` });
+          return;
+        }
         gddContent = readFileSync(p, "utf-8");
         usedPath = p;
         break;
@@ -254,6 +262,18 @@ gddRouter.post("/ingest", async (req: Request, res: Response) => {
   // Parse sections and items
   const sections = parseGDDSections(gddContent);
 
+  // Cap total items to prevent unbounded ticket creation
+  const MAX_ITEMS = 200;
+  let totalParsed = 0;
+  for (const items of sections.values()) totalParsed += items.length;
+  if (totalParsed > MAX_ITEMS) {
+    res.status(422).json({
+      success: false,
+      error: `GDD contains ${totalParsed} items — maximum is ${MAX_ITEMS}. Split into smaller documents.`,
+    });
+    return;
+  }
+
   if (sections.size === 0) {
     res.status(422).json({ success: false, error: "Could not parse any sections from GDD. Ensure it uses ## headings." });
     return;
@@ -272,7 +292,6 @@ gddRouter.post("/ingest", async (req: Request, res: Response) => {
     ]};
   }
   const existingTitles = await getExistingTicketTitles(board);
-  void existingTitles; // used in loop below
 
   const results = {
     created: [] as string[],
@@ -303,7 +322,9 @@ gddRouter.post("/ingest", async (req: Request, res: Response) => {
         results.created.push(ticket.title);
         void ticket; // ticket already written by createQuestTicket
       } catch (err) {
-        results.errors.push(`${item.title}: ${err instanceof Error ? err.message : String(err)}`);
+        const errMsg = err instanceof Error ? err.message : String(err);
+        results.errors.push(`${item.title}: ${errMsg}`);
+        logger.error({ error: errMsg, item: item.title, section, event: "gdd_ticket_create_failed" }, "Failed to create ticket from GDD");
       }
     }
   }

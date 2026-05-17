@@ -75,7 +75,8 @@ export type AgentTool =
   | "Grep"
   | "Bash"
   | "Task"
-  | "AskUserQuestion";
+  | "AskUserQuestion"
+  | "GodotCLI";
 
 export interface AgentDefinition {
   name: AgentRole;

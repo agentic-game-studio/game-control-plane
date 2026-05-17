@@ -41,15 +41,15 @@ export const settingsRouter: Router = Router();
 // GET /api/settings - Get settings (with auto weekly reset check)
 settingsRouter.get("/", async (_req: Request, res: Response) => {
   try {
-    let data = await readData<SettingsConfig>("settings.json");
-    data = checkWeeklyReset(data);
+    const data = await readData<SettingsConfig>("settings.json");
+    const originalResetAt = data.credits.subscription.resetAt;
+    const resetData = checkWeeklyReset(data);
     // Only write back if reset actually happened
-    const originalResetAt = (await readData<SettingsConfig>("settings.json")).credits.subscription.resetAt;
-    if (data.credits.subscription.resetAt !== originalResetAt) {
-      await writeData("settings.json", data);
-      broadcastEvent({ type: "settings:updated", settings: data } as WSEvent);
+    if (resetData.credits.subscription.resetAt !== originalResetAt) {
+      await writeData("settings.json", resetData);
+      broadcastEvent({ type: "settings:updated", settings: resetData } as WSEvent);
     }
-    res.json({ success: true, data });
+    res.json({ success: true, data: resetData });
   } catch {
     const fresh = DEFAULT_SETTINGS;
     await writeData("settings.json", fresh);
@@ -61,29 +61,26 @@ settingsRouter.get("/", async (_req: Request, res: Response) => {
 settingsRouter.patch("/", async (req: Request, res: Response) => {
   const updates = req.body as Partial<SettingsConfig>;
 
+  if (updates.targetEngine && !VALID_ENGINES.includes(updates.targetEngine)) {
+    res.status(400).json({ success: false, error: "Invalid target engine" });
+    return;
+  }
+
+  if (updates.tier && !TIER_DEFINITIONS.some((t) => t.id === updates.tier)) {
+    res.status(400).json({ success: false, error: "Invalid subscription tier" });
+    return;
+  }
+
   try {
-    const data = await readData<SettingsConfig>("settings.json");
-    const updatedSettings: SettingsConfig = {
+    const updatedSettings = await updateData<SettingsConfig>("settings.json", (data) => ({
       ...data,
       ...updates,
       credits: updates.credits ? { ...data.credits, ...updates.credits } : data.credits,
       topUpHistory: updates.topUpHistory ?? data.topUpHistory,
       usageLog: updates.usageLog ?? data.usageLog,
-    };
+    }));
 
-    if (updates.targetEngine && !VALID_ENGINES.includes(updates.targetEngine)) {
-      res.status(400).json({ success: false, error: "Invalid target engine" });
-      return;
-    }
-
-    if (updates.tier && !TIER_DEFINITIONS.some((t) => t.id === updates.tier)) {
-      res.status(400).json({ success: false, error: "Invalid subscription tier" });
-      return;
-    }
-
-    await writeData("settings.json", updatedSettings);
     broadcastEvent({ type: "settings:updated", settings: updatedSettings } as WSEvent);
-
     res.json({ success: true, data: updatedSettings });
   } catch (error) {
     res.status(500).json({ success: false, error: "Failed to update settings" });

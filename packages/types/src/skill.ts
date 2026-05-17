@@ -100,7 +100,9 @@ export type SkillName =
   | "team-audio"
   | "team-level"
   | "team-live-ops"
-  | "team-qa";
+  | "team-qa"
+  // Local Godot CLI
+  | "godot-cli-ops";
 
 export interface SkillArg {
   name: string;

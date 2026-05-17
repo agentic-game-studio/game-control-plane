@@ -6,7 +6,7 @@ export const leadershipAgents: Partial<Record<AgentRole, AgentDefinition>> = {
     description: "The autonomous production loop. Continuously polls the Kanban board, picks the next Available ticket, spawns the right specialist, runs automated verification, advances tickets — without waiting for human prompts. Drives end-to-end game production while humans supervise.",
     tier: 1,
     model: "opus",
-    tools: ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Task", "AskUserQuestion"],
+    tools: ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Task", "AskUserQuestion", "GodotCLI"],
     maxTurns: 999,
     skills: ["autonomous-production-loop", "dev-story", "automated-playtest", "sprint-plan"],
     memory: "project",

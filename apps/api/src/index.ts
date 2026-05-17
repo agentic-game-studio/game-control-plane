@@ -16,11 +16,12 @@ import { chatRouter } from "./routes/chat.js";
 import { ticketsRouter } from "./routes/tickets.js";
 import { assetsRouter } from "./routes/assets.js";
 import { settingsRouter } from "./routes/settings.js";
-import { autonomousRouter } from "./routes/autonomous.js";
+import { autonomousRouter, abortAllLoops } from "./routes/autonomous.js";
 import { gddRouter } from "./routes/gdd.js";
 import { errorHandler } from "./middleware/error-handler.js";
 import { authMiddleware } from "./middleware/auth.js";
 import { broadcast, wss, sseClients } from "./services/websocket.js";
+import { shutdownAllMCPServices } from "./services/godot-mcp-service.js";
 import { logger, logStartup, logShutdown } from "./utils/logger.js";
 import { requestLogger } from "./middleware/request-logger.js";
 
@@ -30,6 +31,15 @@ const START_TIME = Date.now();
 const rateBuckets = new Map<string, { count: number; resetAt: number }>();
 const RATE_LIMIT = 10; // requests per window
 const RATE_WINDOW_MS = 60_000; // 1 minute
+
+// Evict expired rate bucket entries every 5 minutes to prevent unbounded memory growth
+const rateCleanupInterval = setInterval(() => {
+  const now = Date.now();
+  for (const [ip, bucket] of rateBuckets) {
+    if (now >= bucket.resetAt) rateBuckets.delete(ip);
+  }
+}, 5 * 60_000);
+rateCleanupInterval.unref();
 
 function rateLimiter(req: express.Request, res: express.Response, next: express.NextFunction) {
   const ip = req.ip ?? req.socket.remoteAddress ?? "unknown";
@@ -113,7 +123,13 @@ app.get("/health", (_req, res) => {
 });
 
 // SSE endpoint for log streaming
+const MAX_SSE_CLIENTS = 50;
 app.get("/api/sessions/:sessionId/stream", (req, res) => {
+  if (sseClients.size >= MAX_SSE_CLIENTS) {
+    res.status(503).json({ success: false, error: "Too many SSE connections — try again later" });
+    return;
+  }
+
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
@@ -155,8 +171,15 @@ server.listen(PORT, () => {
   });
 });
 
+// Prune old session state files on startup (older than 7 days)
+import { SessionStore } from "@game-studio/state";
+const sessionStore = new SessionStore(config.WORKSPACE_DIR);
+sessionStore.pruneOldSessions().then((removed) => {
+  if (removed > 0) logger.info({ removed, event: "session_prune" }, `Pruned ${removed} old session(s)`);
+}).catch(() => { /* non-critical */ });
+
 // R7: Graceful shutdown
-function gracefulShutdown(signal: string) {
+async function gracefulShutdown(signal: string) {
   const uptimeSeconds = Math.round((Date.now() - START_TIME) / 1000);
   logShutdown({
     pid: process.pid,
@@ -164,6 +187,22 @@ function gracefulShutdown(signal: string) {
     signal,
     graceful: true,
   });
+
+  // 1. Abort all autonomous loops
+  abortAllLoops();
+
+  // 2. Close all SSE clients
+  for (const client of sseClients) {
+    try { client.send(""); } catch { /* already closed */ }
+  }
+  sseClients.clear();
+
+  // 3. Kill MCP child processes
+  try { await shutdownAllMCPServices(); } catch { /* best effort */ }
+
+  // 4. Clear rate limiter timer
+  clearInterval(rateCleanupInterval);
+
   wss.close(() => {
     server.close(() => {
       logger.info({ pid: process.pid, uptimeSeconds }, "Server closed");
