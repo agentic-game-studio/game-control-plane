@@ -50,6 +50,7 @@ coverage/
 *.tmp
 *.temp
 Thumbs.db
+BuildTest/
 
 # Reference and dev files
 Claude-Code-Game-Studios-main/
