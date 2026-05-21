@@ -2,8 +2,8 @@ import "dotenv/config";
 import { z } from "zod";
 
 const envSchema = z.object({
-  // Kimi provider
-  KIMI_API_KEY: z.string().min(1, "KIMI_API_KEY is required"),
+  // Kimi provider (optional — only needed if DEFAULT_MODEL points to a kimi model)
+  KIMI_API_KEY: z.string().optional().default(""),
   KIMI_BASE_URL: z.string().url().default("https://api.kimi.com/coding"),
   // Z.ai provider
   ZAI_API_KEY: z.string().min(1, "ZAI_API_KEY is required"),
@@ -13,7 +13,7 @@ const envSchema = z.object({
   CORS_ORIGIN: z.string().default("http://localhost:3000"),
   WORKSPACE_DIR: z.string().default("./workspace"),
   REVIEW_MODE: z.enum(["solo", "lean", "full"]).default("lean"),
-  DEFAULT_MODEL: z.string().default("kimi-k2.6"),
+  DEFAULT_MODEL: z.string().default("glm-5.1"),
   MAX_TOOL_CALLS: z.coerce.number().default(100),
   TOOL_CHECKPOINT_INTERVAL: z.coerce.number().default(30),
   CONTEXT_WINDOW_TOKENS: z.coerce.number().default(256_000),

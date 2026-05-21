@@ -203,6 +203,7 @@ export class GodotMCPService {
   private serverPath: string;
   private initialized = false;
   private stdoutBuffer = "";
+  private readonly MAX_STDOUT_BUFFER = 1024 * 1024; // 1MB cap to prevent OOM
   /** Absolute path of the Godot project (detected from MCP responses) */
   private godotProjectDir: string | null = null;
   /** Workspace-relative path for rewriting Godot paths */
@@ -239,6 +240,12 @@ export class GodotMCPService {
     // Handle stdout — read JSON-RPC responses
     this.process.stdout?.on("data", (chunk: Buffer) => {
       this.stdoutBuffer += chunk.toString();
+      // Cap buffer to prevent OOM from runaway MCP output
+      if (this.stdoutBuffer.length > this.MAX_STDOUT_BUFFER) {
+        const discarded = this.stdoutBuffer.length - this.MAX_STDOUT_BUFFER;
+        this.stdoutBuffer = this.stdoutBuffer.slice(discarded);
+        logger.warn({ discarded, event: "godot_mcp_buffer_overflow" }, "MCP stdout buffer overflow — discarded old data");
+      }
       this.processStdout();
     });
 
@@ -481,11 +488,23 @@ export class GodotMCPService {
     }
     this.pendingRequests.clear();
 
-    // Kill the MCP server process
+    // Kill the MCP server process — try graceful shutdown, then force kill
     if (this.process) {
+      const proc = this.process;
       this.process.stdin?.write(JSON.stringify({ jsonrpc: "2.0", method: "shutdown" }) + "\n");
-      this.process.kill("SIGTERM");
+      proc.kill("SIGTERM");
       this.process = null;
+
+      // Force kill if SIGTERM didn't work within 5s
+      const forceKillTimer = setTimeout(() => {
+        try {
+          if (proc.pid) {
+            process.kill(proc.pid, "SIGKILL");
+            logger.warn({ pid: proc.pid, event: "godot_mcp_force_kill" }, "Force-killed hung MCP server process");
+          }
+        } catch { /* already dead */ }
+      }, 5000);
+      forceKillTimer.unref();
     }
 
     this.isRunning = false;
@@ -495,6 +514,12 @@ export class GodotMCPService {
   private cleanup() {
     this.isRunning = false;
     this.process = null;
+    // Reject any pending requests that will never get a response
+    for (const [, pending] of this.pendingRequests) {
+      clearTimeout(pending.timeout);
+      pending.reject(new Error("MCP server process exited"));
+    }
+    this.pendingRequests.clear();
   }
 }
 
@@ -502,21 +527,33 @@ export class GodotMCPService {
 // Keyed by projectId so all sessions (producer + spawned agents) share one MCP server
 // The MCP server bridges to Godot via WebSocket — multiple connections are fine
 const activeServices = new Map<string, GodotMCPService>();
+const pendingCreations = new Map<string, Promise<GodotMCPService>>();
 
 /** Get or create a Godot MCP service for a project */
 export async function getOrCreateGodotMCPService(
   projectId: string,
   options?: GodotMCPServiceOptions
 ): Promise<GodotMCPService> {
-  let service = activeServices.get(projectId);
+  const existing = activeServices.get(projectId);
+  if (existing) return existing;
 
-  if (!service) {
-    service = new GodotMCPService(options);
-    await service.start();
-    activeServices.set(projectId, service);
-  }
+  // Deduplicate concurrent creation attempts for the same project
+  const pending = pendingCreations.get(projectId);
+  if (pending) return pending;
 
-  return service;
+  const creationPromise = (async () => {
+    try {
+      const service = new GodotMCPService(options);
+      await service.start();
+      activeServices.set(projectId, service);
+      return service;
+    } finally {
+      pendingCreations.delete(projectId);
+    }
+  })();
+
+  pendingCreations.set(projectId, creationPromise);
+  return creationPromise;
 }
 
 /** Stop and remove a Godot MCP service for a project */
@@ -526,6 +563,13 @@ export async function removeGodotMCPService(projectId: string): Promise<void> {
     await service.stop();
     activeServices.delete(projectId);
   }
+}
+
+/** Stop all active MCP services (for graceful shutdown) */
+export async function shutdownAllMCPServices(): Promise<void> {
+  const entries = [...activeServices.entries()];
+  activeServices.clear();
+  await Promise.allSettled(entries.map(([, service]) => service.stop()));
 }
 
 /** Get the active service for a project (null if not running) */

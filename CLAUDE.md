@@ -53,7 +53,7 @@ game-control-plane/
 
 - **Tier 1 (Opus → glm-5.1)**: producer (standalone, owns orchestration), creative-director, technical-director
 - **Tier 2 (Sonnet → glm-4.7)**: game-designer, lead-programmer, art-director, audio-director, narrative-director, qa-lead, release-manager, localization-lead
-- **Tier 3 (Sonnet/Haiku → glm-4.7/glm-4.7-flash)**: 38 specialists — systems-designer, gameplay-programmer, godot-specialist, unreal-specialist, unity-specialist, code-reviewer, etc.
+- **Tier 3 (Sonnet → glm-4.7)**: 38 specialists — systems-designer, gameplay-programmer, godot-specialist, unreal-specialist, unity-specialist, code-reviewer, etc.
 
 ### Autonomous Production Mode
 
@@ -189,7 +189,7 @@ Workflows are orchestrated by the creative-director agent using real LLM calls t
 - **QA Lead** (2): QL-STORY-READY, QL-TEST-COVERAGE
 - **Art Director** (2): AD-PHASE-GATE, AD-ART-BIBLE
 
-Each gate invokes the appropriate director agent with a specific review prompt. Verdict is parsed from the first line of LLM response.
+Each gate invokes the appropriate director agent with a specific review prompt. Verdict is parsed from the first line of LLM response. On LLM failure, a `BLOCKED` verdict is broadcast via WebSocket so the UI doesn't show "running" indefinitely.
 
 Review modes: `solo` (AI-only), `lean` (key checkpoints, default), `full` (all gates enforced)
 
@@ -223,7 +223,7 @@ Express server on port 3001 with:
 
 - **Express body limit**: 50mb for image payloads (clipboard paste base64)
 - **Security**: Path traversal protection, Bash sandboxing, ReDoS prevention, timing-safe auth, WebSocket auth via apiKey query param, XSS filtering, configurable CORS
-- **Reliability**: Heartbeat cleanup, 409 spawn collision handling, atomic pruneMessages, recursion depth limit, graceful shutdown, SSE keepalive
+- **Reliability**: Heartbeat cleanup, 409 spawn collision handling, atomic pruneMessages, recursion depth limit, graceful shutdown, SSE keepalive, per-file mutex for board writes, maxBuffer 10MB on subprocess calls, asset dimension clamping (64-4096px, steps 1-50), sessionsResponding lock cleanup on save failure, teamSessions cleanup on workflow completion
 - **Routes**:
   - `/api/sessions`, `/api/agents`, `/api/skills`, `/api/teams`, `/api/gates`, `/api/design`, `/api/documents` — Core orchestration
   - `/api/dashboard` — Projects CRUD (`GET`, `POST/DELETE /projects`)
@@ -235,7 +235,7 @@ Express server on port 3001 with:
 - **SSE**: Log streaming at `/api/sessions/:sessionId/stream`
 - **LLM**: ZAI API client (`src/llm/zai-client.ts`) with tool execution loop, retry, message pruning
 - **Document Store**: `src/services/document-store.ts` — scans workspace dirs, parses YAML frontmatter, extracts `[[wikilink]]` connections, computes backlinks, serves via `/api/documents`, watches files with `fs.watch` for real-time updates
-- **DataStore**: `src/services/data-store.ts` — File-based JSON persistence for dashboard, tickets, assets, settings
+- **DataStore**: `src/services/data-store.ts` — File-based JSON persistence with per-file mutex (`updateData`/`updateTicketsBoard`) for safe concurrent writes, atomic tmp+rename pattern
 - **Structured Logger**: `src/utils/logger.ts` — Pino-based logging with console + file transport
   - `apps/api/logs/api.log` — Combined info logs (rotated)
   - `apps/api/logs/error.log` — Error-only logs
@@ -421,7 +421,7 @@ Session state lives in `workspace/production/session-state/` as JSON files:
 
 Chat sessions persisted to `chat-state.json` survive page refreshes and server restarts.
 
-Quest tickets auto-created via Quest Bridge when agents spawn (Available → Processing → Verify → Auto-Verified → Completed).
+Quest tickets auto-created via Quest Bridge when agents spawn (Available → Processing → Verify → Auto-Verified → Completed). Stale in-progress tickets are returned to "available" for re-pickup (not "qa" where they'd sit forever). Boot-check-exhausted tickets moved to QA with verification triggered.
 
 **Auto-Verification** (`apps/api/src/services/verification-service.ts`): When tickets reach Verify column, an AI verifier is auto-selected based on task area (CODE→code-reviewer, DESIGN→game-designer, ART→art-director, NARRATIVE→narrative-director, ARCHITECTURE→technical-director, default→qa-tester). PASS moves to Completed; FAIL moves back to Processing with feedback and producer notification. Runs async (fire-and-forget).
 
@@ -429,15 +429,7 @@ Design documents in `workspace/design/gdd/` and `workspace/docs/architecture/` a
 
 ## Design Templates
 
-GDD files use 8-section format:
-1. Overview — one-paragraph summary
-2. Player Fantasy — desired feeling/experience
-3. Detailed Rules — unambiguous mechanics
-4. Formulas — math with variable definitions
-5. Edge Cases — scenario handling table
-6. Dependencies — what this system depends on
-7. Tuning Knobs — configurable parameters
-8. Acceptance Criteria — testable requirements
+GDD files use 8-section format: Overview, Player Fantasy, Detailed Rules, Formulas, Edge Cases, Dependencies, Tuning Knobs, Acceptance Criteria.
 
 ## Packages
 
@@ -464,21 +456,17 @@ pnpm test:e2e          # Playwright E2E test suite (apps/web/e2e/)
 
 ```bash
 # Single asset
-/usr/local/bin/python3 scripts/asset-pipeline/asset-pipeline.py \
+python3 scripts/asset-pipeline/asset-pipeline.py \
   --prompt "health potion" --name "health-potion" \
   --type 2d --category ui --width 512 --height 512 \
   --output-dir workspace/godot-test-1/assets \
   --workspace-dir workspace/godot-test-1
 
-# Batch all 12 presets
-/usr/local/bin/python3 scripts/asset-pipeline/asset-pipeline.py \
+# Batch from presets + dry-run
+python3 scripts/asset-pipeline/asset-pipeline.py \
   --presets scripts/asset-pipeline/presets.yaml \
   --output-dir workspace/godot-test-1/assets \
   --workspace-dir workspace/godot-test-1
-
-# Dry-run preview
-/usr/local/bin/python3 scripts/asset-pipeline/asset-pipeline.py \
-  --presets scripts/asset-pipeline/presets.yaml --dry-run
 ```
 
 ## Key Files
@@ -541,49 +529,7 @@ mflux-generate-flux2 (FLUX.2-klein-4b, MLX on Apple Silicon)
 
 ### Pipeline Script
 
-**File**: `scripts/asset-pipeline/asset-pipeline.py` (729 lines, Python 3.12)
-
-7-step pipeline per asset:
-1. **Generate** — `mflux-generate-flux2` with prompt, dimensions, steps, seed
-2. **Remove background** — rembg (U2-Net) with PIL alpha-extraction fallback
-3. **Alpha-trim** — crop to content bounding box
-4. **Grid-pad** — center sprite within target tile size (e.g. 128x128)
-5. **Sprite-sheet slice** — smart bounding-box detection via alpha gaps, falls back to grid-based (cols/rows)
-6. **Thumbnail** — 128x128 centered on transparent canvas
-7. **Godot .import** — Nearest-neighbour filter override for pixel art
-
-### Usage
-
-```bash
-# Single asset
-python3 scripts/asset-pipeline/asset-pipeline.py \
-  --prompt "magic health potion bottle, red glowing liquid" \
-  --type 2d --category ui --width 512 --height 512 --steps 4 \
-  --output-dir workspace/godot-test-1/assets \
-  --workspace-dir workspace/godot-test-1
-
-# Batch from presets YAML (12 presets defined)
-python3 scripts/asset-pipeline/asset-pipeline.py \
-  --presets scripts/asset-pipeline/presets.yaml \
-  --output-dir workspace/godot-test-1/assets \
-  --workspace-dir workspace/godot-test-1
-
-# Dry-run (preview without executing)
-python3 scripts/asset-pipeline/asset-pipeline.py \
-  --presets scripts/asset-pipeline/presets.yaml --dry-run
-
-# Via API
-curl -X POST http://localhost:3001/api/assets/generate \
-  -H "Content-Type: application/json" \
-  -H "x-api-key: $API_KEY" \
-  -d '{"prompt":"health potion","name":"health-potion","type":"2d","category":"ui","workspacePath":"godot-test-1"}'
-
-# Via API — batch from presets
-curl -X POST http://localhost:3001/api/assets/generate \
-  -H "Content-Type: application/json" \
-  -H "x-api-key: $API_KEY" \
-  -d '{"presetsFile":"presets.yaml","workspacePath":"godot-test-1"}'
-```
+**File**: `scripts/asset-pipeline/asset-pipeline.py` (729 lines, Python 3.12). 7-step pipeline: Generate (mflux) → Remove background (rembg) → Alpha-trim → Grid-pad → Sprite-sheet slice → Thumbnail → Godot .import.
 
 ### Presets (12 batch presets)
 
@@ -602,51 +548,21 @@ Each preset defines: name, prompt, type, category, dimensions, steps, remove_bg,
 
 ### Directory Structure (output)
 
-```
-workspace/<project>/assets/
-├── raw/              # Original AI-generated PNGs
-├── processed/        # Background-removed PNGs
-├── ui/               # UI icon assets (final)
-├── character/        # Character sprites + frame dirs
-├── prop/             # Props (treasure chest, door, etc.)
-├── weapon/           # Weapons (sword, etc.)
-├── tex/              # Seamless textures (no bg removal)
-├── thumbnails/       # 128x128 preview thumbnails
-└── asset-manifest.json  # Inventory registry (merged on each run)
-```
+`workspace/<project>/assets/`: `raw/`, `processed/`, `ui/`, `character/`, `prop/`, `weapon/`, `tex/`, `thumbnails/`, `asset-manifest.json`.
 
 ### API Integration
 
-**Backend routes** (`apps/api/src/routes/assets.ts`):
+**Backend routes** (`apps/api/src/routes/assets.ts`): `GET /api/assets` (list), `POST /api/assets/generate` (single or batch), `GET /api/assets/generate/presets`, `GET/DELETE /api/assets/:id`, `GET /api/assets/:id/thumbnail` (auth bypass for `<img>` tags), `GET/PATCH /api/assets/art-bible`.
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/assets` | GET | List all assets (reads manifest from workspace) |
-| `/api/assets/generate` | POST | Trigger single or batch generation |
-| `/api/assets/generate/presets` | GET | List available presets from presets.yaml |
-| `/api/assets/:id` | GET/DELETE | Get or delete a specific asset |
-| `/api/assets/:id/thumbnail` | GET | Serve thumbnail image (auth bypass for `<img>` tags) |
-| `/api/assets/art-bible` | GET/PATCH | Art bible configuration |
+**Generation request**: Single `{ prompt, name, type?, category?, width?, height?, steps?, removeBg?, workspacePath }` or batch `{ presetsFile, workspacePath }`.
 
-**Generation request body** (`GenerateAssetRequest`):
-- Single: `{ prompt, name, type?, category?, width?, height?, steps?, removeBg?, workspacePath }`
-- Batch: `{ presetsFile: "presets.yaml", workspacePath }`
+**PYTHON_BIN**: Must use `/usr/local/bin/python3` (Python.org 3.12 with Pillow, rembg). Controlled by `PIPELINE_PYTHON` env var.
 
-**PYTHON_BIN**: Must use `/usr/local/bin/python3` (Python.org 3.12 with Pillow, rembg). Controlled by `PIPELINE_PYTHON` env var or hardcoded default. Do NOT use `/opt/homebrew/bin/python3` (Homebrew 3.14, no packages).
-
-**Thumbnail auth bypass**: Routes matching `/api/assets/{id}/thumbnail` skip auth middleware because `<img>` tags cannot send `x-api-key` headers. Thumbnails are low-sensitivity derived images.
-
-**Path traversal protection**: Thumbnail route validates `thumbAbsPath.startsWith(workspaceDir + "/")` to prevent prefix-based directory escape (e.g. `/workspace-evil` matching `/workspace`).
+**Thumbnail auth bypass**: `/api/assets/{id}/thumbnail` skips auth — `<img>` tags can't send headers. Path traversal protection validates `thumbAbsPath.startsWith(workspaceDir + "/")`.
 
 ### TypeScript Types
 
-**File**: `packages/types/src/assets.ts`
-
-- `AssetType`: `"3d" | "2d" | "vfx" | "audio" | "texture"`
-- `AssetCategory`: `"prop" | "character" | "env" | "weapon" | "ui" | "tex" | "sfx" | "music"`
-- `AssetGenerationMeta`: tool, model, prompt, width, height, steps, seed?, negativePrompt?
-- `GameAsset`: id, filename, type, category, sizeBytes, tags, createdAt, updatedAt, path?, rawPath?, thumbnailPath?, generatedWith?
-- `ArtBibleConfig`: baseTextureRes, maxPolycount, enforcePalette, strictOrthographic, snapToGrid, gridSize
+Defined in `packages/types/src/assets.ts`: `AssetType`, `AssetCategory`, `GameAsset`, `AssetGenerationMeta`, `ArtBibleConfig`.
 
 ### LLM Tool Integration
 
@@ -666,19 +582,12 @@ Pipeline broadcasts these events via WebSocket:
 
 ### Key Implementation Details
 
-- **Model**: `flux2-klein-4b` only (4B parameters, 15GB cached at `~/.cache/huggingface/`). The 9B model is gated and returns 403 even with HF_TOKEN — do not use.
+- **Model**: `flux2-klein-4b` only (4B parameters, 15GB cached at `~/.cache/huggingface/`). The 9B model is gated — do not use.
 - **Binary**: `mflux-generate-flux2` at `~/.local/bin/`
-- **Sprite-sheet slicing**: Smart alpha-gap detection tries to find natural content boundaries first. Falls back to uniform grid (cols x rows) if no gaps found.
-- **Manifest merging**: Each pipeline run merges new entries into existing `asset-manifest.json` by ID dedup.
-- **Godot import**: Auto-generates `.import` files with `texture_filter/s=true` (Nearest filter) so pixel art stays crisp.
-
-### Known Limitations / Future Work
-
-- `PYTHON_BIN` duplicated between `assets.ts` and `llm-service.ts` — should extract to shared config
-- No file locking on manifest read/write (potential race condition with concurrent generations)
-- `--manifest-only` flag in CLI is dead code (declared but not implemented)
-- No model selector in GenerateAssetModal UI
-- No concurrent generation queue (parallel requests may conflict on manifest)
+- **Input validation**: Dimensions clamped 64-4096px, steps 1-50
+- **Sprite-sheet slicing**: Smart alpha-gap detection, falls back to uniform grid
+- **Manifest merging**: Each run merges into existing `asset-manifest.json` by ID dedup
+- **Godot import**: Auto-generates `.import` files with Nearest filter for pixel art
 
 ## Godot MCP Pro Integration
 
@@ -727,36 +636,19 @@ The platform automates Godot MCP setup:
 
 ### API Endpoints
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/dashboard/server-status` | GET | Check if server is found/installed/built |
-| `/api/dashboard/setup-server` | POST | Trigger server setup manually |
-| `/api/dashboard/projects/:id/plugin-status` | GET | Check plugin installed/enabled |
-| `/api/dashboard/projects/:id/install-plugin` | POST | Install plugin for existing project |
-| `/api/dashboard/projects/:id/mcp-health` | GET | Check MCP connection health |
+`GET /api/dashboard/server-status`, `POST /api/dashboard/setup-server`, `GET /api/dashboard/projects/:id/plugin-status`, `POST /api/dashboard/projects/:id/install-plugin`, `GET /api/dashboard/projects/:id/mcp-health`.
 
 ### Key Design Decisions
 
-- **Project-keyed** — Service is keyed by `projectId`, shared across all sessions (producer + spawned agents)
+- **Project-keyed** — Service is keyed by `projectId`, shared across all sessions (producer + spawned agents). Singleton deduplication via `pendingCreations` Map prevents concurrent callers from creating duplicate services.
 - **Project workspace isolation** — `executeTool()` uses `projectContext.workspacePath` (resolved relative to `WORKSPACE_DIR`) for file operations. Each project has its own directory, preventing cross-project contamination.
 - **Graceful degradation** — Clear error message if Godot not running or MCP plugin not enabled
 - **LITE mode** — Uses `--lite` flag (81 tools) to reduce context overhead. Use `--minimal` (35 tools) or `--full` (169 tools) via `GodotMCPServiceOptions.mode`
 - **Path rewriting** — Detects Godot project directory from MCP responses and rewrites absolute paths to workspace-relative
 
-### Frontend Status Indicators
+### Frontend Status
 
-| Status | Visual | Description |
-|--------|--------|-------------|
-| Connected | Green bolt + green dot | Godot MCP connected |
-| Waiting | Yellow hourglass + yellow dot | Waiting for Godot editor to connect |
-| Disconnected | Red warning + red dot | MCP error or connection failed |
-
-### Testing
-
-1. Start Godot with a project, enable **Project → Project Settings → Plugins → Godot MCP Pro → Enable**
-2. Create a project in the dashboard with **engine: "godot"**
-3. Open the chat and send: "Create a 2D player scene with CharacterBody2D"
-4. Watch the Godot editor respond in real-time
+Connected (green), Waiting for Godot editor (yellow), Disconnected/error (red).
 
 ### Environment Variables
 

@@ -36,6 +36,9 @@ function selectVerifier(area: string, subarea: string): AgentRole {
 const VERDICT_OPTIONS = ["PASS", "FAIL", "NEEDS_FIX"];
 
 function parseVerdict(content: string): { parsed: string; raw: string } {
+  if (!content || typeof content !== "string") {
+    return { parsed: "NEEDS_FIX", raw: "" };
+  }
   const firstLine = content.split("\n")[0].trim().toUpperCase();
 
   for (const option of VERDICT_OPTIONS) {
@@ -54,8 +57,8 @@ function parseVerdict(content: string): { parsed: string; raw: string } {
     return { parsed: "NEEDS_FIX", raw: firstLine };
   }
 
-  // Default to PASS if ambiguous — don't block agent unnecessarily
-  return { parsed: "PASS", raw: firstLine };
+  // Default to NEEDS_FIX if ambiguous — safer than blindly passing
+  return { parsed: "NEEDS_FIX", raw: firstLine };
 }
 
 // ─── Verification prompt ───
@@ -125,7 +128,8 @@ export async function verifyTicket(
     if (passed) {
       await moveQuestTicket(ticket.id, "completed", ticket.assignee);
     } else {
-      await moveQuestTicket(ticket.id, "in_progress", ticket.assignee);
+      // Move to available so the autonomous loop can re-pick it up
+      await moveQuestTicket(ticket.id, "available", ticket.assignee);
     }
 
     // Broadcast verification result
@@ -151,15 +155,21 @@ export async function verifyTicket(
       `Verification failed for ticket ${ticket.id}: ${errorMessage}`,
     );
 
-    // On verification error, move to completed to avoid blocking
-    await moveQuestTicket(ticket.id, "completed", ticket.assignee);
+    // Move ticket back to available so the autonomous loop can re-pick it.
+    // Leaving it in verify would cause it to be stuck forever.
+    await moveQuestTicket(ticket.id, "available", ticket.assignee).catch((moveErr) => {
+      logger.error(
+        { event: "verify_move_failed", ticketId: ticket.id, error: moveErr instanceof Error ? moveErr.message : String(moveErr) },
+        `Failed to move ticket ${ticket.id} back to available after verification error`,
+      );
+    });
 
     return {
       ticketId: ticket.id,
       verdict: "ERROR",
       feedback: errorMessage,
       verifier,
-      passed: true, // Don't block on verification error
+      passed: false,
     };
   }
 }
@@ -170,6 +180,10 @@ export async function verifyTicket(
  * Do NOT await — this is fire-and-forget.
  */
 export function triggerVerification(ticket: Ticket, agentOutput: string): void {
-  // eslint-disable-next-line @typescript-eslint/no-floating-promises
-  verifyTicket(ticket, agentOutput);
+  verifyTicket(ticket, agentOutput).catch((err) => {
+    logger.error(
+      { event: "verify_unhandled", ticketId: ticket.id, error: err instanceof Error ? err.message : String(err) },
+      `Unhandled verification rejection for ticket ${ticket.id}`,
+    );
+  });
 }

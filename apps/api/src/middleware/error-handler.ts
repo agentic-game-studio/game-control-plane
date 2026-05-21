@@ -26,5 +26,5 @@ export function errorHandler(err: Error, req: Request, res: Response, _next: Nex
     });
   }
 
-  res.status(500).json({ success: false, error: err.message ?? "Internal server error" });
+  res.status(500).json({ success: false, error: "Internal server error" });
 }

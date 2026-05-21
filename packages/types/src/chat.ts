@@ -57,7 +57,7 @@ export interface ProducerSummarySnapshot {
   /** Short line for autonomous activity */
   autonomousHint?: string | null;
 }
-export type ChatSessionStatus = "active" | "done" | "completed";
+export type ChatSessionStatus = "active" | "done" | "completed" | "compacted";
 
 export interface QuestionOption {
   id: string;

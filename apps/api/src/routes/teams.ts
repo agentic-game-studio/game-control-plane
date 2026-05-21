@@ -168,6 +168,9 @@ All Quest tickets have been created — agents just need to be spawned via Task 
     // Complete workflow
     completeWorkflow(sessionId, true);
 
+    // Clean up in-memory session
+    teamSessions.delete(sessionId);
+
     // Broadcast completion
     broadcast({
       type: "agent:completed",
@@ -200,6 +203,9 @@ All Quest tickets have been created — agents just need to be spawned via Task 
     }
 
     completeWorkflow(sessionId, false);
+
+    // Clean up in-memory session
+    teamSessions.delete(sessionId);
 
     broadcast({
       type: "agent:failed",

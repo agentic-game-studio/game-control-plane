@@ -6,7 +6,8 @@
 
 import { broadcastEvent } from "./data-store.js";
 import { readData } from "./data-store.js";
-import { DEFAULT_TICKETS_BOARD, readTicketsBoard, resolveProjectIdForSession, writeTicketsBoard } from "./ticket-board.js";
+import { DEFAULT_TICKETS_BOARD, readTicketsBoard, resolveProjectIdForSession, writeTicketsBoard, updateTicketsBoard } from "./ticket-board.js";
+import { logger } from "../utils/logger.js";
 import type { TicketsBoard, Ticket, TicketStatus, AgentRole, WSEvent, WorkflowStage, DashboardData } from "@game-studio/types";
 import { ingestProducerSummaryFact, ingestProducerSummaryFromSession } from "./producer-summary.js";
 
@@ -16,9 +17,21 @@ interface WorkflowState {
   workflowId: string;
   stage: WorkflowStage;
   tickets: Map<string, string>; // ticketId -> agentRole
+  createdAt: number; // epoch ms for TTL cleanup
 }
 
 const activeWorkflows = new Map<string, WorkflowState>();
+const WORKFLOW_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+// Periodic cleanup of stale workflows
+setInterval(() => {
+  const now = Date.now();
+  for (const [sessionId, wf] of activeWorkflows) {
+    if (now - wf.createdAt > WORKFLOW_TTL_MS) {
+      activeWorkflows.delete(sessionId);
+    }
+  }
+}, 60 * 60 * 1000).unref(); // run hourly, don't keep process alive
 
 export function startWorkflow(sessionId: string): string {
   const workflowId = `wf-${Date.now()}`;
@@ -26,6 +39,7 @@ export function startWorkflow(sessionId: string): string {
     workflowId,
     stage: "plan",
     tickets: new Map(),
+    createdAt: Date.now(),
   });
 
   broadcastEvent({
@@ -125,7 +139,6 @@ export async function createQuestTicket(
   projectId?: string | null,
 ): Promise<Ticket> {
   const resolvedProjectId = projectId ?? await resolveProjectIdForSession(sessionId);
-  const board = await getBoard(resolvedProjectId);
   const now = new Date().toISOString();
   const ticket: Ticket = {
     id: `ticket-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -144,13 +157,16 @@ export async function createQuestTicket(
     workflowStage: getWorkflow(sessionId)?.stage,
   };
 
-  // Add to "available" column
-  const availableCol = board.columns.find((c) => c.id === "available");
-  if (availableCol) {
-    availableCol.tickets.push(ticket);
-  }
-
-  await writeTicketsBoard(board, resolvedProjectId);
+  // Use mutex-protected write to prevent lost updates under concurrent calls
+  const board = resolvedProjectId
+    ? await updateTicketsBoard(resolvedProjectId, (b) => {
+        const availableCol = b.columns.find((c) => c.id === "available");
+        if (availableCol) {
+          availableCol.tickets.push(ticket);
+        }
+        return b;
+      })
+    : (() => { throw new Error("projectId required for ticket creation"); })();
 
   broadcastEvent({ type: "ticket:created", ticket, projectId: resolvedProjectId } as WSEvent);
 
@@ -183,62 +199,51 @@ export async function createQuestTicket(
 
 export async function moveQuestTicket(ticketId: string, status: TicketStatus, assignee?: string): Promise<void> {
   const projectId = await resolveProjectIdForTicket(ticketId);
-  const board = await getBoard(projectId);
-  const found = findTicketInBoard(board, ticketId);
+
+  // Serialize the board mutation to prevent lost updates
+  const moved = projectId
+    ? await updateTicketsBoard(projectId, (board) => {
+        const found = findTicketInBoard(board, ticketId);
+        if (!found) {
+          logger.warn({ ticketId, status, event: "ticket_move_not_found" }, `Ticket ${ticketId} not found on board — skipping move to ${status}`);
+          return board;
+        }
+        const { col, idx, ticket } = found;
+        ticket.status = status;
+        ticket.updatedAt = new Date().toISOString();
+        if (assignee !== undefined) ticket.assignee = assignee;
+        const targetCol = board.columns.find((c) => c.id === status);
+        if (targetCol && targetCol.id !== board.columns[col].id) {
+          board.columns[col].tickets.splice(idx, 1);
+          targetCol.tickets.push(ticket);
+        }
+        return board;
+      })
+    : null;
+
+  if (!projectId || !moved) return;
+  // Broadcast after the lock is released
+  const found = findTicketInBoard(moved, ticketId);
   if (!found) return;
+  const { col, ticket } = found;
 
-  const { col, idx, ticket } = found;
+  broadcastEvent({
+    type: "ticket:moved",
+    ticket,
+    fromColumn: moved.columns[col].id,
+    toColumn: status,
+    projectId,
+  } as WSEvent);
 
-  // Update ticket fields
-  ticket.status = status;
-  ticket.updatedAt = new Date().toISOString();
-  if (assignee !== undefined) ticket.assignee = assignee;
-
-  // If status changed columns, move it
-  const targetCol = board.columns.find((c) => c.id === status);
-  if (targetCol && targetCol.id !== board.columns[col].id) {
-    // Remove from source column
-    board.columns[col].tickets.splice(idx, 1);
-    // Add to target column
-    targetCol.tickets.push(ticket);
-
-    await writeTicketsBoard(board, projectId);
-
-    broadcastEvent({
-      type: "ticket:moved",
-      ticket,
-      fromColumn: board.columns[col].id,
-      toColumn: status,
-      projectId,
-    } as WSEvent);
-
-    if (projectId) {
-      void ingestProducerSummaryFact(projectId, {
-        kind: "ticket_moved",
-        at: ticket.updatedAt,
-        ticketId,
-        title: ticket.title,
-        fromColumn: board.columns[col].id,
-        toColumn: status,
-        agentRole: ticket.assignee,
-      });
-    }
-  } else {
-    // Same column, just update
-    await writeTicketsBoard(board, projectId);
-    broadcastEvent({ type: "ticket:updated", ticket, projectId } as WSEvent);
-
-    if (projectId) {
-      void ingestProducerSummaryFact(projectId, {
-        kind: "ticket_updated",
-        at: ticket.updatedAt,
-        ticketId,
-        title: ticket.title,
-        detail: `status=${status}${assignee !== undefined ? ` assignee=${assignee}` : ""}`,
-        agentRole: ticket.assignee,
-      });
-    }
-  }
+  void ingestProducerSummaryFact(projectId, {
+    kind: "ticket_moved",
+    at: ticket.updatedAt,
+    ticketId,
+    title: ticket.title,
+    fromColumn: moved.columns[col].id,
+    toColumn: status,
+    agentRole: ticket.assignee,
+  });
 }
 
 export async function createFixTicket(
@@ -249,6 +254,15 @@ export async function createFixTicket(
   description: string,
 ): Promise<Ticket> {
   const ticket = await createQuestTicket(sessionId, title, agentRole, description, "WORKFLOW", "fix");
+  // Persist parentTicketId — updateTicketsBoard ensures atomic write
+  const projectId = ticket.projectId ?? null;
+  if (projectId) {
+    await updateTicketsBoard(projectId, (board) => {
+      const found = findTicketInBoard(board, ticket.id);
+      if (found) found.ticket.parentTicketId = parentTicketId;
+      return board;
+    });
+  }
   ticket.parentTicketId = parentTicketId;
   return ticket;
 }

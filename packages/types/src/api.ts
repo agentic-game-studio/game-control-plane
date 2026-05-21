@@ -54,6 +54,7 @@ export type WSEvent =
   | { type: "autonomous:iteration:started"; sessionId: string; ticketId: string; agentRole: string; title: string; iteration: number }
   | { type: "autonomous:iteration:completed"; sessionId: string; ticketId: string; agentRole: string; iteration: number; completedCount: number }
   | { type: "autonomous:iteration:failed"; sessionId: string; ticketId: string; agentRole: string; iteration: number; error: string }
+  | { type: "autonomous:iteration:boot_check_failed"; sessionId: string; ticketId: string; iteration: number; errors: string[] }
   | { type: "autonomous:error"; sessionId: string; error: string }
   | { type: "autonomous:completed"; sessionId: string; completedCount: number; failedCount: number; totalIterations: number }
   | { type: "autonomous:stopped"; sessionId: string; completedCount: number; failedCount: number }
