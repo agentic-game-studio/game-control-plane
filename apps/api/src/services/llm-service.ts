@@ -29,6 +29,7 @@ import {
   type GodotMCPServiceOptions,
 } from "./godot-mcp-service.js";
 import { triggerVerification } from "./verification-service.js";
+import { consumeCreditsForAgent } from "./credit-service.js";
 
 export interface ProjectContext {
   name: string;
@@ -536,6 +537,22 @@ async function executeTool(
         const assetName = input.name as string;
         if (!assetPrompt || !assetName) return "Error: prompt and name are required";
 
+        let enrichedPrompt = assetPrompt;
+        try {
+          const assetsData = await readData<AssetsData>("assets.json");
+          const ab = assetsData.artBible;
+          if (ab) {
+            const constraints: string[] = [];
+            if (ab.enforcePalette) constraints.push("strict limited color palette");
+            if (ab.strictOrthographic) constraints.push("orthographic view, no perspective");
+            if (ab.snapToGrid) constraints.push(`snap to ${ab.gridSize ?? 8}px grid`);
+            constraints.push(`target texture resolution ~${ab.baseTextureRes}px`);
+            if (constraints.length > 0) {
+              enrichedPrompt = `[Art Bible: ${constraints.join(", ")}] ${assetPrompt}`;
+            }
+          }
+        } catch { /* use raw prompt */ }
+
         logEntry(sessionId, "info", `[${agentRole}] Generating asset: ${assetName}`, agentRole);
 
         const { execFile: execFileTool } = await import("node:child_process");
@@ -552,7 +569,7 @@ async function executeTool(
 
         const genArgs = [
           path.join(scriptDir, "asset-pipeline.py"),
-          "--prompt", assetPrompt,
+          "--prompt", enrichedPrompt,
           "--name", assetName,
           "--type", (input.type as string) ?? "2d",
           "--category", (input.category as string) ?? "prop",
@@ -625,6 +642,7 @@ async function executeTool(
                 existingIds.add(newAsset.id);
                 registered.push(newAsset.filename);
                 broadcastEvent({ type: "asset:created", asset: newAsset } as WSEvent);
+                broadcastEvent({ type: "asset:generated", asset: newAsset } as WSEvent);
               }
 
               if (registered.length > 0) {
@@ -762,7 +780,54 @@ async function executeTool(
           });
           const summary = stdout.slice(-200);
           logEntry(sessionId, "info", `[${agentRole}] GenerateAudio: ${_sfxType} -> ${_outputPath}`, agentRole);
-          return `Audio generated.\n${summary}${stderr ? `\nStderr: ${stderr.slice(-200)}` : ""}`;
+
+          // Write Godot .import sidecar for audio assets
+          try {
+            const config = loadConfig();
+            const absOutput = path.isAbsolute(_outputPath)
+              ? _outputPath
+              : path.join(resolveProjectWorkspace(projectContext?.workspacePath ?? ""), _outputPath);
+            const importPath = `${absOutput}.import`;
+            const ext = path.extname(absOutput).slice(1) || "wav";
+            const importBody = `[remap]
+
+importer="${ext === "ogg" ? "ogg_vorbis" : "wav"}"
+type="AudioStream${ext === "ogg" ? "OggVorbis" : "WAV"}"
+uid="uid://generated-audio-${Date.now()}"
+
+[deps]
+
+source_file="${path.basename(absOutput)}"
+
+[params]
+
+loop=false
+loop_offset=0
+`;
+            await fs.writeFile(importPath, importBody, "utf-8");
+          } catch { /* non-fatal */ }
+
+          // Register audio in asset inventory
+          try {
+            const data = await readData<AssetsData>("assets.json");
+            const filename = _outputPath.split("/").pop() ?? `${_sfxType}.wav`;
+            const audioAsset: GameAsset = {
+              id: `audio-${_sfxType}-${Date.now()}`,
+              filename,
+              type: "audio",
+              category: "sfx",
+              sizeBytes: 0,
+              tags: [_sfxType, "generated"],
+              path: _outputPath,
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+            };
+            data.assets.push(audioAsset);
+            await writeData("assets.json", data);
+            broadcastEvent({ type: "asset:created", asset: audioAsset } as WSEvent);
+          } catch { /* non-fatal */ }
+
+          return `Audio generated and registered in inventory.\n${summary}${stderr ? `\nStderr: ${stderr.slice(-200)}` : ""}`;
         } catch (err: unknown) {
           const error = err as { stderr?: string; message?: string };
           return `Error: GenerateAudio failed: ${error.stderr || error.message}`;
@@ -1006,6 +1071,20 @@ async function executeTool(
         }
       }
 
+      case "ShipThisExport": {
+        const platform = (input.platform as "android" | "ios") ?? "android";
+        const { runShipThisExport, isShipThisAvailable } = await import("./shipthis-service.js");
+        if (!isShipThisAvailable()) {
+          return "Error: ShipThis CLI not available. Set SHIPTHIS_CLI_PATH or vendor cli-main/";
+        }
+        const result = await runShipThisExport(workspaceDir, platform);
+        if (!result.success) {
+          return `Error: ShipThis export failed: ${result.error}\n${result.output.slice(-500)}`;
+        }
+        logEntry(sessionId, "info", `[${agentRole}] ShipThisExport ${platform}`, agentRole);
+        return `ShipThis export initiated.\n${result.output.slice(-800)}`;
+      }
+
       default:
         // Check if this is a Godot MCP tool and route to the MCP service
         if (isGodotMCPTool(name)) {
@@ -1233,6 +1312,8 @@ export async function invokeAgent(
   }
 
   try {
+    void consumeCreditsForAgent(agentRole, task.slice(0, 80));
+
     // Load agent's system prompt and model tier from MD file
     const [rawSystemPrompt, prompts] = await Promise.all([
       getAgentSystemPrompt(agentRole),

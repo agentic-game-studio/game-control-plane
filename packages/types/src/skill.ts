@@ -82,6 +82,7 @@ export type SkillName =
   | "implement-tilemap"
   | "implement-level"
   | "implement-enemy"
+  | "implement-multiplayer"
   | "implement-hud"
   | "implement-save-system"
   | "gdd-to-tickets"
@@ -101,6 +102,9 @@ export type SkillName =
   | "team-level"
   | "team-live-ops"
   | "team-qa"
+  | "team-multiplayer"
+  | "team-progression"
+  | "team-world"
   // Local Godot CLI
   | "godot-cli-ops";
 

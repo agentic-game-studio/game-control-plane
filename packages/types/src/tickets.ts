@@ -2,6 +2,14 @@ export type TicketStatus = "available" | "in_progress" | "qa" | "completed";
 
 export type WorkflowStage = "plan" | "decompose" | "execute" | "verify" | "fix";
 
+export interface TicketTestEvidence {
+  bootCheck?: { passed: boolean; errors?: string[]; at: string };
+  gut?: { passed: boolean; output?: string; at: string };
+  smokePlaytest?: { passed: boolean; output?: string; at: string };
+  regression?: { passed: boolean; isBaseline?: boolean; diff?: string; at: string };
+  llmVerification?: { verdict: string; verifier?: string; at: string };
+}
+
 export interface Ticket {
   id: string;
   projectId?: string;
@@ -21,6 +29,8 @@ export interface Ticket {
   sessionId?: string;
   parentTicketId?: string;
   workflowStage?: WorkflowStage;
+  /** Executable QA gate results attached after verification. */
+  testEvidence?: TicketTestEvidence;
 }
 
 export interface CreateTicketRequest {

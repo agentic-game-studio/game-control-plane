@@ -83,6 +83,8 @@ interface TicketTemplate {
   requireFilesExist?: string[];
   /** Assign to a specific agent role */
   agentRole?: string;
+  /** If set, only generate for these genres (omit for all genres) */
+  genres?: GameGenre[];
 }
 
 const TICKET_TEMPLATES: TicketTemplate[] = [
@@ -569,6 +571,191 @@ ACCEPTANCE: Game complete screen shows after final level, buttons work.`,
     phase: PHASE_POLISH,
     requireFilesExist: ["levels/level_01.tscn", "scenes/levels/level_01.tscn", "autoloads/game_manager.gd", "scripts/autoloads/game_manager.gd"],
   },
+
+  // Creative production tickets (Phase 2–3)
+  {
+    id: "player_sprite_art",
+    title: "Generate and wire player character sprite",
+    description: `Use GenerateAsset to create a player character sprite (512x512, category: character).
+Then update the player scene to use the generated texture instead of ColorRect placeholder.
+
+REQUIREMENTS:
+1. Call GenerateAsset with art-bible-aligned prompt (pixel art, orthographic)
+2. Reference res://assets/character/ in player scene Sprite2D
+3. Preserve collision and movement scripts
+
+ACCEPTANCE: Player displays generated sprite in-game.`,
+    area: "art/sprites",
+    subarea: "character",
+    credits: 150,
+    phase: PHASE_CORE,
+    agentRole: "art-director",
+    requireFilesExist: ["scripts/player.gd"],
+  },
+  {
+    id: "tileset_art",
+    title: "Generate tileset textures for levels",
+    description: `Generate platform/tile textures via GenerateAsset (category: tex).
+Wire into TileMap or tileset resource used by level scenes.
+
+ACCEPTANCE: Levels use generated tile textures, not flat colors.`,
+    area: "art/tilesets",
+    subarea: "tilesets",
+    credits: 120,
+    phase: PHASE_CORE,
+    agentRole: "art-director",
+    requireFilesExist: ["levels/level_01.tscn", "scenes/levels/level_01.tscn"],
+  },
+  {
+    id: "sfx_jump_coin",
+    title: "Generate jump and coin SFX",
+    description: `Use GenerateAudio tool for jump and coin collect sounds.
+Place .wav files in assets/audio/ and wire to player and coin scripts.
+
+ACCEPTANCE: Jump and coin sounds play in-game.`,
+    area: "art/sfx",
+    subarea: "sfx",
+    credits: 80,
+    phase: PHASE_CORE,
+    agentRole: "sound-designer",
+    requireFilesExist: ["scripts/player.gd"],
+  },
+  {
+    id: "hud_art",
+    title: "Generate HUD icons (health, coin)",
+    description: `Generate UI icons via GenerateAsset (category: ui) for health and coin counter.
+Wire into HUD scene TextureRects.
+
+ACCEPTANCE: HUD shows generated icons.`,
+    area: "art/sprites",
+    subarea: "ui",
+    credits: 100,
+    phase: PHASE_CORE,
+    agentRole: "art-director",
+    requireFilesExist: ["autoloads/game_manager.gd", "scripts/autoloads/game_manager.gd"],
+  },
+  {
+    id: "opening_dialogue",
+    title: "Write opening dialogue and wire dialogue UI",
+    description: `Write opening dialogue CSV/JSON per write-dialogue skill.
+Add simple dialogue box UI triggered at level start.
+
+ACCEPTANCE: Opening dialogue displays on level 1 start.`,
+    area: "content/dialogue",
+    subarea: "dialogue",
+    credits: 100,
+    phase: PHASE_POLISH,
+    agentRole: "writer",
+  },
+  {
+    id: "localization_strings",
+    title: "Extract strings and setup TranslationServer",
+    description: `Extract UI strings to CSV, create .translation resources, enable locale in project settings.
+
+ACCEPTANCE: At least en + th locale files exist; HUD strings use tr().`,
+    area: "content/localization",
+    subarea: "localization",
+    credits: 120,
+    phase: PHASE_POLISH,
+    agentRole: "localization-lead",
+  },
+
+  // Genre-specific: shooter
+  {
+    id: "shooter_projectiles",
+    title: "Implement shooting and projectiles",
+    description: `SHOOTER MODE: Add projectile shooting with aim direction, fire rate, and bullet pooling.
+Use CharacterBody2D or Area2D bullets. Skip if not a shooter game.
+
+ACCEPTANCE: Player can shoot projectiles toward cursor/aim direction.`,
+    area: "engineering/combat",
+    subarea: "combat",
+    credits: 200,
+    phase: PHASE_CORE,
+    agentRole: "godot-specialist",
+    requireFilesExist: ["scripts/player.gd"],
+    genres: ["shooter"],
+  },
+  {
+    id: "puzzle_grid",
+    title: "Implement puzzle grid mechanics",
+    description: `PUZZLE MODE: Add grid-based puzzle board with tile swapping/matching logic.
+Skip if not a puzzle game.
+
+ACCEPTANCE: Puzzle grid responds to player input with valid move rules.`,
+    area: "engineering/gameplay",
+    subarea: "puzzle",
+    credits: 200,
+    phase: PHASE_CORE,
+    agentRole: "godot-specialist",
+    requireFilesExist: ["scripts/player.gd"],
+    genres: ["puzzle"],
+  },
+
+  // Genre-specific: RPG
+  {
+    id: "rpg_inventory",
+    title: "Implement inventory and item system",
+    description: `RPG MODE: Add inventory autoload with item resources, pickup, equip/use, and UI panel.
+Include at least 3 sample items (potion, sword, key).
+
+ACCEPTANCE: Player can pick up items, open inventory UI, and use/equip items.`,
+    area: "engineering/gameplay",
+    subarea: "inventory",
+    credits: 220,
+    phase: PHASE_CORE,
+    agentRole: "godot-specialist",
+    requireFilesExist: ["scripts/player.gd"],
+    genres: ["rpg"],
+  },
+  {
+    id: "rpg_dialogue_quest",
+    title: "Implement dialogue tree and quest log",
+    description: `RPG MODE: Add dialogue system with branching choices and quest log autoload.
+Wire NPC interaction (Area2D + E key) and at least one fetch quest.
+
+ACCEPTANCE: NPC dialogue shows choices; quest log updates on quest accept/complete.`,
+    area: "content/narrative",
+    subarea: "quests",
+    credits: 200,
+    phase: PHASE_CORE,
+    agentRole: "writer",
+    requireFilesExist: ["scripts/player.gd"],
+    genres: ["rpg"],
+  },
+
+  // Genre-specific: racing
+  {
+    id: "racing_vehicle",
+    title: "Implement vehicle controller and track",
+    description: `RACING MODE: Replace platformer movement with vehicle physics (acceleration, steering, drift).
+Add a simple oval or loop track with checkpoints and lap counter.
+
+ACCEPTANCE: Vehicle drives on track; lap time and checkpoint order tracked.`,
+    area: "engineering/gameplay",
+    subarea: "racing",
+    credits: 220,
+    phase: PHASE_CORE,
+    agentRole: "godot-specialist",
+    requireFilesExist: ["scripts/player.gd"],
+    genres: ["racing"],
+  },
+
+  // Genre-specific: strategy
+  {
+    id: "strategy_grid_units",
+    title: "Implement strategy grid and unit selection",
+    description: `STRATEGY MODE: Add tile grid map, unit placement, click-to-select, move orders, and simple AI opponent turn.
+
+ACCEPTANCE: Player selects units on grid, issues move; enemy takes a basic turn.`,
+    area: "engineering/gameplay",
+    subarea: "strategy",
+    credits: 240,
+    phase: PHASE_CORE,
+    agentRole: "godot-specialist",
+    requireFilesExist: ["scripts/player.gd"],
+    genres: ["strategy"],
+  },
 ];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -707,6 +894,11 @@ export async function generateTickets(projectId: string, workspacePath?: string,
   const newTickets: Ticket[] = [];
 
   for (const template of TICKET_TEMPLATES) {
+    if (template.genres && template.genres.length > 0) {
+      if (genre !== "generic" && !template.genres.includes(genre)) continue;
+      if (genre === "generic") continue;
+    }
+
     // Skip if this ticket (by template ID or title) already exists on the board
     if (ticketExistsById(board, template.id) || ticketExistsByTitle(board, template.title)) {
       continue;

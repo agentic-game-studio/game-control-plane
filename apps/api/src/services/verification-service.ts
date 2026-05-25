@@ -8,6 +8,7 @@
 import { invokeAgent } from "./llm-service.js";
 import { moveQuestTicket, createFixTicket } from "./quest-bridge.js";
 import { broadcastEvent } from "./data-store.js";
+import { updateTicketsBoard } from "./ticket-board.js";
 import type { Ticket, AgentRole, WSEvent } from "@game-studio/types";
 import { logger } from "../utils/logger.js";
 
@@ -128,9 +129,43 @@ export async function verifyTicket(
     if (passed) {
       await moveQuestTicket(ticket.id, "completed", ticket.assignee);
     } else {
-      // Move to available so the autonomous loop can re-pick it up
       await moveQuestTicket(ticket.id, "available", ticket.assignee);
+      if (ticket.sessionId && verdict !== "PASS") {
+        await createFixTicket(
+          ticket.sessionId,
+          ticket.id,
+          `Fix: ${ticket.title}`,
+          (ticket.assignee as AgentRole) ?? "godot-specialist",
+          `Verification ${verdict}: ${result.content.slice(0, 2000)}`,
+        ).catch((err) => {
+          logger.warn({ ticketId: ticket.id, error: err instanceof Error ? err.message : String(err) }, "createFixTicket failed");
+        });
+      }
     }
+
+    if (ticket.projectId) {
+      await updateTicketsBoard(ticket.projectId, (board) => {
+        for (const col of board.columns) {
+          const t = col.tickets.find((x) => x.id === ticket.id);
+          if (t) {
+            t.testEvidence = {
+              ...t.testEvidence,
+              llmVerification: { verdict, verifier, at: new Date().toISOString() },
+            };
+          }
+        }
+        return board;
+      });
+    }
+
+    broadcastEvent({
+      type: "ticket:verified",
+      ticketId: ticket.id,
+      projectId: ticket.projectId ?? null,
+      verdict,
+      passed,
+      verifier,
+    } as WSEvent);
 
     // Broadcast verification result
     broadcastEvent({

@@ -16,8 +16,9 @@ import { chatRouter } from "./routes/chat.js";
 import { ticketsRouter } from "./routes/tickets.js";
 import { assetsRouter } from "./routes/assets.js";
 import { settingsRouter } from "./routes/settings.js";
-import { autonomousRouter, abortAllLoops } from "./routes/autonomous.js";
+import { autonomousRouter, abortAllLoops, recoverStaleLoopStates } from "./routes/autonomous.js";
 import { gddRouter } from "./routes/gdd.js";
+import { buildsRouter } from "./routes/builds.js";
 import { errorHandler } from "./middleware/error-handler.js";
 import { authMiddleware } from "./middleware/auth.js";
 import { broadcast, wss, sseClients } from "./services/websocket.js";
@@ -114,6 +115,7 @@ app.use("/api/chat", chatRouter);
 app.use("/api/tickets", ticketsRouter);
 app.use("/api/autonomous", autonomousRouter);
 app.use("/api/gdd", gddRouter);
+app.use("/api/builds", buildsRouter);
 app.use("/api/assets", assetsRouter);
 app.use("/api/settings", settingsRouter);
 
@@ -171,12 +173,17 @@ server.listen(PORT, () => {
   });
 });
 
-// Prune old session state files on startup (older than 7 days)
+// Prune old session state files on startup (older than 30 days)
 import { SessionStore } from "@game-studio/state";
 const sessionStore = new SessionStore(config.WORKSPACE_DIR);
-sessionStore.pruneOldSessions().then((removed) => {
+sessionStore.pruneOldSessions(30 * 24 * 60 * 60 * 1000).then((removed) => {
   if (removed > 0) logger.info({ removed, event: "session_prune" }, `Pruned ${removed} old session(s)`);
 }).catch(() => { /* non-critical */ });
+
+const recoveredLoops = recoverStaleLoopStates();
+if (recoveredLoops > 0) {
+  logger.info({ recoveredLoops, event: "autonomous_stale_recovery" }, `Recovered ${recoveredLoops} stale autonomous loop(s)`);
+}
 
 // R7: Graceful shutdown
 async function gracefulShutdown(signal: string) {

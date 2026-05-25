@@ -1129,6 +1129,20 @@ export const GAME_STUDIO_TOOLS: LLMTool[] = [
       required: ["command"],
     },
   },
+  {
+    name: "ShipThisExport",
+    description:
+      "Export game to mobile stores via ShipThis CLI (App Store / Google Play cloud builds). " +
+      "Requires cli-main/ vendored and SHIPTHIS_CLI_PATH or default detection. " +
+      "Use after local Godot export presets are configured.",
+    input_schema: {
+      type: "object",
+      properties: {
+        platform: { type: "string", enum: ["android", "ios"], description: "Target mobile platform" },
+      },
+      required: ["platform"],
+    },
+  },
 ];
 
 /** Pre-load agent prompts on module init */

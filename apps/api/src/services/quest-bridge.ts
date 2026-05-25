@@ -10,6 +10,7 @@ import { DEFAULT_TICKETS_BOARD, readTicketsBoard, resolveProjectIdForSession, wr
 import { logger } from "../utils/logger.js";
 import type { TicketsBoard, Ticket, TicketStatus, AgentRole, WSEvent, WorkflowStage, DashboardData } from "@game-studio/types";
 import { ingestProducerSummaryFact, ingestProducerSummaryFromSession } from "./producer-summary.js";
+import { triggerVerification } from "./verification-service.js";
 
 // ─── Workflow State (in-memory, per session) ───
 
@@ -78,6 +79,35 @@ export function advanceStage(sessionId: string, stage: WorkflowStage, ticketId?:
     agentRole,
     sessionId,
   });
+
+  if (stage === "verify") {
+    void triggerWorkflowVerification(sessionId, wf);
+  }
+}
+
+async function triggerWorkflowVerification(sessionId: string, wf: WorkflowState): Promise<void> {
+  const projectId = await resolveProjectIdForSession(sessionId);
+  if (!projectId) return;
+
+  try {
+    const board = await readTicketsBoard(projectId);
+    for (const ticketId of wf.tickets.keys()) {
+      for (const col of board.columns) {
+        const ticket = col.tickets.find((t) => t.id === ticketId);
+        if (ticket && ticket.status === "qa") {
+          triggerVerification(
+            { ...ticket, sessionId },
+            ticket.description || ticket.title,
+          );
+        }
+      }
+    }
+  } catch (err) {
+    logger.warn(
+      { sessionId, error: err instanceof Error ? err.message : String(err), event: "workflow_verify_failed" },
+      "Workflow verify stage failed",
+    );
+  }
 }
 
 export function completeWorkflow(sessionId: string, success: boolean): void {
@@ -244,6 +274,10 @@ export async function moveQuestTicket(ticketId: string, status: TicketStatus, as
     toColumn: status,
     agentRole: ticket.assignee,
   });
+
+  if (status === "qa") {
+    triggerVerification(ticket, ticket.description || ticket.title);
+  }
 }
 
 export async function createFixTicket(
