@@ -3,7 +3,7 @@
 import { useState, useCallback, useEffect } from "react";
 import { useWebSocket } from "./useWebSocket";
 import { apiFetch } from "@/lib/api";
-import type { WSEvent } from "@game-studio/types";
+import type { WSEvent, AutonomousRunMetrics } from "@game-studio/types";
 
 // ─── Backend shapes ────────────────────────────────────────────────────────────
 
@@ -94,9 +94,23 @@ export function useAutonomousLoop() {
     failedCount: 0,
     lastError: null,
   });
+  const [metrics, setMetrics] = useState<AutonomousRunMetrics | null>(null);
+  const [milestone, setMilestone] = useState<string | null>(null);
 
   const onWSEvent = useCallback((event: WSEvent) => {
     switch (event.type) {
+      case "autonomous:started":
+        setStatus((prev) => ({ ...prev, running: true, sessionId: event.sessionId }));
+        break;
+
+      case "autonomous:milestone":
+        setMilestone(event.milestone);
+        break;
+
+      case "autonomous:metrics":
+        setMetrics(event.metrics);
+        break;
+
       case "autonomous:iteration:started":
         setStatus((prev) => ({
           ...prev,
@@ -209,5 +223,5 @@ export function useAutonomousLoop() {
     }));
   }, []);
 
-  return { status, connected, startLoop, stopLoop, getHistory, pollStatus };
+  return { status, metrics, milestone, connected, startLoop, stopLoop, getHistory, pollStatus };
 }

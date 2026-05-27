@@ -25,6 +25,7 @@ const navItems = [
   { href: "/sessions", icon: "history", label: "Sessions", fill: false },
   { href: "/tickets", icon: "checklist", label: "Quests", fill: false },
   { href: "/assets", icon: "grid_on", label: "Assets", fill: false },
+  { href: "/builds", icon: "deployed_code", label: "Builds", fill: false },
   { href: "/wiki", icon: "auto_stories", label: "Wiki", fill: false },
   { href: "/settings", icon: "account_balance_wallet", label: "Ledger", fill: false },
 ];

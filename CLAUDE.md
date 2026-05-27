@@ -31,7 +31,7 @@ game-control-plane/
 ├── packages/
 │   ├── types/            # Shared TypeScript interfaces (source of truth)
 │   ├── agents/           # 50 agent definitions (3-tier hierarchy)
-│   ├── skills/           # 67 skill definitions (9 team skills)
+│   ├── skills/           # 92 skill definitions (12 team skills)
 │   ├── config/           # Zod schemas + GDD/ADR templates
 │   └── state/            # File-based session store
 ├── scripts/
@@ -165,7 +165,7 @@ System prompts loaded from `workspace/.claude/agents/*.md` files dynamically.
 
 System prompts loaded from `workspace/.claude/agents/*.md` files dynamically.
 
-### Team Skills (9 LLM-powered multi-agent workflows)
+### Team Skills (12 LLM-powered multi-agent workflows)
 
 | Skill | Purpose | Agents |
 |-------|---------|--------|
@@ -350,6 +350,7 @@ Next.js 15 App Router, Tailwind CSS v4, no UI framework. All pages are client co
 | `/dashboard` | Project management with create/delete modals, activity log, credit summary, Godot MCP server status + setup button |
 | `/tickets` | Kanban board (project-scoped), 4 columns (Available, Processing, Verify, Archived), create/delete quests |
 | `/assets` | Asset inventory grid (project-scoped), create/delete, Art Bible sidebar with constraints |
+| `/builds` | Build export history, platform exports, smoke test status, changelog preview |
 | `/chat` | Board room command page — per-project producer session, sample prompt buttons on empty state |
 | `/settings` | Ledger & config — credit/tier pools, subscription, top-up history, usage log, engine selection, model dropdown, API key, webhook, reset |
 | `/agents` | Agent registry page with searchable list + tier filter |

@@ -401,6 +401,17 @@ export const skillsByPhase: Record<string, SkillDefinition[]> = {
       userInvocable: true,
     },
     {
+      name: "implement-multiplayer",
+      description: "Implement Godot multiplayer: ENet/WebSocket host/join, MultiplayerSpawner, state sync for player positions",
+      phases: [
+        { order: 1, name: "Network Architecture", description: "Choose peer topology and sync model", agents: ["network-programmer", "technical-director"] },
+        { order: 2, name: "Lobby & Matchmaking", description: "Host/join UI and connection flow", agents: ["network-programmer", "ui-programmer"] },
+        { order: 3, name: "Replication", description: "MultiplayerSynchronizer or RPC for player state", agents: ["network-programmer", "gameplay-programmer"] },
+        { order: 4, name: "Network QA", description: "Two-client smoke test", agents: ["qa-tester"] },
+      ],
+      userInvocable: true,
+    },
+    {
       name: "implement-hud",
       description: "Build the in-game HUD: health bar, score display, level indicator, item/inventory slots, and ability cooldown markers. Wires to GameState signals and Events bus. Uses Godot Control nodes (ProgressBar, Label, TextureRect).",
       phases: [
@@ -883,7 +894,12 @@ export const skillsByPhase: Record<string, SkillDefinition[]> = {
     {
       name: "perf-profile",
       description: "Structured performance profiling with bottleneck identification",
-      phases: [],
+      phases: [
+        { order: 1, name: "Baseline", description: "Capture Godot performance monitors via MCP", agents: ["performance-analyst"] },
+        { order: 2, name: "Identify Bottlenecks", description: "Analyze frame time and memory hotspots", agents: ["performance-analyst", "engine-programmer"] },
+        { order: 3, name: "Optimize", description: "Apply targeted optimizations", agents: ["engine-programmer", "technical-artist"] },
+        { order: 4, name: "Verify", description: "Re-profile and compare baselines", agents: ["qa-tester"] },
+      ],
       userInvocable: true,
     },
     {
@@ -1318,7 +1334,12 @@ export const skillsByPhase: Record<string, SkillDefinition[]> = {
     {
       name: "localize",
       description: "Localization workflow: string extraction and translation readiness",
-      phases: [],
+      phases: [
+        { order: 1, name: "Extract Strings", description: "Scan GDScript and scenes for user-facing strings; export CSV", agents: ["localization-lead", "writer"] },
+        { order: 2, name: "Translation Resources", description: "Create .translation files and locale folders", agents: ["localization-lead"] },
+        { order: 3, name: "Wire TranslationServer", description: "Enable locales in project.godot; replace literals with tr()", agents: ["ui-programmer", "godot-specialist"] },
+        { order: 4, name: "Locale QA", description: "Verify overflow and pseudo-locale", agents: ["qa-tester"] },
+      ],
       userInvocable: true,
     },
     {

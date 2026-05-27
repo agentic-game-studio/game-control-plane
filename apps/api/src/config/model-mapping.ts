@@ -6,8 +6,8 @@
 
 export const MODEL_MAPPING: Record<string, string> = {
   opus: "glm-5.1",
-  sonnet: "glm-5.0",
-  haiku: "glm-5.0",
+  sonnet: "glm-4.7",
+  haiku: "glm-4.7-flash",
 };
 
 export const DEFAULT_MODEL = "glm-5.1";
