@@ -66,12 +66,47 @@ Feature completeness for evaluators — each item maps to runnable code:
 ### Prerequisites
 
 - **Node.js 20+**, **pnpm 10+**
-- **Z.ai API key** — copy [`.env.example`](.env.example) → `.env`
+- **LLM API key** — [Z.ai (GLM)](https://z.ai) and/or [Kimi](https://platform.moonshot.cn) — copy [`.env.example`](.env.example) → `.env`
+
+### LLM providers (Z.ai vs Kimi)
+
+The API uses an **Anthropic-compatible** client. Pick a provider by setting keys and model names in `.env`:
+
+| Provider | Env vars | Example models | When to use |
+|----------|----------|----------------|-------------|
+| **Z.ai (default)** | `ZAI_API_KEY`, `ZAI_BASE_URL` | `glm-5.1`, `glm-4.7`, `glm-4.7-flash` | Default tier mapping in `apps/api/src/config/model-mapping.ts` |
+| **Kimi (optional)** | `KIMI_API_KEY`, `KIMI_BASE_URL` | `kimi-for-coding`, `kimi-k2.6`, `kimi-k2.5`, `kimi-k2-turbo-preview` | UCWS / Moonshot sponsor path; same tool loop, different endpoint |
+
+**Agent tiers → models** (via `getModelForTier`):
+
+| Tier | Z.ai (GLM) | Kimi (when `KIMI_API_KEY` is set) |
+|------|------------|-------------------------------------|
+| opus (directors, producer) | `glm-5.1` | `kimi-for-coding` |
+| sonnet (leads, specialists) | `glm-4.7` | `kimi-k2.6` |
+| haiku (fast / summarization) | `glm-4.7-flash` | `kimi-k2-turbo-preview` |
+
+When `KIMI_API_KEY` is present, `getModelForTier()` switches to Kimi models automatically. Requests whose model id starts with `kimi-` use `KIMI_BASE_URL` and `KIMI_API_KEY`.
+
+**Kimi quick setup** (tiers auto-route when `KIMI_API_KEY` is set):
+
+```bash
+cp .env.example .env
+# KIMI_API_KEY=your_kimi_key
+# DEFAULT_MODEL=kimi-for-coding
+# ZAI_API_KEY=unused          # still required at startup today — any non-empty placeholder
+# API_SECRET + NEXT_PUBLIC_API_KEY (same value, ≥16 chars)
+```
+
+**Z.ai default setup:**
+
+```bash
+cp .env.example .env
+# ZAI_API_KEY=your_zai_key
+# API_SECRET + NEXT_PUBLIC_API_KEY (same value, ≥16 chars)
+```
 
 ```bash
 pnpm install
-cp .env.example .env   # set ZAI_API_KEY + API_SECRET (≥16 chars)
-
 pnpm generate          # validate 51 agents + 92 skills
 pnpm typecheck
 
@@ -157,11 +192,13 @@ User prompt
 
 ### Agent & skill model
 
-| Tier | Model | Roles | Purpose |
-|------|-------|-------|---------|
-| 1 | glm-5.1 | Producer, creative-director, technical-director, autonomous-producer | Orchestration & gates |
-| 2 | glm-4.7 | game-designer, lead-programmer, art-director, qa-lead, … | Department leads |
-| 3 | glm-4.7 | godot-specialist, gameplay-programmer, code-reviewer, … | Implementation |
+| Tier | Model (Z.ai default) | Model (Kimi alternative) | Roles |
+|------|----------------------|---------------------------|-------|
+| 1 | glm-5.1 | kimi-for-coding | Producer, creative-director, technical-director, autonomous-producer |
+| 2 | glm-4.7 | kimi-k2.6 | game-designer, lead-programmer, art-director, qa-lead, … |
+| 3 | glm-4.7 | kimi-k2.5 / kimi-k2-turbo-preview | godot-specialist, gameplay-programmer, code-reviewer, … |
+
+Routing is configured in `apps/api/src/config/model-mapping.ts` (`MODEL_MAPPING` / `KIMI_MODEL_MAPPING`).
 
 Skills are **multi-phase workflows** with optional `subSkills` cascade (e.g. `implement-level` → tilemap + enemy + HUD). Team skills coordinate 4–6 agents in parallel phases.
 
@@ -222,7 +259,7 @@ The **credit ledger**, **webhook notifications**, and **multi-project dashboard*
 
 ### Global scalability
 
-- **Language-agnostic orchestration** — agents/skills are data-driven MD + TypeScript registries; swap `ZAI_API_KEY` / `KIMI_API_KEY` for regional LLM providers  
+- **Dual LLM providers** — Anthropic-compatible client switches on model id: GLM via `ZAI_API_KEY`, Kimi via `KIMI_API_KEY` (256k context on `kimi-for-coding` / `kimi-k2.6`)  
 - **Multi-engine agent defs** — Godot (production), Unreal, Unity, Phaser, Three.js specialists ready for expansion  
 - **Localization skill + tickets** — `localize` workflow, translation CSV pipeline in ticket templates  
 - **Cloud release path** — ShipThis CLI integration for Android/iOS export (`team-release` → build + smoke)  
@@ -271,12 +308,17 @@ pnpm generate && pnpm typecheck && pnpm test
 
 | Variable | Purpose |
 |----------|---------|
-| `ZAI_API_KEY` | LLM provider (required) |
+| `ZAI_API_KEY` | Z.ai / GLM provider (required at startup today) |
+| `ZAI_BASE_URL` | Z.ai endpoint (default `https://api.z.ai/api/anthropic`) |
+| `KIMI_API_KEY` | Kimi / Moonshot provider (optional; required when using `kimi-*` models) |
+| `KIMI_BASE_URL` | Kimi endpoint (default `https://api.kimi.com/coding`) |
+| `DEFAULT_MODEL` | Fallback model id — `glm-5.1` or `kimi-for-coding`, etc. |
 | `API_SECRET` | API + WebSocket auth (≥16 chars) |
+| `NEXT_PUBLIC_API_KEY` | Must match `API_SECRET` for browser → API calls |
 | `WORKSPACE_DIR` | Game development root (default `./workspace`) |
-| `NEXT_PUBLIC_API_KEY` | Frontend → API key (dev only; exposed in browser) |
+| `CONTEXT_WINDOW_TOKENS` | Optional override for context bar / compaction thresholds |
 
-Never commit `.env`. See [`.env.example`](.env.example).
+Never commit `.env`. Full template: [`.env.example`](.env.example).
 
 ---
 
