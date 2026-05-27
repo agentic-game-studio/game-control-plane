@@ -955,8 +955,11 @@ Max 4000 characters. Respond ONLY with the summary.`;
     const config = loadConfig();
     const summaryModel = getModelForTier("haiku"); // Use lightweight model for summarization
     const isKimi = summaryModel.startsWith("kimi-");
-    if (isKimi && !config.KIMI_API_KEY) {
+    if (isKimi && !config.KIMI_API_KEY?.trim()) {
       throw new Error(`KIMI_API_KEY is required for model "${summaryModel}". Set it in .env or switch DEFAULT_MODEL to a GLM model.`);
+    }
+    if (!isKimi && !config.ZAI_API_KEY?.trim()) {
+      throw new Error(`ZAI_API_KEY is required for model "${summaryModel}". Set it in .env or use Kimi with KIMI_API_KEY.`);
     }
     const summaryBaseUrl = isKimi ? config.KIMI_BASE_URL : config.ZAI_BASE_URL;
     const summaryApiKey = isKimi ? config.KIMI_API_KEY : config.ZAI_API_KEY;

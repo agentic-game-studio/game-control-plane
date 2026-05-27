@@ -70,7 +70,7 @@ Feature completeness for evaluators — each item maps to runnable code:
 
 ### LLM providers (Z.ai vs Kimi)
 
-The API uses an **Anthropic-compatible** client. Pick a provider by setting keys and model names in `.env`:
+The API uses an **Anthropic-compatible** client. Set **at least one** of `ZAI_API_KEY` or `KIMI_API_KEY`:
 
 | Provider | Env vars | Example models | When to use |
 |----------|----------|----------------|-------------|
@@ -87,13 +87,12 @@ The API uses an **Anthropic-compatible** client. Pick a provider by setting keys
 
 When `KIMI_API_KEY` is present, `getModelForTier()` switches to Kimi models automatically. Requests whose model id starts with `kimi-` use `KIMI_BASE_URL` and `KIMI_API_KEY`.
 
-**Kimi quick setup** (tiers auto-route when `KIMI_API_KEY` is set):
+**Kimi-only setup** (no Z.ai key required):
 
 ```bash
 cp .env.example .env
 # KIMI_API_KEY=your_kimi_key
-# DEFAULT_MODEL=kimi-for-coding
-# ZAI_API_KEY=unused          # still required at startup today — any non-empty placeholder
+# DEFAULT_MODEL=kimi-for-coding   # optional — auto-set when only Kimi is configured
 # API_SECRET + NEXT_PUBLIC_API_KEY (same value, ≥16 chars)
 ```
 
@@ -308,9 +307,9 @@ pnpm generate && pnpm typecheck && pnpm test
 
 | Variable | Purpose |
 |----------|---------|
-| `ZAI_API_KEY` | Z.ai / GLM provider (required at startup today) |
+| `ZAI_API_KEY` | Z.ai / GLM provider (optional if `KIMI_API_KEY` is set) |
 | `ZAI_BASE_URL` | Z.ai endpoint (default `https://api.z.ai/api/anthropic`) |
-| `KIMI_API_KEY` | Kimi / Moonshot provider (optional; required when using `kimi-*` models) |
+| `KIMI_API_KEY` | Kimi / Moonshot provider (optional if `ZAI_API_KEY` is set) |
 | `KIMI_BASE_URL` | Kimi endpoint (default `https://api.kimi.com/coding`) |
 | `DEFAULT_MODEL` | Fallback model id — `glm-5.1` or `kimi-for-coding`, etc. |
 | `API_SECRET` | API + WebSocket auth (≥16 chars) |

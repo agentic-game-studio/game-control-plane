@@ -525,8 +525,11 @@ export async function callZAI(request: LLMRequest): Promise<LLMResponse> {
 /** Resolve provider config (base URL, API key, headers) from model name */
 function resolveProviderConfig(config: ReturnType<typeof loadConfig>, model: string) {
   const isKimi = model.startsWith("kimi-");
-  if (isKimi && !config.KIMI_API_KEY) {
+  if (isKimi && !config.KIMI_API_KEY?.trim()) {
     throw new Error(`KIMI_API_KEY is required for model "${model}". Set it in .env or switch DEFAULT_MODEL to a GLM model.`);
+  }
+  if (!isKimi && !config.ZAI_API_KEY?.trim()) {
+    throw new Error(`ZAI_API_KEY is required for model "${model}". Set it in .env or use Kimi with KIMI_API_KEY.`);
   }
   const baseUrl = isKimi ? config.KIMI_BASE_URL : config.ZAI_BASE_URL;
   const apiKey = isKimi ? config.KIMI_API_KEY : config.ZAI_API_KEY;

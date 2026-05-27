@@ -1,24 +1,37 @@
 import "dotenv/config";
 import { z } from "zod";
+import { KIMI_DEFAULT_MODEL } from "./config/model-mapping.js";
 
-const envSchema = z.object({
-  // Kimi provider (optional — only needed if DEFAULT_MODEL points to a kimi model)
-  KIMI_API_KEY: z.string().optional().default(""),
-  KIMI_BASE_URL: z.string().url().default("https://api.kimi.com/coding"),
-  // Z.ai provider
-  ZAI_API_KEY: z.string().min(1, "ZAI_API_KEY is required"),
-  ZAI_BASE_URL: z.string().url().default("https://api.z.ai/api/anthropic"),
-  API_PORT: z.coerce.number().default(3001),
-  API_SECRET: z.string().min(16, "API_SECRET must be at least 16 characters — set it in .env"),
-  CORS_ORIGIN: z.string().default("http://localhost:3000"),
-  WORKSPACE_DIR: z.string().default("./workspace"),
-  REVIEW_MODE: z.enum(["solo", "lean", "full"]).default("lean"),
-  DEFAULT_MODEL: z.string().default("glm-5.1"),
-  MAX_TOOL_CALLS: z.coerce.number().default(100),
-  TOOL_CHECKPOINT_INTERVAL: z.coerce.number().default(30),
-  CONTEXT_WINDOW_TOKENS: z.coerce.number().default(256_000),
-  API_TIMEOUT_MS: z.coerce.number().default(120_000),
-});
+const envSchema = z
+  .object({
+    // Kimi provider (optional if ZAI_API_KEY is set)
+    KIMI_API_KEY: z.string().optional().default(""),
+    KIMI_BASE_URL: z.string().url().default("https://api.kimi.com/coding"),
+    // Z.ai provider (optional if KIMI_API_KEY is set)
+    ZAI_API_KEY: z.string().optional().default(""),
+    ZAI_BASE_URL: z.string().url().default("https://api.z.ai/api/anthropic"),
+    API_PORT: z.coerce.number().default(3001),
+    API_SECRET: z.string().min(16, "API_SECRET must be at least 16 characters — set it in .env"),
+    CORS_ORIGIN: z.string().default("http://localhost:3000"),
+    WORKSPACE_DIR: z.string().default("./workspace"),
+    REVIEW_MODE: z.enum(["solo", "lean", "full"]).default("lean"),
+    DEFAULT_MODEL: z.string().default("glm-5.1"),
+    MAX_TOOL_CALLS: z.coerce.number().default(100),
+    TOOL_CHECKPOINT_INTERVAL: z.coerce.number().default(30),
+    CONTEXT_WINDOW_TOKENS: z.coerce.number().default(256_000),
+    API_TIMEOUT_MS: z.coerce.number().default(120_000),
+  })
+  .superRefine((data, ctx) => {
+    const hasZai = data.ZAI_API_KEY.trim().length > 0;
+    const hasKimi = data.KIMI_API_KEY.trim().length > 0;
+    if (!hasZai && !hasKimi) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Set ZAI_API_KEY and/or KIMI_API_KEY — at least one LLM provider is required",
+        path: ["ZAI_API_KEY"],
+      });
+    }
+  });
 
 let configState: z.infer<typeof envSchema>;
 
@@ -48,7 +61,16 @@ export function loadConfig() {
     throw new Error(`Invalid environment:\n${errors.join("\n")}`);
   }
 
-  configState = result.data;
+  let parsed = result.data;
+  const hasZai = parsed.ZAI_API_KEY.trim().length > 0;
+  const hasKimi = parsed.KIMI_API_KEY.trim().length > 0;
+
+  // Kimi-only: default to Kimi model when DEFAULT_MODEL still points at GLM
+  if (hasKimi && !hasZai && !parsed.DEFAULT_MODEL.startsWith("kimi-")) {
+    parsed = { ...parsed, DEFAULT_MODEL: KIMI_DEFAULT_MODEL };
+  }
+
+  configState = parsed;
   return configState;
 }
 
