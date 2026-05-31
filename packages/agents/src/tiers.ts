@@ -2,7 +2,7 @@ import type { ModelTier, AgentRole } from "@game-studio/types";
 
 /**
  * Model tier mapping per agent.
- * Tier 1 = Opus, Tier 2 = Sonnet, Tier 3 = Sonnet/Haiku depending on complexity.
+ * Tier 1 = Opus, Tier 2 = Sonnet, Tier 3 = Sonnet.
  */
 export const agentTiers: Record<AgentRole, { tier: 1 | 2 | 3; model: ModelTier }> = {
   // Tier 1 — Leadership (Opus)

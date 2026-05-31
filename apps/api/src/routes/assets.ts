@@ -561,9 +561,16 @@ assetsRouter.post("/generate", async (req: Request, res: Response) => {
 
   // Support batch mode via presets file
   if (body.presetsFile) {
+    // Validate presetsFile is a bare filename within the script directory
+    const presetsBasename = path.basename(body.presetsFile);
+    const presetsPath = path.join(scriptDir, presetsBasename);
+    if (presetsBasename !== body.presetsFile || !(await fs.access(presetsPath).then(() => true).catch(() => false))) {
+      res.status(400).json({ success: false, error: `Invalid presets file: ${body.presetsFile}. Must be a filename in ${scriptDir}` });
+      return;
+    }
     const args = [
       path.join(scriptDir, "asset-pipeline.py"),
-      "--presets", body.presetsFile,
+      "--presets", presetsPath,
       "--output-dir", projectAssetsDir,
       "--workspace-dir", projectDir,
     ];
@@ -635,9 +642,9 @@ assetsRouter.post("/generate", async (req: Request, res: Response) => {
     "--name", body.name,
     "--type", body.type ?? "2d",
     "--category", body.category ?? "prop",
-    "--width", String(body.width ?? 512),
-    "--height", String(body.height ?? 512),
-    "--steps", String(body.steps ?? 4),
+    "--width", String(Math.min(Math.max(Number(body.width) || 512, 64), 4096)),
+    "--height", String(Math.min(Math.max(Number(body.height) || 512, 64), 4096)),
+    "--steps", String(Math.min(Math.max(Number(body.steps) || 4, 1), 50)),
     "--output-dir", projectAssetsDir,
     "--workspace-dir", projectDir,
   ];

@@ -401,6 +401,17 @@ export const skillsByPhase: Record<string, SkillDefinition[]> = {
       userInvocable: true,
     },
     {
+      name: "implement-multiplayer",
+      description: "Implement Godot multiplayer: ENet/WebSocket host/join, MultiplayerSpawner, state sync for player positions",
+      phases: [
+        { order: 1, name: "Network Architecture", description: "Choose peer topology and sync model", agents: ["network-programmer", "technical-director"] },
+        { order: 2, name: "Lobby & Matchmaking", description: "Host/join UI and connection flow", agents: ["network-programmer", "ui-programmer"] },
+        { order: 3, name: "Replication", description: "MultiplayerSynchronizer or RPC for player state", agents: ["network-programmer", "gameplay-programmer"] },
+        { order: 4, name: "Network QA", description: "Two-client smoke test", agents: ["qa-tester"] },
+      ],
+      userInvocable: true,
+    },
+    {
       name: "implement-hud",
       description: "Build the in-game HUD: health bar, score display, level indicator, item/inventory slots, and ability cooldown markers. Wires to GameState signals and Events bus. Uses Godot Control nodes (ProgressBar, Label, TextureRect).",
       phases: [
@@ -781,7 +792,7 @@ export const skillsByPhase: Record<string, SkillDefinition[]> = {
           order: 2,
           name: "Implementation",
           description: "Implement the story",
-          agents: [],
+          agents: ["gameplay-programmer"],
         },
         {
           order: 3,
@@ -883,7 +894,12 @@ export const skillsByPhase: Record<string, SkillDefinition[]> = {
     {
       name: "perf-profile",
       description: "Structured performance profiling with bottleneck identification",
-      phases: [],
+      phases: [
+        { order: 1, name: "Baseline", description: "Capture Godot performance monitors via MCP", agents: ["performance-analyst"] },
+        { order: 2, name: "Identify Bottlenecks", description: "Analyze frame time and memory hotspots", agents: ["performance-analyst", "engine-programmer"] },
+        { order: 3, name: "Optimize", description: "Apply targeted optimizations", agents: ["engine-programmer", "technical-artist"] },
+        { order: 4, name: "Verify", description: "Re-profile and compare baselines", agents: ["qa-tester"] },
+      ],
       userInvocable: true,
     },
     {
@@ -1228,6 +1244,61 @@ export const skillsByPhase: Record<string, SkillDefinition[]> = {
       userInvocable: true,
     },
     {
+      name: "godot-cli-ops",
+      description: "Local Godot CLI operations: project scaffolding, export preset generation, headless builds, script validation, testing, template management, and packaging. No cloud dependency — all operations run locally.",
+      phases: [
+        {
+          order: 1,
+          name: "Init Project",
+          description: "GodotCLI(command=init) to scaffold a new Godot project with project.godot, scenes, scripts directories",
+          agents: ["godot-specialist"],
+        },
+        {
+          order: 2,
+          name: "Detect Project",
+          description: "GodotCLI(command=detect) to verify project info (name, version, scenes, scripts)",
+          agents: ["godot-specialist"],
+        },
+        {
+          order: 3,
+          name: "Check Templates",
+          description: "GodotCLI(command=templates) to verify export templates are installed. Use GodotCLI(command=templates, install=true) if missing.",
+          agents: ["godot-specialist"],
+        },
+        {
+          order: 4,
+          name: "Generate Export Presets",
+          description: "GodotCLI(command=export-presets) to create export_presets.cfg for target platforms",
+          agents: ["godot-specialist"],
+        },
+        {
+          order: 5,
+          name: "Validate Project",
+          description: "GodotCLI(command=validate) for full project health check, then GodotCLI(command=check) to validate GDScripts",
+          agents: ["godot-specialist"],
+        },
+        {
+          order: 6,
+          name: "Run Tests",
+          description: "GodotCLI(command=test) to run GUT tests via headless Godot. Requires GUT addon installed.",
+          agents: ["godot-specialist"],
+        },
+        {
+          order: 7,
+          name: "Build Locally",
+          description: "GodotCLI(command=build) to run headless Godot export for target platform. Use all=true for all platforms.",
+          agents: ["godot-specialist"],
+        },
+        {
+          order: 8,
+          name: "Package Distributables",
+          description: "GodotCLI(command=package) to create distributable builds (.dmg, .zip, .tar.gz). Use all=true for all platforms.",
+          agents: ["godot-specialist"],
+        },
+      ],
+      userInvocable: true,
+    },
+    {
       name: "changelog",
       description: "Auto-generate changelog from git commits and sprint data",
       phases: [],
@@ -1263,7 +1334,12 @@ export const skillsByPhase: Record<string, SkillDefinition[]> = {
     {
       name: "localize",
       description: "Localization workflow: string extraction and translation readiness",
-      phases: [],
+      phases: [
+        { order: 1, name: "Extract Strings", description: "Scan GDScript and scenes for user-facing strings; export CSV", agents: ["localization-lead", "writer"] },
+        { order: 2, name: "Translation Resources", description: "Create .translation files and locale folders", agents: ["localization-lead"] },
+        { order: 3, name: "Wire TranslationServer", description: "Enable locales in project.godot; replace literals with tr()", agents: ["ui-programmer", "godot-specialist"] },
+        { order: 4, name: "Locale QA", description: "Verify overflow and pseudo-locale", agents: ["qa-tester"] },
+      ],
       userInvocable: true,
     },
     {

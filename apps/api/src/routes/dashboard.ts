@@ -2,7 +2,7 @@ import { Router } from "express";
 import type { Request, Response } from "express";
 import fs from "fs";
 import os from "os";
-import { readData, writeData, broadcastEvent } from "../services/data-store.js";
+import { readData, writeData, broadcastEvent, deleteData } from "../services/data-store.js";
 import { logger } from "../utils/logger.js";
 import type {
   DashboardData,
@@ -16,6 +16,8 @@ import { orphanProjectSessions } from "./chat.js";
 import { removeGodotMCPService, installGodotMCPPlugin, isGodotMCPPluginInstalled, isGodotMCPPluginEnabled, launchGodotEditor } from "../services/godot-mcp-service.js";
 import { detectEngineFromWorkspace } from "../services/llm-service.js";
 import { resolveProjectWorkspace, validateWorkspacePath } from "../utils/workspace.js";
+import { getTicketsBoardFile } from "../services/ticket-board.js";
+import { loadConfig } from "../config.js";
 import path from "node:path";
 
 const DEFAULT_DATA: DashboardData = {
@@ -164,9 +166,18 @@ dashboardRouter.post("/projects", async (req: Request, res: Response) => {
     const workspacePath = body.workspacePath ?? null;
     if (workspacePath) {
       const validation = validateWorkspacePath(workspacePath);
-      if (path.isAbsolute(workspacePath) && !validation.exists) {
-        res.status(400).json({ success: false, error: `Directory does not exist: ${workspacePath}` });
-        return;
+      if (path.isAbsolute(workspacePath)) {
+        // Absolute paths must exist AND be within the workspace directory
+        if (!validation.exists) {
+          res.status(400).json({ success: false, error: `Directory does not exist: ${workspacePath}` });
+          return;
+        }
+        const config = loadConfig();
+        const resolved = path.resolve(workspacePath);
+        if (!resolved.startsWith(path.resolve(config.WORKSPACE_DIR))) {
+          res.status(400).json({ success: false, error: "Absolute workspacePath must be within the workspace directory" });
+          return;
+        }
       }
       if (validation.error && validation.error.includes("traversal")) {
         res.status(400).json({ success: false, error: validation.error });
@@ -240,9 +251,15 @@ dashboardRouter.patch("/projects/:id", async (req: Request, res: Response) => {
     }
 
     const projectId = String(id);
+    // Whitelist allowed update fields to prevent arbitrary field injection
+    const allowedFields = ["name", "description", "engine", "progress", "status", "workspacePath", "icon"] as const;
+    const safeUpdates: Record<string, unknown> = {};
+    for (const key of allowedFields) {
+      if (key in updates) safeUpdates[key] = (updates as Record<string, unknown>)[key];
+    }
     const updatedProject = normalizeProject({
       ...data.projects[projectIndex],
-      ...updates,
+      ...safeUpdates,
       id: projectId,
       updatedAt: new Date().toISOString(),
     });
@@ -284,6 +301,10 @@ dashboardRouter.delete("/projects/:id", async (req: Request, res: Response) => {
 
     // Stop Godot MCP service if running for this project
     await removeGodotMCPService(String(id)).catch(() => {});
+
+    // Clean up associated data files (tickets board, autonomous loop state)
+    const ticketsFile = getTicketsBoardFile(String(id));
+    deleteData(ticketsFile).catch(() => {});
 
     // Broadcast event
     broadcastEvent({

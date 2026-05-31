@@ -29,6 +29,8 @@ const transport = pino.transport({
       target: "pino-file-transport",
       options: {
         path: LOG_FILE,
+        rotation: { maxSize: 50, frequency: "daily", logging: false },
+        retention: { duration: "7d", logging: false },
       },
     },
     {
@@ -36,6 +38,8 @@ const transport = pino.transport({
       target: "pino-file-transport",
       options: {
         path: join(LOG_DIR, "error.log"),
+        rotation: { maxSize: 20, frequency: "daily", logging: false },
+        retention: { duration: "14d", logging: false },
       },
     },
   ],

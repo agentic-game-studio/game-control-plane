@@ -8,6 +8,8 @@ import type { Ticket, TicketStatus } from "./tickets.js";
 import type { GameAsset } from "./assets.js";
 import type { SettingsConfig } from "./settings.js";
 import type { ChatSession, ChatMessage, ContextUsage } from "./chat.js";
+import type { GameBuild } from "./builds.js";
+import type { AutonomousRunMetrics } from "./metrics.js";
 
 /** WebSocket event types for real-time frontend updates */
 export type WSEvent =
@@ -28,9 +30,11 @@ export type WSEvent =
   | { type: "ticket:updated"; ticket: Ticket; projectId?: string | null }
   | { type: "ticket:deleted"; ticketId: string; projectId?: string | null }
   | { type: "ticket:moved"; ticket: Ticket; fromColumn: string; toColumn: string; projectId?: string | null }
+  | { type: "ticket:verified"; ticketId: string; projectId?: string | null; verdict: string; passed: boolean; verifier: AgentRole }
   | { type: "asset:created"; asset: GameAsset }
   | { type: "asset:updated"; asset: GameAsset }
   | { type: "asset:deleted"; assetId: string }
+  | { type: "asset:generated"; asset: GameAsset }
   | { type: "settings:updated"; settings: SettingsConfig }
   | { type: "team:started"; teamId: string; sessionId: string }
   | { type: "team:completed"; teamId: string; sessionId: string; output: string }
@@ -51,14 +55,22 @@ export type WSEvent =
   | { type: "subagent:failed"; agentRole: AgentRole; parentSessionId: string; ticketId: string; error: string }
   | { type: "error"; error: string; sessionId?: string }
   // Autonomous loop events
+  | { type: "autonomous:started"; sessionId: string; projectId: string; gameType?: string }
+  | { type: "autonomous:milestone"; sessionId: string; projectId: string; milestone: string; index: number; summary: string }
   | { type: "autonomous:iteration:started"; sessionId: string; ticketId: string; agentRole: string; title: string; iteration: number }
   | { type: "autonomous:iteration:completed"; sessionId: string; ticketId: string; agentRole: string; iteration: number; completedCount: number }
   | { type: "autonomous:iteration:failed"; sessionId: string; ticketId: string; agentRole: string; iteration: number; error: string }
+  | { type: "autonomous:iteration:boot_check_failed"; sessionId: string; ticketId: string; iteration: number; errors: string[] }
   | { type: "autonomous:error"; sessionId: string; error: string }
   | { type: "autonomous:completed"; sessionId: string; completedCount: number; failedCount: number; totalIterations: number }
   | { type: "autonomous:stopped"; sessionId: string; completedCount: number; failedCount: number }
   // GDD ingestion
-  | { type: "gdd:ingested"; sessionId: string; projectId: string; total: number; created: number; skipped: number; errors: number };
+  | { type: "gdd:ingested"; sessionId: string; projectId: string; total: number; created: number; skipped: number; errors: number }
+  // Builds
+  | { type: "build:created"; build: GameBuild }
+  | { type: "build:updated"; build: GameBuild }
+  // Run metrics
+  | { type: "autonomous:metrics"; sessionId: string; metrics: AutonomousRunMetrics };
 
 /** API request/response types */
 export interface ApiResponse<T = unknown> {

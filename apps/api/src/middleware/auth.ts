@@ -3,10 +3,11 @@ import type { Request, Response, NextFunction } from "express";
 import { loadConfig } from "../config.js";
 
 function timingSafeCompare(a: string, b: string): boolean {
-  const bufA = Buffer.from(a, "utf-8");
-  const bufB = Buffer.from(b, "utf-8");
-  if (bufA.length !== bufB.length) return false;
-  return crypto.timingSafeEqual(bufA, bufB);
+  // Hash both inputs to fixed-length buffers before comparing.
+  // Direct length comparison leaks key length via timing.
+  const hashA = crypto.createHash("sha256").update(a).digest();
+  const hashB = crypto.createHash("sha256").update(b).digest();
+  return crypto.timingSafeEqual(hashA, hashB);
 }
 
 export function authMiddleware(req: Request, res: Response, next: NextFunction) {

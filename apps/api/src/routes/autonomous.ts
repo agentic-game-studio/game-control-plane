@@ -14,24 +14,37 @@
 
 import { Router } from "express";
 import type { Request, Response } from "express";
-import { existsSync, mkdirSync, openSync, readFileSync, writeFileSync, fsyncSync, closeSync } from "fs";
+import { existsSync, mkdirSync, openSync, readFileSync, writeFileSync, fsyncSync, closeSync, readdirSync } from "fs";
 import { join } from "path";
 import { loadConfig } from "../config.js";
 import { invokeAgent, detectEngineFromWorkspace, type ProjectContext } from "../services/llm-service.js";
 import { readData, writeData, broadcastEvent } from "../services/data-store.js";
 import { generateTickets, addTicketsToBoard } from "../services/ticket-generator.js";
-import { readTicketsBoard, writeTicketsBoard } from "../services/ticket-board.js";
+import { readTicketsBoard, writeTicketsBoard, updateTicketsBoard } from "../services/ticket-board.js";
 import { broadcast } from "../services/websocket.js";
 import { logger } from "../utils/logger.js";
 import { resolveProjectWorkspace } from "../utils/workspace.js";
 import type { AgentRole, WSEvent } from "@game-studio/types";
-import type { TicketsBoard, Ticket, DashboardData, Project } from "@game-studio/types";
+import type { TicketsBoard, Ticket, DashboardData } from "@game-studio/types";
 import { getOrCreateGodotMCPService, launchGodotEditor, type GodotMCPServiceOptions } from "../services/godot-mcp-service.js";
 import { ingestProducerSummaryFact } from "../services/producer-summary.js";
+import { ingestGDD } from "../services/gdd-ingest-service.js";
+import { runQAGateChain, saveTestEvidenceArtifact } from "../services/qa-gate-service.js";
+import { triggerVerification } from "../services/verification-service.js";
+import { advanceMilestoneIfReady } from "../services/milestone-service.js";
+import { upsertRunMetrics, listRunMetrics, getRunMetrics, recordTokenUsage } from "../services/run-metrics-service.js";
+import { externalizeProductionNote } from "../services/wiki-memory-service.js";
+import { fireWebhook } from "../services/webhook-service.js";
+import { executeGodotExport } from "../services/build-service.js";
+import { generateProjectChangelog } from "../services/changelog-service.js";
 
 import { execSync } from "child_process";
 
 type ReadyProjectContext = ProjectContext & { workspacePath: string };
+
+/** In-memory registry of running loop session IDs for graceful shutdown */
+const activeLoopSessions = new Set<string>();
+const STALE_LOOP_HEARTBEAT_MS = 5 * 60 * 1000; // 5 minutes without heartbeat = stale
 
 const DEBUG_FILE = "/tmp/autonomous-debug.txt";
 function debugLog(msg: string) {
@@ -187,6 +200,45 @@ export const autonomousRouter: Router = Router();
 
 const config = loadConfig();
 const SESSIONS_DIR = join(config.WORKSPACE_DIR, "production", "sessions");
+
+export function abortAllLoops(): void {
+  for (const sessionId of activeLoopSessions) {
+    const state = loadLoopState(sessionId);
+    if (state && state.status === "running") {
+      state.status = "idle";
+      state.lastHeartbeat = new Date().toISOString();
+      saveLoopState(state);
+    }
+  }
+  activeLoopSessions.clear();
+}
+
+/** Recover loops stuck in 'running' after API restart (no in-memory runner) */
+export function recoverStaleLoopStates(): number {
+  if (!existsSync(SESSIONS_DIR)) return 0;
+  let recovered = 0;
+  const now = Date.now();
+  try {
+    const entries = readdirSync(SESSIONS_DIR, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+      const statePath = join(SESSIONS_DIR, entry.name, "loop-state.json");
+      if (!existsSync(statePath)) continue;
+      try {
+        const state = JSON.parse(readFileSync(statePath, "utf-8")) as LoopState;
+        if (state.status !== "running") continue;
+        const age = now - new Date(state.lastHeartbeat).getTime();
+        if (age > STALE_LOOP_HEARTBEAT_MS || !activeLoopSessions.has(state.sessionId)) {
+          state.status = "idle";
+          state.lastError = state.lastError ?? "Recovered stale loop after API restart";
+          saveLoopState(state);
+          recovered++;
+        }
+      } catch { /* skip corrupt */ }
+    }
+  } catch { /* non-fatal */ }
+  return recovered;
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -353,6 +405,40 @@ function assignTicketToAgent(ticket: Ticket): AgentRole {
   return areaMap[ticket.area] ?? "godot-specialist";
 }
 
+function makeTokenTracker(sessionId: string, projectId: string) {
+  return (usage: { input_tokens: number; output_tokens: number }) => {
+    void recordTokenUsage(sessionId, projectId, usage);
+  };
+}
+
+async function producerSprintReplan(
+  state: LoopState,
+  projectContext: ReadyProjectContext,
+): Promise<void> {
+  try {
+    await invokeAgent(
+      "autonomous-producer" as AgentRole,
+      `[SPRINT REPLAN] Queue empty at iteration ${state.currentIteration}. Review board, producer summary, and GDD. Suggest new tickets or confirm templates exhausted. Use CreateTicket for gaps. Planning only — do not spawn subagents for implementation.`,
+      state.sessionId,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      1,
+      projectContext,
+      undefined,
+      makeTokenTracker(state.sessionId, state.projectId),
+    );
+    await externalizeProductionNote(
+      state.projectId,
+      "sprint-replan",
+      `Autonomous producer replan at iteration ${state.currentIteration}`,
+    );
+  } catch {
+    logger.warn({ projectId: state.projectId, event: "producer_replan_skipped" }, "Sprint replan skipped");
+  }
+}
+
 async function moveTicket(projectId: string, ticketId: string, status: string): Promise<void> {
   const data = await readTicketsBoard(projectId);
   for (const column of data.columns) {
@@ -409,8 +495,17 @@ async function runIteration(state: LoopState, board: TicketsBoard, projectContex
       const totalCompleted = completedCol?.tickets.length ?? 0;
 
       debugLog(`queue empty, completedCount=${totalCompleted}, generating tickets...`);
+
+      if (state.currentIteration > 0 && state.currentIteration % 5 === 0) {
+        await producerSprintReplan(state, projectContext);
+      }
+
       try {
-        const newTickets = await generateTickets(state.projectId, projectContext.workspacePath);
+        const newTickets = await generateTickets(
+          state.projectId,
+          projectContext.workspacePath,
+          projectContext.description,
+        );
         debugLog(`generateTickets returned ${newTickets.length} tickets`);
 
         if (newTickets.length > 0) {
@@ -420,8 +515,12 @@ async function runIteration(state: LoopState, board: TicketsBoard, projectContex
           ticket = getNextAvailableTicket(refreshedBoard);
           debugLog(`queue replenished: ${newTickets.length} tickets added, getNextAvailableTicket=${ticket ? "got ticket" : "still null"}`);
         } else if (totalCompleted > 0) {
-          // All feature templates already completed — the game is done!
           debugLog(`all ${totalCompleted} feature templates exhausted — loop done`);
+          void fireWebhook("autonomous:completed", { projectId: state.projectId, sessionId: state.sessionId, completedCount: totalCompleted });
+          try {
+            await generateProjectChangelog(state.projectId, projectContext.workspacePath);
+            await executeGodotExport(state.projectId, projectContext.workspacePath, "web", undefined, true);
+          } catch { /* non-fatal ship step */ }
           return { ticket: null, done: true };
         } else {
           // No completed tickets AND zero new tickets — either first run with no templates
@@ -504,6 +603,8 @@ async function runIteration(state: LoopState, board: TicketsBoard, projectContex
       true,      // broadcastEvents
       1,         // depth
       projectContext,
+      undefined,
+      makeTokenTracker(state.sessionId, state.projectId),
     );
 
     const timeoutPromise = new Promise<never>((_, reject) =>
@@ -580,8 +681,15 @@ async function runIteration(state: LoopState, board: TicketsBoard, projectContex
     state.lastError = combinedError;
     state.lastHeartbeat = new Date().toISOString();
 
-    // Route to QA for code reviewer to inspect the diff and identify what went wrong
+    // Route to QA for code reviewer + LLM verification
     await moveTicket(state.projectId, activeTicket.id, "qa");
+
+    const qaTicket = (await readTicketsBoard(state.projectId)).columns
+      .flatMap((c) => c.tickets)
+      .find((t) => t.id === activeTicket.id);
+    if (qaTicket) {
+      triggerVerification({ ...qaTicket, sessionId: state.sessionId }, combinedError);
+    }
 
     // Invoke code-reviewer to analyze what went wrong and provide diagnostic feedback.
     // This runs async (non-blocking) so the loop isn't slowed down by a second LLM call.
@@ -604,6 +712,10 @@ If the failure is an infinite loop or hang (timeout), suggest a workaround.`,
       undefined, // no conversation history
       undefined, // no onProgress
       false,     // don't broadcast reviewer events — it's background analysis
+      1,
+      projectContext,
+      undefined,
+      makeTokenTracker(state.sessionId, state.projectId),
     ).then((result) => {
       logger.info({ ticketId: activeTicket.id, reviewLength: result.content.length, event: "code_review_done" },
         `Code review for failed ticket ${activeTicket.id}: ${result.content.slice(0, 200)}`);
@@ -632,37 +744,51 @@ If the failure is an infinite loop or hang (timeout), suggest a workaround.`,
       detail: combinedError.slice(0, 400),
     });
   } else {
-    // Agent completed — run godot-headless-boot-check before marking ticket done.
-    // Boot check gate: Godot project files must parse cleanly before a ticket is marked done.
-    // If workspacePath is missing, we cannot validate — treat as a hard failure so the loop
-    // never silently passes tickets without validation. This prevents parse-error cascades
-    // from accumulating across iterations when the project path is misconfigured.
-    let bootOk = true;
-    let bootErrors: string[] = [];
+    // Agent completed — run executable QA gate chain before marking ticket done.
+    let qaPassed = true;
+    let qaSummary = "";
+    let qaEvidence = {};
 
     if (!projectContext.workspacePath) {
-      logger.warn({ projectId: state.projectId, event: "boot_check_skipped_no_path" },
-        "Cannot run Godot boot check: project workspacePath is not set. Ticket will be re-queued.");
-      bootOk = false;
-      bootErrors = [`Project workspacePath not configured — cannot validate Godot project (projectId=${state.projectId}). Set workspacePath in dashboard.json.`];
+      qaPassed = false;
+      qaSummary = `Project workspacePath not configured (projectId=${state.projectId})`;
     } else {
+      const qaResult = runQAGateChain(projectContext.workspacePath, state.projectId);
+      qaPassed = qaResult.passed;
+      qaSummary = qaResult.summary;
+      qaEvidence = qaResult.evidence;
+
       const fullProjectPath = resolveProjectWorkspace(projectContext.workspacePath);
-      const bootResult = await runBootCheck(fullProjectPath);
-      bootOk = bootResult.bootOk;
-      bootErrors = bootResult.errors;
+      saveTestEvidenceArtifact(fullProjectPath, activeTicket.id, qaResult.evidence);
+
+      await updateTicketsBoard(state.projectId, (board) => {
+        for (const col of board.columns) {
+          const t = col.tickets.find((x) => x.id === activeTicket.id);
+          if (t) t.testEvidence = qaResult.evidence;
+        }
+        return board;
+      });
+
+      void upsertRunMetrics({
+        sessionId: state.sessionId,
+        projectId: state.projectId,
+        qaGatePasses: qaPassed ? (state.completedCount + 1) : state.completedCount,
+        qaGateFailures: qaPassed ? state.failedCount : state.failedCount + 1,
+        completedCount: state.completedCount,
+        failedCount: state.failedCount,
+        totalIterations: state.currentIteration,
+      });
     }
 
-    if (!bootOk) {
-      // Boot check failed — return ticket to queue, prepend boot errors to description
+    if (!qaPassed) {
       iteration.status = "failed";
       iteration.completedAt = new Date().toISOString();
-      iteration.error = `Boot check failed:\n${bootErrors.slice(0, 5).join("\n")}\n\nAgent output:\n${agentResult?.content?.slice(0, 300) ?? ""}`;
+      iteration.error = `QA gate failed: ${qaSummary}\n\nAgent output:\n${agentResult?.content?.slice(0, 300) ?? ""}`;
       iteration.output = iteration.error;
       state.failedCount++;
       state.lastError = iteration.error;
       state.lastHeartbeat = new Date().toISOString();
 
-      // Return ticket to available queue for the agent to fix
       await moveTicket(state.projectId, activeTicket.id, "available");
 
       broadcast({
@@ -670,7 +796,7 @@ If the failure is an infinite loop or hang (timeout), suggest a workaround.`,
         sessionId: state.sessionId,
         ticketId: activeTicket.id,
         iteration: state.currentIteration,
-        errors: bootErrors,
+        errors: [qaSummary],
       } as unknown as WSEvent);
 
       void ingestProducerSummaryFact(state.projectId, {
@@ -678,17 +804,38 @@ If the failure is an infinite loop or hang (timeout), suggest a workaround.`,
         at: new Date().toISOString(),
         ticketId: activeTicket.id,
         title: activeTicket.title,
-        detail: bootErrors.slice(0, 3).join("; "),
+        detail: qaSummary.slice(0, 400),
       });
     } else {
-      // Boot check passed — mark completed
+      // QA gates passed — move to verify column for LLM supplement, then complete
       iteration.status = "completed";
       iteration.completedAt = new Date().toISOString();
       iteration.output = agentResult?.content?.slice(0, 500);
       state.completedCount++;
       state.lastHeartbeat = new Date().toISOString();
 
-      await moveTicket(state.projectId, activeTicket.id, "completed");
+      await moveTicket(state.projectId, activeTicket.id, "qa");
+
+      const verifyTicket = (await readTicketsBoard(state.projectId)).columns
+        .flatMap((c) => c.tickets)
+        .find((t) => t.id === activeTicket.id);
+      if (verifyTicket) {
+        triggerVerification(
+          { ...verifyTicket, sessionId: state.sessionId, testEvidence: qaEvidence as typeof verifyTicket.testEvidence },
+          `${agentResult?.content ?? ""}\n\nQA: ${qaSummary}`,
+        );
+      } else {
+        await moveTicket(state.projectId, activeTicket.id, "completed");
+      }
+
+      const gateContext = `Milestone check after ticket "${activeTicket.title}". Completed: ${state.completedCount}. Agent output:\n${agentResult?.content?.slice(0, 1500) ?? ""}`;
+      void advanceMilestoneIfReady(state.projectId, state.sessionId, state.completedCount, gateContext);
+
+      void externalizeProductionNote(
+        state.projectId,
+        "ticket-completed",
+        `${activeTicket.title}: ${qaSummary}`,
+      );
 
       broadcast({
         type: "autonomous:iteration:completed",
@@ -726,7 +873,7 @@ If the failure is an infinite loop or hang (timeout), suggest a workaround.`,
 
 // POST /autonomous/start — Start or resume the autonomous loop
 autonomousRouter.post("/start", async (req: Request, res: Response) => {
-  const { sessionId, projectId, maxIterations = 50 } = req.body as {
+  const { sessionId, projectId, maxIterations = 200 } = req.body as {
     sessionId?: string;
     projectId?: string;
     maxIterations?: number;
@@ -773,11 +920,31 @@ autonomousRouter.post("/start", async (req: Request, res: Response) => {
 
   const existing = loadLoopState(sessionId);
 
-  // Resume if already running
-  if (existing && existing.status === "running") {
+  // Allow resume if persisted 'running' but no active in-memory runner (zombie after restart)
+  if (existing && existing.status === "running" && activeLoopSessions.has(sessionId)) {
     res.status(409).json({ success: false, error: "Loop already running", data: existing });
     return;
   }
+  if (existing && existing.status === "running") {
+    existing.status = "idle";
+    saveLoopState(existing);
+  }
+
+  // Auto-ingest GDD tickets on start
+  void ingestGDD(sessionId, projectId, { broadcast: true }).then((gddResult) => {
+    if (gddResult.created > 0) {
+      logger.info({ projectId, created: gddResult.created, event: "autonomous_gdd_ingest" }, `Auto-ingested ${gddResult.created} GDD tickets`);
+    }
+  }).catch(() => { /* non-fatal */ });
+
+  broadcast({
+    type: "autonomous:started",
+    sessionId,
+    projectId,
+    gameType: readyProjectContext.description?.slice(0, 80),
+  } as WSEvent);
+
+  void upsertRunMetrics({ sessionId, projectId, startedAt: new Date().toISOString() });
 
   const state: LoopState = existing && existing.status !== "idle"
     ? { ...existing, status: "running", maxIterations, lastHeartbeat: new Date().toISOString() }
@@ -797,8 +964,29 @@ autonomousRouter.post("/start", async (req: Request, res: Response) => {
   saveLoopState(state);
 
   // Kick off the loop asynchronously (don't block the HTTP response)
+  activeLoopSessions.add(sessionId);
   (async () => {
     debugLog(`batch ${state.sessionId}] async loop started, projectId=${state.projectId}`);
+
+    // Autonomous producer sprint planning at loop start
+    try {
+      await invokeAgent(
+        "autonomous-producer" as AgentRole,
+        `[SPRINT PLAN] Review project ${state.projectId} ticket board and producer summary. Confirm sprint priorities. Do not spawn subagents — planning only.`,
+        state.sessionId,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        1,
+        readyProjectContext,
+        undefined,
+        makeTokenTracker(state.sessionId, state.projectId),
+      );
+    } catch {
+      logger.warn({ projectId: state.projectId, event: "producer_plan_skipped" }, "Autonomous producer planning skipped");
+    }
+
     debugLog(`batch ${state.sessionId}] validated projectContext engine=${readyProjectContext.engine}, workspacePath=${readyProjectContext.workspacePath}`);
 
     // Start Godot MCP service for godot projects (mirrors chat.ts logic)
@@ -860,6 +1048,8 @@ autonomousRouter.post("/start", async (req: Request, res: Response) => {
           error,
         } as WSEvent);
 
+        void fireWebhook("autonomous:error", { sessionId: state.sessionId, projectId: currentState.projectId, error });
+
         void ingestProducerSummaryFact(currentState.projectId, {
           kind: "autonomous_error",
           at: new Date().toISOString(),
@@ -892,6 +1082,14 @@ autonomousRouter.post("/start", async (req: Request, res: Response) => {
         totalIterations: currentState.currentIteration,
       } as WSEvent);
 
+      void fireWebhook("autonomous:completed", {
+        sessionId: state.sessionId,
+        projectId: currentState.projectId,
+        completedCount: currentState.completedCount,
+        failedCount: currentState.failedCount,
+        totalIterations: currentState.currentIteration,
+      });
+
       void ingestProducerSummaryFact(currentState.projectId, {
         kind: "autonomous_loop_completed",
         at: new Date().toISOString(),
@@ -901,6 +1099,8 @@ autonomousRouter.post("/start", async (req: Request, res: Response) => {
   })().catch((err) => {
     debugLog(`batch ${state.sessionId}] CRASH in async loop: ${err}`);
     logger.error({ error: err, event: "autonomous_loop_crash" }, "Autonomous loop crashed");
+  }).finally(() => {
+    activeLoopSessions.delete(sessionId);
   });
 
   res.status(202).json({ success: true, data: state });
@@ -967,6 +1167,18 @@ autonomousRouter.get("/status", (req: Request, res: Response) => {
   }
 
   res.json({ success: true, data: state });
+});
+
+// GET /autonomous/metrics — Run metrics for session or project
+autonomousRouter.get("/metrics", async (req: Request, res: Response) => {
+  const { sessionId, projectId } = req.query as { sessionId?: string; projectId?: string };
+  if (sessionId) {
+    const metrics = await getRunMetrics(sessionId);
+    res.json({ success: true, data: metrics });
+    return;
+  }
+  const metrics = await listRunMetrics(projectId);
+  res.json({ success: true, data: metrics });
 });
 
 // GET /autonomous/history — Get completed loop runs

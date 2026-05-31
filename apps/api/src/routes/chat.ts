@@ -1,5 +1,5 @@
 import { Router } from "express";
-import type { Request, Response } from "express";
+import type { Request, Response, NextFunction } from "express";
 import { join } from "node:path";
 import type { AgentRole, ChatSession, ChatMessage, CreateMessageRequest, CreateChatSessionRequest, ContextUsage, DashboardData, Project, ProjectEngine } from "@game-studio/types";
 import { emptyProducerSummarySnapshot, ingestProducerSummaryFact } from "../services/producer-summary.js";
@@ -19,6 +19,11 @@ import { loadConfig } from "../config.js";
 import { getModelContextWindow, getModelForTier, MAX_CONTEXT_TOKENS, CHARS_PER_TOKEN_ESTIMATE } from "../config/model-mapping.js";
 
 export const chatRouter: Router = Router();
+
+// Ensure chatStore is loaded before any route handler runs
+chatRouter.use((_req: Request, _res: Response, next: NextFunction) => {
+  chatStoreReady.then(() => next()).catch(next);
+});
 
 /** Parse question data from tool call results */
 interface QuestionData {
@@ -203,6 +208,8 @@ async function loadChatState(): Promise<ChatState> {
   try {
     const state = await readData<ChatState>(CHAT_STATE_FILE);
     // R5: Filter out stale progress messages + hydrate extended fields
+    // Also clean up old compacted sessions that accumulated before cleanup logic existed
+    let compactedCleaned = 0;
     for (const [key, s] of Object.entries(state.sessions)) {
       const session = s as ExtendedChatSession;
       // Only filter progress for completed/done sessions (crash recovery cleanup).
@@ -220,7 +227,27 @@ async function loadChatState(): Promise<ChatState> {
       if (!session.producerSummary) {
         session.producerSummary = emptyProducerSummarySnapshot();
       }
+      // Remove compacted sessions older than 2 generations behind the latest
+      if (session.status === "compacted" && session.generation !== undefined) {
+        const baseId = key.replace(/-g\d+$/, "");
+        let maxGen = session.generation;
+        for (const [sid2, s2] of Object.entries(state.sessions)) {
+          if (sid2.startsWith(baseId + "-g")) {
+            const m = sid2.match(/-g(\d+)$/);
+            if (m) maxGen = Math.max(maxGen, parseInt(m[1], 10));
+          }
+        }
+        if (session.generation < maxGen - 1) {
+          delete state.sessions[key];
+          compactedCleaned++;
+          continue;
+        }
+      }
       state.sessions[key] = session;
+    }
+    if (compactedCleaned > 0) {
+      logger.info({ compactedCleaned, event: "startup_compacted_cleanup" },
+        `Cleaned up ${compactedCleaned} old compacted sessions on startup`);
     }
     if (migrateLegacyProducer(state)) {
       // Persist the migration so it doesn't run again on next boot.
@@ -243,6 +270,9 @@ async function loadChatState(): Promise<ChatState> {
 let chatStore: ChatState;
 const chatStoreReady = loadChatState().then((state) => { chatStore = state; });
 export { chatStoreReady };
+
+/** Per-session lock to prevent concurrent agent responses for the same session */
+const sessionsResponding = new Set<string>();
 
 async function saveChatState(): Promise<void> {
   await writeData(CHAT_STATE_FILE, chatStore);
@@ -356,7 +386,8 @@ function updateSessionTokenUsage(
     contextUsage,
   } as WSEvent);
 
-  // Context pressure detection
+  // Context pressure detection — use current turn's input tokens (actual context window usage),
+  // not cumulative (which never resets after compaction)
   const fillPercent = Math.round((usage.input_tokens / contextUsage.contextWindowTokens) * 100);
   if (fillPercent >= 80) {
     broadcast({
@@ -455,24 +486,29 @@ chatRouter.get("/sessions/producer/:projectId", async (req: Request, res: Respon
 
   // Resolve latest generation if the base session was compacted
   let activeSession = existing;
-  if (activeSession && (activeSession.status as string) === "compacted") {
+  if (activeSession && activeSession.status === "compacted") {
     let gen = activeSession.generation ?? 1;
-    while (true) {
-      const nextId = `${sessionId}-g${gen + 1}`;
+    let depth = 0;
+    const MAX_GEN_DEPTH = 20;
+    while (depth < MAX_GEN_DEPTH) {
+      const nextGen = gen + 1;
+      const nextId = `${sessionId}-g${nextGen}`;
       const next = chatStore.sessions[nextId];
       if (!next) break;
       activeSession = next;
-      gen = next.generation ?? gen + 1;
-      if ((activeSession.status as string) !== "compacted") break;
+      gen = nextGen; // Always increment consistently, don't read from session
+      depth++;
+      if (activeSession.status !== "compacted") break;
     }
   }
 
-  if (activeSession && (activeSession.status as string) !== "compacted") {
+  if (activeSession && activeSession.status !== "compacted") {
     res.json({ success: true, data: activeSession });
     return;
   }
 
-  // If the base session exists but was compacted and no generation found, fall through to create
+  // If the base session exists but was compacted and no generation found,
+  // return it anyway — the frontend should handle compacted status by triggering a new compaction
   if (activeSession) {
     res.json({ success: true, data: activeSession });
     return;
@@ -642,6 +678,7 @@ chatRouter.delete("/sessions/:id", async (req: Request, res: Response) => {
   }
 
   delete chatStore.sessions[id];
+  sessionsResponding.delete(id);
   cleanupWorkflow(id);
   // Note: Godot MCP service is keyed by projectId, not sessionId.
   // It will be cleaned up when the project is deleted or session ends.
@@ -828,7 +865,7 @@ chatRouter.post("/sessions/:id/clear", async (req: Request, res: Response) => {
   session.status = "active";
 
   // Reset producer session with welcome message; other sessions start empty
-  if (id === "producer") {
+  if (id === "producer" || id.startsWith("producer-")) {
     session.messages = [
       {
         id: `msg-welcome-${crypto.randomUUID().slice(0, 8)}`,
@@ -916,8 +953,14 @@ ${conversationText}
 Max 4000 characters. Respond ONLY with the summary.`;
 
     const config = loadConfig();
-    const summaryModel = config.DEFAULT_MODEL;
+    const summaryModel = getModelForTier("haiku"); // Use lightweight model for summarization
     const isKimi = summaryModel.startsWith("kimi-");
+    if (isKimi && !config.KIMI_API_KEY?.trim()) {
+      throw new Error(`KIMI_API_KEY is required for model "${summaryModel}". Set it in .env or switch DEFAULT_MODEL to a GLM model.`);
+    }
+    if (!isKimi && !config.ZAI_API_KEY?.trim()) {
+      throw new Error(`ZAI_API_KEY is required for model "${summaryModel}". Set it in .env or use Kimi with KIMI_API_KEY.`);
+    }
     const summaryBaseUrl = isKimi ? config.KIMI_BASE_URL : config.ZAI_BASE_URL;
     const summaryApiKey = isKimi ? config.KIMI_API_KEY : config.ZAI_API_KEY;
     const summaryHeaders: Record<string, string> = {
@@ -1007,9 +1050,30 @@ Max 4000 characters. Respond ONLY with the summary.`;
     };
 
     // Archive old session
-    session.status = "compacted" as ChatSession["status"] & string;
+    session.status = "compacted";
 
     chatStore.sessions[newId] = newSession;
+
+    // Clean up compacted sessions more than 2 generations behind the current one.
+    // They're only needed for generation traversal which stops at the first non-compacted session.
+    const baseSessionId = id.replace(/-g\d+$/, "");
+    for (const [sid, sess] of Object.entries(chatStore.sessions)) {
+      if (sid === baseSessionId || sid === newId || sid === id) continue;
+      if (sid.startsWith(baseSessionId + "-g") && sess.status === "compacted") {
+        const genMatch = sid.match(/-g(\d+)$/);
+        if (genMatch) {
+          const gen = parseInt(genMatch[1], 10);
+          if (gen < newGeneration - 1) {
+            delete chatStore.sessions[sid];
+            sessionsResponding.delete(sid);
+          }
+        }
+      }
+    }
+
+    // Clean up sessionsResponding for the compacted session itself
+    sessionsResponding.delete(id);
+
     await saveChatState();
 
     logger.info({ oldSessionId: id, newSessionId: newId, generation: newGeneration, summaryChars: summaryText.length }, "Session compacted");
@@ -1046,6 +1110,12 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
   const session = chatStore.sessions[id];
   if (!session) {
     res.status(404).json({ success: false, error: "Session not found" });
+    return;
+  }
+
+  // Prevent concurrent agent responses for the same session
+  if (body.type !== "system" && body.type !== "progress" && body.type !== "producer_update" && sessionsResponding.has(id)) {
+    res.status(409).json({ success: false, error: "Agent is already responding — please wait" });
     return;
   }
 
@@ -1102,6 +1172,9 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
   // Get response from LLM
   const agentRole = session.role as AgentRole;
 
+  // Acquire per-session lock
+  sessionsResponding.add(id);
+
   // Add thinking/progress message
   const progressMsgId = `msg-${crypto.randomUUID().slice(0, 8)}`;
   const progressMessage: ChatMessage = {
@@ -1120,7 +1193,12 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
     message: progressMessage,
   } as WSEvent);
 
-  await saveChatState();
+  try {
+    await saveChatState();
+  } catch (saveErr) {
+    sessionsResponding.delete(id);
+    throw saveErr;
+  }
 
   // R1: Declare heartbeat outside try so catch block can clear it
   let heartbeat: ReturnType<typeof setInterval> | undefined;
@@ -1282,12 +1360,14 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
     } as WSEvent);
 
     await saveChatState();
+    sessionsResponding.delete(id);
     res.status(201).json({ success: true, data: { userMessage, assistantMessage } });
   } catch (err: unknown) {
     const error = err as Error;
 
     // R1: Clear heartbeat on error to prevent permanent timer leak
     clearInterval(heartbeat);
+    sessionsResponding.delete(id);
 
     // Remove the progress placeholder before adding the error message
     const progressIndex = session.messages.findIndex((m) => m.id === progressMsgId);

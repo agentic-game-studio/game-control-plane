@@ -12,7 +12,7 @@ import { loadConfig } from "../config.js";
 import { getAgentSystemPrompt, loadAgentPrompts } from "../prompts/agent-prompt-loader.js";
 import { logger } from "../utils/logger.js";
 import { broadcast } from "../services/websocket.js";
-import { MAX_CONTEXT_TOKENS, SUMMARIZE_TOKEN_THRESHOLD, CHARS_PER_TOKEN_ESTIMATE } from "../config/model-mapping.js";
+import { CHARS_PER_TOKEN_ESTIMATE, getModelForTier, getModelContextWindow } from "../config/model-mapping.js";
 
 /** Simple async semaphore for ZAI API concurrency control */
 class Semaphore {
@@ -132,6 +132,8 @@ export interface LLMRequest {
   systemPrompt?: string;
   /** Agent role — automatically loads system prompt from workspace/.claude/agents/ */
   agentRole?: string;
+  /** Optional abort signal to cancel the HTTP request */
+  signal?: AbortSignal;
 }
 
 const MAX_RETRIES = 3;
@@ -146,6 +148,7 @@ const TOOL_IMPORTANCE: Record<string, number> = {
   Write: 20,
   Edit: 20,
   Task: 10,
+  GodotCLI: 50,
 };
 const DEFAULT_TOOL_IMPORTANCE = 40;
 const MAX_TOOL_RESULT_BYTES = 15_000;
@@ -160,16 +163,23 @@ function getFetchTimeoutMs(): number {
   }
 }
 
-async function fetchWithRetry(url: string, options: RequestInit, retries = MAX_RETRIES): Promise<Response> {
+async function fetchWithRetry(url: string, options: RequestInit, retries = MAX_RETRIES, externalSignal?: AbortSignal): Promise<Response> {
   let lastError: Error | null = null;
   for (let attempt = 0; attempt <= retries; attempt++) {
+    // Combine timeout signal with optional external abort signal
+    const signals: AbortSignal[] = [AbortSignal.timeout(getFetchTimeoutMs())];
+    if (externalSignal) signals.push(externalSignal);
+    const combinedSignal = signals.length === 1 ? signals[0] : AbortSignal.any(signals);
+
     try {
       const response = await fetch(url, {
         ...options,
-        signal: AbortSignal.timeout(getFetchTimeoutMs()),
+        signal: combinedSignal,
       });
       if (response.status === 429 && attempt < retries) {
-        const delay = RETRY_DELAY_MS * Math.pow(2, attempt) + Math.random() * 1000;
+        // Rate limit — use longer delay (5s, 10s, 20s) to avoid hammering
+        const delay = 5000 * Math.pow(2, attempt) + Math.random() * 2000;
+        logger.warn({ status: 429, attempt, delayMs: Math.round(delay), event: "rate_limit_retry" }, "Rate limited — backing off");
         await new Promise((r) => setTimeout(r, delay));
         continue;
       }
@@ -181,6 +191,8 @@ async function fetchWithRetry(url: string, options: RequestInit, retries = MAX_R
       return response;
     } catch (error) {
       lastError = error as Error;
+      // Don't retry if the external abort signal fired — caller intentionally cancelled
+      if (externalSignal?.aborted) throw lastError;
       if (attempt < retries) {
         await new Promise((r) => setTimeout(r, RETRY_DELAY_MS * Math.pow(2, attempt)));
       }
@@ -257,8 +269,8 @@ function estimateMessageTokens(messages: LLMMessage[]): number {
 }
 
 /** Summarize old messages when context exceeds threshold */
-async function summarizeOldMessages(messages: LLMMessage[]): Promise<string | null> {
-  if (estimateMessageTokens(messages) <= SUMMARIZE_TOKEN_THRESHOLD) return null;
+async function summarizeOldMessages(messages: LLMMessage[], summarizeThreshold: number): Promise<string | null> {
+  if (estimateMessageTokens(messages) <= summarizeThreshold) return null;
 
   // Separate system, recent, and old messages
   const systemMsgs = messages.filter(m => m.role === "system");
@@ -287,9 +299,9 @@ ${conversationText}
 
 Respond ONLY with the summary, nothing else. Max 2000 characters.`;
 
-  // Use the default model for summarization
+  // Use a lightweight model for summarization to save costs
   const config = loadConfig();
-  const summaryModel = config.DEFAULT_MODEL;
+  const summaryModel = getModelForTier("haiku"); // glm-4.7-flash — cheap summarization
   const summaryProvider = resolveProviderConfig(config, summaryModel);
   const summarySemaphore = getSemaphore(summaryModel);
   try {
@@ -327,8 +339,8 @@ Respond ONLY with the summary, nothing else. Max 2000 characters.`;
   return null;
 }
 
-function pruneMessages(messages: LLMMessage[]): LLMMessage[] {
-  if (estimateMessageTokens(messages) <= MAX_CONTEXT_TOKENS) return messages;
+function pruneMessages(messages: LLMMessage[], maxTokens: number): LLMMessage[] {
+  if (estimateMessageTokens(messages) <= maxTokens) return messages;
 
   const result: LLMMessage[] = [];
   let usedTokens = 0;
@@ -341,15 +353,20 @@ function pruneMessages(messages: LLMMessage[]): LLMMessage[] {
     }
   }
 
-  // R3: Keep recent messages as atomic groups (assistant+tool pairs must not be split)
   const nonSystem = messages.filter((m) => m.role !== "system");
 
   const recentCount = 50;
   let recent = nonSystem.slice(-recentCount);
 
-  // If the slice starts with a tool result (meaning its assistant was cut off), skip it
-  if (recent.length > 0 && recent[0].role === "tool") {
+  // Skip orphaned tool result messages at the start — they need a preceding assistant message
+  while (recent.length > 0 && recent[0].role === "user" && typeof recent[0].content === "string" && recent[0].content.startsWith("[Tool:")) {
     recent = recent.slice(1);
+  }
+  // Skip any other orphaned user messages before the first assistant message
+  // (safeStart is just the index of the first assistant message)
+  const safeStart = recent.findIndex((m) => m.role === "assistant");
+  if (safeStart > 0) {
+    recent = recent.slice(safeStart);
   }
 
   for (let i = 0; i < recent.length; i++) {
@@ -359,17 +376,25 @@ function pruneMessages(messages: LLMMessage[]): LLMMessage[] {
       : msg.content.reduce((s, c) => s + (c.type === "text" ? c.text.length : 1000), 0);
     const tokenCount = Math.ceil(charCount / CHARS_PER_TOKEN_ESTIMATE);
 
-    if (usedTokens + tokenCount <= MAX_CONTEXT_TOKENS) {
+    // Don't split assistant+tool pairs: if this message has tool_calls, the next
+    // message (tool results) MUST be kept too — otherwise the LLM sees orphaned calls
+    if (usedTokens + tokenCount <= maxTokens) {
       result.push(msg);
       usedTokens += tokenCount;
     } else {
-      const remainingTokens = MAX_CONTEXT_TOKENS - usedTokens;
+      // If the PREVIOUS kept message has tool_calls, drop it too — orphaned tool calls
+      // without results will confuse the LLM
+      const prevKept = result[result.length - 1];
+      if (prevKept && prevKept.role === "assistant" && (prevKept as any).tool_calls) {
+        result.pop();
+      }
+
+      const remainingTokens = maxTokens - usedTokens;
       const remainingChars = remainingTokens * CHARS_PER_TOKEN_ESTIMATE;
       if (remainingChars > 100) {
         if (typeof msg.content === "string") {
           result.push({ ...msg, content: truncate(msg.content, remainingChars) });
         } else {
-          // For multimodal: truncate text parts only, preserve image blocks
           const truncated = msg.content.map((c) =>
             c.type === "text" ? { type: "text" as const, text: truncate(c.text, remainingChars) } : c
           );
@@ -454,7 +479,7 @@ export async function callZAI(request: LLMRequest): Promise<LLMResponse> {
       method: "POST",
       headers: provider.headers,
       body: JSON.stringify(body),
-    });
+    }, MAX_RETRIES, request.signal);
   } finally {
     modelSem.release();
   }
@@ -500,6 +525,12 @@ export async function callZAI(request: LLMRequest): Promise<LLMResponse> {
 /** Resolve provider config (base URL, API key, headers) from model name */
 function resolveProviderConfig(config: ReturnType<typeof loadConfig>, model: string) {
   const isKimi = model.startsWith("kimi-");
+  if (isKimi && !config.KIMI_API_KEY?.trim()) {
+    throw new Error(`KIMI_API_KEY is required for model "${model}". Set it in .env or switch DEFAULT_MODEL to a GLM model.`);
+  }
+  if (!isKimi && !config.ZAI_API_KEY?.trim()) {
+    throw new Error(`ZAI_API_KEY is required for model "${model}". Set it in .env or use Kimi with KIMI_API_KEY.`);
+  }
   const baseUrl = isKimi ? config.KIMI_BASE_URL : config.ZAI_BASE_URL;
   const apiKey = isKimi ? config.KIMI_API_KEY : config.ZAI_API_KEY;
   const headers: Record<string, string> = {
@@ -551,7 +582,8 @@ export async function callLLMWithTools(
   onProgress?: ProgressCallback,
   sessionId?: string,
   onFileOperation?: FileOperationCallback,
-  onTokenUsage?: TokenUsageCallback
+  onTokenUsage?: TokenUsageCallback,
+  signal?: AbortSignal
 ): Promise<LLMResponse> {
   const config = loadConfig();
   const maxTools = config.MAX_TOOL_CALLS;
@@ -565,6 +597,19 @@ export async function callLLMWithTools(
   let noToolRetries = 0;
   const MAX_NO_TOOL_RETRIES = 2;
 
+  // Phase enforcement: track read vs write balance to prevent read loops
+  const READ_TOOLS = new Set(["Read", "Glob", "Grep"]);
+  const WRITE_TOOLS = new Set(["Write", "Edit"]);
+  let readCount = 0;
+  let writeCount = 0;
+  let readWarningInjected = false;
+  let buildGateTriggeredAt = 0;
+
+  // Per-model context limits (use 80% of window as max, 50% as summarize threshold)
+  const contextWindow = getModelContextWindow(request.model ?? "");
+  const maxContextTokens = Math.floor(contextWindow * 0.8);
+  const summarizeThreshold = Math.floor(contextWindow * 0.5);
+
   while (iteration < 200) {
     iteration++;
 
@@ -574,7 +619,7 @@ export async function callLLMWithTools(
       logger.info({ iteration, totalTools, event: "checkpoint" }, `Checkpoint at iteration ${iteration}, ${totalTools} total tools`);
     }
 
-    const response = await callZAI({ ...request, messages });
+    const response = await callZAI({ ...request, messages, signal });
     if (response.usage) onTokenUsage?.(response.usage);
     onProgress?.({ iteration, totalTools, phase: "thinking", thinking: response.content.slice(0, 500) });
 
@@ -602,7 +647,7 @@ export async function callLLMWithTools(
         role: "user",
         content: `You have reached the maximum of ${maxTools} tool calls. Output your final response now.`,
       });
-      const final = await callZAI({ ...request, messages });
+      const final = await callZAI({ ...request, messages, signal });
       if (final.usage) onTokenUsage?.(final.usage);
       return { ...final, tool_calls: undefined };
     }
@@ -657,6 +702,39 @@ export async function callLLMWithTools(
         recentToolCalls.shift();
       }
 
+      // Phase enforcement: track read vs write balance
+      if (READ_TOOLS.has(tc.name)) readCount++;
+      if (WRITE_TOOLS.has(tc.name)) writeCount++;
+
+      // READ LOOP GATE: Too many reads, no writes — force implementation
+      if (readCount >= 5 && writeCount === 0 && !readWarningInjected) {
+        readWarningInjected = true;
+        toolResults.push(
+          `[SYSTEM PHASE GATE] You have read ${readCount} files but written 0. ` +
+          `You are stuck in a read loop. STOP READING. You have enough context. ` +
+          `Enter IMPLEMENT phase now: write ALL files needed for the current task. ` +
+          `Do not read any more files — use what you already know. ` +
+          `Produce working code, then verify it builds.`
+        );
+      } else if (readCount >= 10 && writeCount === 0 && readWarningInjected) {
+        // Second warning — even stronger
+        toolResults.push(
+          `[SYSTEM HARD GATE] Still reading after warning! ${readCount} reads, ${writeCount} writes. ` +
+          `WRITE CODE NOW. You will be stopped if you read again without writing.`
+        );
+      }
+
+      // BUILD GATE: After every 5 writes, inject verification prompt
+      if (writeCount > 0 && writeCount % 5 === 0 && writeCount !== buildGateTriggeredAt) {
+        buildGateTriggeredAt = writeCount;
+        toolResults.push(
+          `[SYSTEM BUILD GATE] You've written ${writeCount} files. ` +
+          `VERIFY BEFORE CONTINUING: Run GodotCLI(command=check) to validate all GDScripts. ` +
+          `Fix any errors before writing more files. ` +
+          `Current feature MUST build clean before starting new work.`
+        );
+      }
+
       // Check for repetitive loop
       const loopCheck = detectRepetitiveLoop(recentToolCalls);
       if (loopCheck.detected && loopCheck.message) {
@@ -685,19 +763,47 @@ Use "Now implementing..." to indicate you're continuing work rather than startin
 
         // Force stop after 25 iterations if still looping
         if (iteration > 25) {
-          const final = await callZAI({ ...request, messages });
+          const final = await callZAI({ ...request, messages, signal });
           if (final.usage) onTokenUsage?.(final.usage);
           return { ...final, tool_calls: undefined };
         }
+
+        continue; // Skip normal append — warning already injected
       }
     }
 
     messages.push({ role: "assistant", content: response.content, tool_calls: response.tool_calls });
-    messages.push({ role: "user", content: toolResults.join("\n\n") });
+    // Cap total tool results to prevent context explosion from many/large results
+    const MAX_TOTAL_TOOL_RESULTS = 60_000;
+    let toolContent = toolResults.join("\n\n");
+    if (toolContent.length > MAX_TOTAL_TOOL_RESULTS) {
+      toolContent = toolContent.slice(0, MAX_TOTAL_TOOL_RESULTS) + "\n\n[... additional tool results truncated]";
+    }
+    messages.push({ role: "user", content: toolContent });
+
+    // Context management: prune if approaching token limit
+    const currentTokens = estimateMessageTokens(messages);
+    if (currentTokens > maxContextTokens) {
+      logger.info({ iteration, tokens: currentTokens, limit: maxContextTokens, event: "context_pruning" },
+        `Pruning messages: ${currentTokens} tokens exceeds limit ${maxContextTokens}`);
+      messages = pruneMessages(messages, maxContextTokens);
+    } else if (currentTokens > summarizeThreshold) {
+      const summary = await summarizeOldMessages(messages, summarizeThreshold);
+      if (summary) {
+        const systemMsg = messages.find((m) => m.role === "system");
+        messages = [
+          ...(systemMsg ? [systemMsg] : []),
+          { role: "user", content: `[Previous Context Summary]\n${summary}` },
+          ...messages.filter((m) => m.role !== "system").slice(-20),
+        ];
+        logger.info({ iteration, tokensBefore: currentTokens, tokensAfter: estimateMessageTokens(messages), event: "context_summarized" },
+          "Summarized old messages to reduce context");
+      }
+    }
   }
 
   // Max iterations — return last response
-  const last = await callZAI({ ...request, messages });
+  const last = await callZAI({ ...request, messages, signal });
   if (last.usage) onTokenUsage?.(last.usage);
   return { ...last, tool_calls: undefined };
 }
@@ -736,6 +842,7 @@ export const GAME_STUDIO_TOOLS: LLMTool[] = [
         file_path: { type: "string", description: "Absolute path to the file to edit" },
         old_string: { type: "string", description: "The exact string to find and replace" },
         new_string: { type: "string", description: "The replacement string" },
+        replace_all: { type: "boolean", description: "Replace all occurrences of old_string (default: false). Set true only when old_string appears multiple times and all should be replaced." },
       },
       required: ["file_path", "old_string", "new_string"],
     },
@@ -995,6 +1102,48 @@ export const GAME_STUDIO_TOOLS: LLMTool[] = [
         },
       },
       required: ["role"],
+    },
+  },
+  {
+    name: "GodotCLI",
+    description:
+      "Local Godot CLI for project management — all operations run locally, no cloud. " +
+      "Commands: init (scaffold new project), detect (get project info as JSON), export-presets (generate export_presets.cfg), " +
+      "build (local headless export via godot --headless), check (validate GDScripts), test (run GUT tests), " +
+      "validate (full project health check), templates (check/install export templates), package (create distributable .dmg/.zip/.tar.gz). " +
+      "Use for: project scaffolding, export preset generation, local builds, script validation, packaging. " +
+      "Requires Godot installed locally (GODOT_BIN env var or auto-detected).",
+    input_schema: {
+      type: "object",
+      properties: {
+        command: {
+          type: "string",
+          enum: ["init", "detect", "export-presets", "build", "check", "test", "validate", "templates", "package"],
+          description: "CLI command to run",
+        },
+        name: { type: "string", description: "Project name (for init command)" },
+        platforms: { type: "string", description: "Comma-separated platforms for export-presets: web,windows,linux,macos,android,ios,all" },
+        platform: { type: "string", description: "Target platform for build/package commands" },
+        all: { type: "boolean", description: "Build/package all platforms (for build and package commands)" },
+        output: { type: "string", description: "Output file path for build/package commands" },
+        install: { type: "boolean", description: "Install templates (for templates command)" },
+        script: { type: "string", description: "Test script path (for test command, bypasses GUT)" },
+      },
+      required: ["command"],
+    },
+  },
+  {
+    name: "ShipThisExport",
+    description:
+      "Export game to mobile stores via ShipThis CLI (App Store / Google Play cloud builds). " +
+      "Requires cli-main/ vendored and SHIPTHIS_CLI_PATH or default detection. " +
+      "Use after local Godot export presets are configured.",
+    input_schema: {
+      type: "object",
+      properties: {
+        platform: { type: "string", enum: ["android", "ios"], description: "Target mobile platform" },
+      },
+      required: ["platform"],
     },
   },
 ];

@@ -5,11 +5,15 @@ export const wss = new WebSocketServer({ noServer: true });
 
 export function broadcast(event: WSEvent) {
   const message = JSON.stringify(event);
-  wss.clients.forEach((client) => {
+  for (const client of wss.clients) {
     if (client.readyState === WebSocket.OPEN) {
-      client.send(message);
+      try {
+        client.send(message);
+      } catch {
+        // Client disconnected during broadcast — skip, don't abort remaining clients
+      }
     }
-  });
+  }
 }
 
 /**

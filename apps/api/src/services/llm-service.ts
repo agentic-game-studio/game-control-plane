@@ -8,7 +8,9 @@
  */
 
 import fs from "node:fs/promises";
+import { realpathSync as realpathSyncCb } from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import { loadConfig } from "../config.js";
 import { resolveProjectWorkspace } from "../utils/workspace.js";
 import { getAgentSystemPrompt, loadAgentPrompts } from "../prompts/agent-prompt-loader.js";
@@ -27,6 +29,7 @@ import {
   type GodotMCPServiceOptions,
 } from "./godot-mcp-service.js";
 import { triggerVerification } from "./verification-service.js";
+import { consumeCreditsForAgent } from "./credit-service.js";
 
 export interface ProjectContext {
   name: string;
@@ -175,12 +178,27 @@ function safePath(inputPath: string, baseDir: string): string {
 
   const normalizedResolved = path.resolve(workingPath);
 
-  // Allow paths within the base directory or the global workspace directory
-  if (normalizedResolved.startsWith(base + path.sep) || normalizedResolved === base) {
-    return normalizedResolved;
+  // Resolve symlinks to prevent symlink-based path traversal
+  let finalResolved: string;
+  try {
+    finalResolved = realpathSyncCb(normalizedResolved);
+  } catch {
+    // File doesn't exist yet (Write tool) — check parent dir instead
+    try {
+      const parentReal = realpathSyncCb(path.dirname(normalizedResolved));
+      finalResolved = path.join(parentReal, path.basename(normalizedResolved));
+    } catch {
+      // Parent doesn't exist either — fall back to non-resolved path
+      finalResolved = normalizedResolved;
+    }
   }
-  if (normalizedResolved.startsWith(resolvedWorkspaceDir + path.sep) || normalizedResolved === resolvedWorkspaceDir) {
-    return normalizedResolved;
+
+  // Allow paths within the base directory or the global workspace directory
+  if (finalResolved.startsWith(base + path.sep) || finalResolved === base) {
+    return finalResolved;
+  }
+  if (finalResolved.startsWith(resolvedWorkspaceDir + path.sep) || finalResolved === resolvedWorkspaceDir) {
+    return finalResolved;
   }
 
   throw new Error(`Path outside workspace is not allowed: ${inputPath}`);
@@ -258,10 +276,14 @@ async function executeTool(
         // Q5: Reject files larger than 1MB
         const stat = await fs.stat(filePath);
         if (stat.size > 1_048_576) return `Error: File too large (${Math.round(stat.size / 1024)}KB). Maximum is 1MB.`;
-        const content = await fs.readFile(filePath, "utf-8");
-        logEntry(sessionId, "info", `[${agentRole}] Read: ${filePath}`, agentRole);
-        onFileOperation?.({ tool: "Read", path: filePath, result: "success" });
-        return content;
+        try {
+          const content = await fs.readFile(filePath, "utf-8");
+          logEntry(sessionId, "info", `[${agentRole}] Read: ${filePath}`, agentRole);
+          onFileOperation?.({ tool: "Read", path: filePath, result: "success" });
+          return content;
+        } catch {
+          return `Error: Cannot read file as text — it may be a binary file (image, audio, .import, etc.). Path: ${rawPath}`;
+        }
       }
 
       case "Write": {
@@ -280,6 +302,7 @@ async function executeTool(
         const rawPath = input.file_path as string;
         const oldString = input.old_string as string;
         const newString = input.new_string as string;
+        const replaceAll = input.replace_all === true || input.replace_all === "true";
         if (!rawPath || !oldString || newString === undefined) {
           return "Error: file_path, old_string, and new_string are required";
         }
@@ -288,16 +311,27 @@ async function executeTool(
         if (!fileContent.includes(oldString)) {
           return `Error: old_string not found in file. File content preview:\n${fileContent.slice(0, 500)}`;
         }
-        const newContent = fileContent.replace(oldString, newString);
+        const occurrences = fileContent.split(oldString).length - 1;
+        if (occurrences > 1 && !replaceAll) {
+          return `Error: old_string appears ${occurrences} times in the file. Provide more surrounding context to make it unique, or set replace_all=true to replace all occurrences.`;
+        }
+        const newContent = replaceAll
+          ? fileContent.split(oldString).join(newString)
+          : fileContent.replace(oldString, newString);
         await fs.writeFile(filePath, newContent, "utf-8");
-        logEntry(sessionId, "info", `[${agentRole}] Edit: ${filePath}`, agentRole);
-        return `Successfully edited ${filePath}`;
+        logEntry(sessionId, "info", `[${agentRole}] Edit: ${filePath} (${replaceAll ? "all" : "first"} of ${occurrences})`, agentRole);
+        return `Successfully edited ${filePath} (${replaceAll ? `${occurrences} occurrences` : "1 occurrence"} replaced)`;
       }
 
       case "Glob": {
         const pattern = input.pattern as string;
-        const searchPath = (input.path as string) ?? workspaceDir;
+        const rawSearchPath = (input.path as string) ?? workspaceDir;
+        const searchPath = safePath(rawSearchPath, workspaceDir);
         if (!pattern) return "Error: pattern is required";
+        // Block path traversal via glob pattern segments
+        if (pattern.split("/").some((seg) => seg === "..")) {
+          return "Error: pattern must not contain '..' segments";
+        }
 
         // Simple glob implementation
         const results = await globFiles(searchPath, pattern);
@@ -310,7 +344,8 @@ async function executeTool(
 
       case "Grep": {
         const pattern = input.pattern as string;
-        const searchPath = (input.path as string) ?? workspaceDir;
+        const rawSearchPath = (input.path as string) ?? workspaceDir;
+        const searchPath = safePath(rawSearchPath, workspaceDir);
         const globFilter = input.glob as string | undefined;
         const context = (input.context as number) ?? 0;
         if (!pattern) return "Error: pattern is required";
@@ -333,9 +368,9 @@ async function executeTool(
         const command = input.command as string;
         if (!command) return "Error: command is required";
 
-        // S2: Sandbox — reject command chaining/pipe patterns to prevent injection
-        if (/[|`]|&&|;|\$\(|\$\{|\n/.test(command)) {
-          return `Error: Command chaining/pipe not allowed (|, &&, ;, $(), backticks). Run commands individually.`;
+        // S2: Sandbox — reject command chaining/pipe/redirect patterns to prevent injection
+        if (/[|`]|&&|\|\||;|\$\(|\$\{|\n|\r|>|</.test(command)) {
+          return `Error: Command chaining/pipe/redirect not allowed (|, ||, &&, ;, $(), backticks, >, <, newlines). Run commands individually.`;
         }
 
         // Cap timeout at server-side maximum (120s)
@@ -502,6 +537,22 @@ async function executeTool(
         const assetName = input.name as string;
         if (!assetPrompt || !assetName) return "Error: prompt and name are required";
 
+        let enrichedPrompt = assetPrompt;
+        try {
+          const assetsData = await readData<AssetsData>("assets.json");
+          const ab = assetsData.artBible;
+          if (ab) {
+            const constraints: string[] = [];
+            if (ab.enforcePalette) constraints.push("strict limited color palette");
+            if (ab.strictOrthographic) constraints.push("orthographic view, no perspective");
+            if (ab.snapToGrid) constraints.push(`snap to ${ab.gridSize ?? 8}px grid`);
+            constraints.push(`target texture resolution ~${ab.baseTextureRes}px`);
+            if (constraints.length > 0) {
+              enrichedPrompt = `[Art Bible: ${constraints.join(", ")}] ${assetPrompt}`;
+            }
+          }
+        } catch { /* use raw prompt */ }
+
         logEntry(sessionId, "info", `[${agentRole}] Generating asset: ${assetName}`, agentRole);
 
         const { execFile: execFileTool } = await import("node:child_process");
@@ -518,7 +569,7 @@ async function executeTool(
 
         const genArgs = [
           path.join(scriptDir, "asset-pipeline.py"),
-          "--prompt", assetPrompt,
+          "--prompt", enrichedPrompt,
           "--name", assetName,
           "--type", (input.type as string) ?? "2d",
           "--category", (input.category as string) ?? "prop",
@@ -591,6 +642,7 @@ async function executeTool(
                 existingIds.add(newAsset.id);
                 registered.push(newAsset.filename);
                 broadcastEvent({ type: "asset:created", asset: newAsset } as WSEvent);
+                broadcastEvent({ type: "asset:generated", asset: newAsset } as WSEvent);
               }
 
               if (registered.length > 0) {
@@ -648,6 +700,7 @@ async function executeTool(
           const { stdout, stderr } = await execFileAsyncTool(pythonBin, args, {
             cwd: scriptDir,
             timeout: 120_000,
+            maxBuffer: 10 * 1024 * 1024,
           });
           const summary = stdout.slice(-300);
           logEntry(sessionId, "info", `[${agentRole}] TilemapSplit: ${_input} -> ${_outputDir}`, agentRole);
@@ -687,6 +740,7 @@ async function executeTool(
           const { stdout, stderr } = await execFileAsyncTool(pythonBin, args, {
             cwd: scriptDir,
             timeout: 120_000,
+            maxBuffer: 10 * 1024 * 1024,
           });
           const summary = stdout.slice(-300);
           logEntry(sessionId, "info", `[${agentRole}] SpritePack: ${_inputDir} -> ${_output}`, agentRole);
@@ -722,10 +776,58 @@ async function executeTool(
           const { stdout, stderr } = await execFileAsyncTool(pythonBin, args, {
             cwd: scriptDir,
             timeout: 60_000,
+            maxBuffer: 10 * 1024 * 1024,
           });
           const summary = stdout.slice(-200);
           logEntry(sessionId, "info", `[${agentRole}] GenerateAudio: ${_sfxType} -> ${_outputPath}`, agentRole);
-          return `Audio generated.\n${summary}${stderr ? `\nStderr: ${stderr.slice(-200)}` : ""}`;
+
+          // Write Godot .import sidecar for audio assets
+          try {
+            const config = loadConfig();
+            const absOutput = path.isAbsolute(_outputPath)
+              ? _outputPath
+              : path.join(resolveProjectWorkspace(projectContext?.workspacePath ?? ""), _outputPath);
+            const importPath = `${absOutput}.import`;
+            const ext = path.extname(absOutput).slice(1) || "wav";
+            const importBody = `[remap]
+
+importer="${ext === "ogg" ? "ogg_vorbis" : "wav"}"
+type="AudioStream${ext === "ogg" ? "OggVorbis" : "WAV"}"
+uid="uid://generated-audio-${Date.now()}"
+
+[deps]
+
+source_file="${path.basename(absOutput)}"
+
+[params]
+
+loop=false
+loop_offset=0
+`;
+            await fs.writeFile(importPath, importBody, "utf-8");
+          } catch { /* non-fatal */ }
+
+          // Register audio in asset inventory
+          try {
+            const data = await readData<AssetsData>("assets.json");
+            const filename = _outputPath.split("/").pop() ?? `${_sfxType}.wav`;
+            const audioAsset: GameAsset = {
+              id: `audio-${_sfxType}-${Date.now()}`,
+              filename,
+              type: "audio",
+              category: "sfx",
+              sizeBytes: 0,
+              tags: [_sfxType, "generated"],
+              path: _outputPath,
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+            };
+            data.assets.push(audioAsset);
+            await writeData("assets.json", data);
+            broadcastEvent({ type: "asset:created", asset: audioAsset } as WSEvent);
+          } catch { /* non-fatal */ }
+
+          return `Audio generated and registered in inventory.\n${summary}${stderr ? `\nStderr: ${stderr.slice(-200)}` : ""}`;
         } catch (err: unknown) {
           const error = err as { stderr?: string; message?: string };
           return `Error: GenerateAudio failed: ${error.stderr || error.message}`;
@@ -824,24 +926,52 @@ async function executeTool(
       }
 
       case "RunGodotHeadless": {
-        const project = input.project as string;
+        const rawProject = input.project as string;
         const command = input.command as string;
         const script = input.script as string | undefined;
         const preset = input.preset as string | undefined;
         const output = input.output as string | undefined;
         const godotBin = input.godotBin as string | undefined;
 
-        if (!project) return "Error: project path is required";
+        if (!rawProject) return "Error: project path is required";
+
+        // Whitelist valid commands
+        const VALID_COMMANDS = ["check", "script", "export", "gut", "boot"];
+        if (!command || !VALID_COMMANDS.includes(command)) {
+          return `Error: Invalid command "${command}". Must be one of: ${VALID_COMMANDS.join(", ")}`;
+        }
+
+        // Resolve project path through safePath to validate and normalize
+        const project = safePath(rawProject, workspaceDir);
+
+        // Validate optional paths through safePath
+        const validatedScript = script ? safePath(script, workspaceDir) : undefined;
+        const validatedOutput = output ? safePath(output, workspaceDir) : undefined;
+
+        // Validate godotBin against known safe paths
+        const ALLOWED_GODOT_BINS = [
+          "godot", "godot4",
+          "/usr/local/bin/godot", "/usr/local/bin/godot4",
+          "/opt/homebrew/bin/godot",
+          "/usr/bin/godot",
+          "/Applications/Godot.app/Contents/MacOS/Godot",
+          "/Applications/Godot 4.app/Contents/MacOS/Godot",
+          path.join(os.homedir(), ".local/bin/godot"),
+          path.join(os.homedir(), ".local/bin/godot4"),
+          path.join(os.homedir(), ".local/bin/godot_bin/Godot"),
+          process.env.GODOT_BIN,
+        ].filter(Boolean);
+        const validatedGodotBin = godotBin && ALLOWED_GODOT_BINS.includes(godotBin) ? godotBin : undefined;
 
         const config = loadConfig();
         const scriptDir = path.join(config.WORKSPACE_DIR, "scripts", "godot");
         const pythonBin = process.env.PIPELINE_PYTHON ?? "python3";
 
         const args: string[] = [pythonBin, path.join(scriptDir, "run_godot_headless.py"), "--project", project, "--command", command];
-        if (script) args.push("--script", script);
+        if (validatedScript) args.push("--script", validatedScript);
         if (preset) args.push("--preset", preset);
-        if (output) args.push("--output", output);
-        if (godotBin) args.push("--godot-bin", godotBin);
+        if (validatedOutput) args.push("--output", validatedOutput);
+        if (validatedGodotBin) args.push("--godot-bin", validatedGodotBin);
 
         try {
           const { stdout, stderr } = await execFileAsyncTool(pythonBin, args, {
@@ -885,6 +1015,74 @@ async function executeTool(
 
         logEntry(sessionId, "info", `[${agentRole}] Created ticket: ${ticket.id} — ${title}`, agentRole as AgentRole);
         return `Ticket created:\nID: ${ticket.id}\nTitle: ${ticket.title}\nStatus: ${ticket.status}\nAssignee: ${ticket.assignee}\nArea: ${ticket.area}/${ticket.subarea}`;
+      }
+
+      case "GodotCLI": {
+        const command = input.command as string;
+        if (!command) return "Error: command is required (init, detect, export-presets, build, check, test, validate, templates, package)";
+        if (command === "init" && !input.name) return "Error: name is required for init command (e.g. GodotCLI(command='init', name='MyGame'))";
+        if (command === "build" && !input.platform && !input.all) return "Error: platform or all is required for build command (e.g. GodotCLI(command='build', platform='web'))";
+        if (command === "package" && !input.platform && !input.all) return "Error: platform or all is required for package command (e.g. GodotCLI(command='package', platform='macos'))";
+
+        // workspaceDir is already resolved to the project root by resolveProjectWorkspace()
+        // For init, we want the parent workspace dir (where new projects are created)
+        const projectPath = workspaceDir;
+
+        // init creates a NEW project, so cwd should be the global workspace root (parent of all projects)
+        const globalWorkspaceDir = loadConfig().WORKSPACE_DIR;
+        const cwd = command === "init" ? globalWorkspaceDir : projectPath;
+
+        const shipthisBin = process.env.SHIPTHIS_BIN
+          ?? path.resolve(__dirname, "..", "..", "..", "..", "cli-main", "bin", "run.js");
+
+        const args = ["local", command];
+        if (command === "init" && input.name) args.push(input.name as string);
+        if (command === "export-presets" && input.platforms) args.push("--platforms", input.platforms as string);
+        if (command === "build") {
+          if (input.all) { args.push("--all"); }
+          else if (input.platform) args.push("--platform", input.platform as string);
+          if (input.output) args.push("--output", input.output as string);
+        }
+        if (command === "templates" && input.install) args.push("--install");
+        if (command === "test" && input.script) args.push("--script", input.script as string);
+        if (command === "package") {
+          if (input.all) { args.push("--all"); }
+          else if (input.platform) args.push("--platform", input.platform as string);
+          if (input.output) args.push("--output", input.output as string);
+        }
+        args.push("--json");
+
+        try {
+          const { stdout, stderr } = await execFileAsyncTool("node", [shipthisBin, ...args], {
+            cwd,
+            timeout: 600_000,
+            maxBuffer: 10 * 1024 * 1024,
+          });
+          logEntry(sessionId, "info", `[${agentRole}] GodotCLI ${command}: ${projectPath}`, agentRole);
+          return (stdout as string)?.trim() || "GodotCLI completed";
+        } catch (err: unknown) {
+          const e = err as { stdout?: string; stderr?: string; message?: string };
+          const stdout = (e.stdout || "").trim();
+          const stderr = (e.stderr || e.message || "").trim();
+          // Frame errors clearly even when stdout is present
+          return stdout
+            ? `[GodotCLI ${command} FAILED]\n${stdout}\n\nstderr: ${stderr || "(none)"}`
+            : `Error: GodotCLI ${command} failed: ${stderr}`;
+        }
+      }
+
+      case "ShipThisExport": {
+        const platform = (input.platform as "android" | "ios") ?? "android";
+        const { runShipThisExport, isShipThisAvailable } = await import("./shipthis-service.js");
+        if (!isShipThisAvailable()) {
+          return "Error: ShipThis CLI not available. Set SHIPTHIS_CLI_PATH or vendor cli-main/";
+        }
+        const result = await runShipThisExport(workspaceDir, platform);
+        if (!result.success) {
+          return `Error: ShipThis export failed: ${result.error}\n${result.output.slice(-500)}`;
+        }
+        logEntry(sessionId, "info", `[${agentRole}] ShipThisExport ${platform}`, agentRole);
+        return `ShipThis export initiated.\n${result.output.slice(-800)}`;
       }
 
       default:
@@ -940,13 +1138,17 @@ async function globFiles(rootPath: string, pattern: string): Promise<string[]> {
   return results;
 }
 
-async function walkDir(dir: string, remainingPattern: string, results: string[]): Promise<void> {
+async function walkDir(dir: string, remainingPattern: string, results: string[], visited?: Set<string>): Promise<void> {
+  if (!visited) visited = new Set<string>();
+  const realDir = path.resolve(dir);
+  if (visited.has(realDir)) return; // Circular symlink detected — skip
+  visited.add(realDir);
   try {
     const entries = await fs.readdir(dir, { withFileTypes: true });
     for (const entry of entries) {
       const fullPath = path.join(dir, entry.name);
       if (entry.isDirectory()) {
-        await walkDir(fullPath, remainingPattern, results);
+        await walkDir(fullPath, remainingPattern, results, visited);
       } else if (matchPattern(entry.name, remainingPattern)) {
         results.push(fullPath);
       }
@@ -956,7 +1158,12 @@ async function walkDir(dir: string, remainingPattern: string, results: string[])
   }
 }
 
-async function walkDirSimple(dir: string, parts: string[], idx: number, results: string[]): Promise<void> {
+async function walkDirSimple(dir: string, parts: string[], idx: number, results: string[], visited?: Set<string>): Promise<void> {
+  if (!visited) visited = new Set<string>();
+  const realDir = path.resolve(dir);
+  if (visited.has(realDir)) return;
+  visited.add(realDir);
+
   if (idx >= parts.length) {
     results.push(dir);
     return;
@@ -972,7 +1179,7 @@ async function walkDirSimple(dir: string, parts: string[], idx: number, results:
         if (!entry.isDirectory() || !isLast) {
           const fullPath = path.join(dir, entry.name);
           if (isLast) results.push(fullPath);
-          else await walkDirSimple(fullPath, parts, idx + 1, results);
+          else await walkDirSimple(fullPath, parts, idx + 1, results, visited);
         }
       }
     } catch {
@@ -983,7 +1190,7 @@ async function walkDirSimple(dir: string, parts: string[], idx: number, results:
     try {
       const stat = await fs.stat(fullPath);
       if (stat.isDirectory()) {
-        await walkDirSimple(fullPath, parts, idx + 1, results);
+        await walkDirSimple(fullPath, parts, idx + 1, results, visited);
       } else if (isLast) {
         results.push(fullPath);
       }
@@ -994,10 +1201,17 @@ async function walkDirSimple(dir: string, parts: string[], idx: number, results:
 }
 
 function matchPattern(filename: string, pattern: string): boolean {
-  const regex = new RegExp(
-    "^" + pattern.replace(/\./g, "\\.").replace(/\*\*/g, ".*").replace(/\*/g, "[^/]*").replace(/\?/g, ".") + "$"
-  );
-  return regex.test(filename);
+  // Escape all regex metacharacters including glob wildcards, then restore globs
+  const escaped = pattern
+    .replace(/[.+^${}()|[\]\\*?]/g, "\\$&") // escape ALL metacharacters including * and ?
+    .replace(/\\\*\\\*/g, ".*")              // restore ** (any depth)
+    .replace(/\\\*/g, "[^/]*")               // restore * (single depth)
+    .replace(/\\\?/g, ".");                  // restore ? (single char)
+  try {
+    return new RegExp(`^${escaped}$`).test(filename);
+  } catch {
+    return false; // Invalid pattern — no match
+  }
 }
 
 /**
@@ -1012,7 +1226,12 @@ async function grepFiles(
   const results: string[] = [];
   const regex = new RegExp(pattern, "gi");
 
+  const visited = new Set<string>();
+
   async function searchDir(dir: string): Promise<void> {
+    const realDir = path.resolve(dir);
+    if (visited.has(realDir)) return;
+    visited.add(realDir);
     try {
       const entries = await fs.readdir(dir, { withFileTypes: true });
       for (const entry of entries) {
@@ -1079,6 +1298,7 @@ export async function invokeAgent(
   projectContext?: ProjectContext,
   onFileOperation?: FileOperationCallback,
   onTokenUsage?: import("../llm/zai-client.js").TokenUsageCallback,
+  signal?: AbortSignal,
 ): Promise<InvokeResult> {
   const invocationId = `invoke-${crypto.randomUUID().slice(0, 8)}`;
 
@@ -1092,6 +1312,8 @@ export async function invokeAgent(
   }
 
   try {
+    void consumeCreditsForAgent(agentRole, task.slice(0, 80));
+
     // Load agent's system prompt and model tier from MD file
     const [rawSystemPrompt, prompts] = await Promise.all([
       getAgentSystemPrompt(agentRole),
@@ -1146,7 +1368,8 @@ export async function invokeAgent(
       onProgress,
       sessionId,
       onFileOperation,
-      onTokenUsage
+      onTokenUsage,
+      signal
     );
 
     if (broadcastEvents) {
@@ -1235,7 +1458,7 @@ export async function continueConversation(
       onProgress,
       sessionId,
       onFileOperation,
-      onTokenUsage
+      onTokenUsage,
     );
 
     return {

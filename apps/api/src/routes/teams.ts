@@ -8,6 +8,10 @@ import type { WSEvent, AgentRole } from "@game-studio/types";
 import type { LLMMessage } from "../llm/zai-client.js";
 import type { SkillDefinition } from "@game-studio/types";
 import { startWorkflow, advanceStage, createQuestTicket, moveQuestTicket, completeWorkflow, getWorkflow } from "../services/quest-bridge.js";
+import { executeGodotExport, runPostExportSmokeTest } from "../services/build-service.js";
+import { generateProjectChangelog } from "../services/changelog-service.js";
+import { readData } from "../services/data-store.js";
+import type { DashboardData } from "@game-studio/types";
 
 export const teamsRouter: Router = Router();
 
@@ -44,10 +48,11 @@ teamsRouter.post("/:team/run", async (req: Request, res: Response) => {
     return;
   }
 
-  const { sessionId, input, reviewMode } = req.body as {
+  const { sessionId, input, reviewMode, projectId } = req.body as {
     sessionId?: string;
     input?: string;
     reviewMode?: string;
+    projectId?: string;
   };
 
   const effectiveSessionId = sessionId || `team-${Date.now()}`;
@@ -81,7 +86,7 @@ teamsRouter.post("/:team/run", async (req: Request, res: Response) => {
   });
 
   // Run the workflow asynchronously
-  runTeamWorkflow(team, effectiveSessionId, input, teamSession).catch((error) => {
+  runTeamWorkflow(team, effectiveSessionId, input, teamSession, projectId).catch((error) => {
     logger.error({ team: team.name, error: error instanceof Error ? error.message : String(error), event: "team_error" }, "Workflow failed");
     teamSession.messages.push({
       role: "assistant",
@@ -97,7 +102,8 @@ async function runTeamWorkflow(
   team: SkillDefinition,
   sessionId: string,
   userInput?: string,
-  teamSession?: { messages: LLMMessage[]; startedAt: string }
+  teamSession?: { messages: LLMMessage[]; startedAt: string },
+  projectId?: string,
 ): Promise<void> {
   const effectiveSession = teamSession || {
     messages: [] as LLMMessage[],
@@ -160,6 +166,23 @@ All Quest tickets have been created — agents just need to be spawned via Task 
       { role: "assistant", content: result.content }
     );
 
+    if (team.name === "team-release" && projectId) {
+      advanceStage(sessionId, "verify");
+      try {
+        const dashboard = await readData<DashboardData>("dashboard.json");
+        const project = dashboard.projects.find((p) => p.id === projectId);
+        const workspacePath = project?.workspacePath ?? projectId;
+        await generateProjectChangelog(projectId, workspacePath);
+        const build = await executeGodotExport(projectId, workspacePath, "web", undefined, true);
+        await runPostExportSmokeTest(build.id, workspacePath);
+      } catch (releaseErr) {
+        logger.warn(
+          { projectId, error: releaseErr instanceof Error ? releaseErr.message : String(releaseErr), event: "team_release_build_failed" },
+          "team-release build step failed",
+        );
+      }
+    }
+
     // Move all tickets to completed
     for (const [role, ticketId] of teamTickets) {
       moveQuestTicket(ticketId, "completed", role);
@@ -167,6 +190,9 @@ All Quest tickets have been created — agents just need to be spawned via Task 
 
     // Complete workflow
     completeWorkflow(sessionId, true);
+
+    // Clean up in-memory session
+    teamSessions.delete(sessionId);
 
     // Broadcast completion
     broadcast({
@@ -200,6 +226,9 @@ All Quest tickets have been created — agents just need to be spawned via Task 
     }
 
     completeWorkflow(sessionId, false);
+
+    // Clean up in-memory session
+    teamSessions.delete(sessionId);
 
     broadcast({
       type: "agent:failed",

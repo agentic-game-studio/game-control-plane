@@ -116,4 +116,35 @@ export class SessionStore {
     await fs.rm(this.sessionPath(sessionId), { force: true });
     await fs.rm(this.checkpointDir(sessionId), { recursive: true, force: true });
   }
+
+  /** Clean up session files older than maxAgeMs. Returns number of sessions removed. */
+  async pruneOldSessions(maxAgeMs: number = 7 * 24 * 60 * 60 * 1000): Promise<number> {
+    const dir = path.join(this.workspaceDir, SESSION_STATE_DIR);
+    let files: string[];
+    try {
+      files = await fs.readdir(dir);
+    } catch {
+      return 0;
+    }
+
+    const now = Date.now();
+    let removed = 0;
+
+    for (const file of files) {
+      if (!file.endsWith(".json")) continue;
+      const filePath = path.join(dir, file);
+      try {
+        const stat = await fs.stat(filePath);
+        if (now - stat.mtimeMs > maxAgeMs) {
+          const sessionId = file.replace(".json", "");
+          await this.delete(sessionId);
+          removed++;
+        }
+      } catch {
+        // Skip files that can't be stat'd
+      }
+    }
+
+    return removed;
+  }
 }

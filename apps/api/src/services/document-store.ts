@@ -324,16 +324,25 @@ export class DocumentStore {
         // Debounce rapid changes
         if (this.debounceTimer) clearTimeout(this.debounceTimer);
         this.debounceTimer = setTimeout(async () => {
-          const slug = slugify(path.basename(filename, ".md"));
-          this.invalidateCache();
-          if (onChange) {
-            const docs = await this.ensureCache();
-            const doc = docs.get(slug);
-            if (doc) {
-              onChange({ documentId: doc.id, category: doc.category, title: doc.title });
+          try {
+            const slug = slugify(path.basename(filename, ".md"));
+            this.invalidateCache();
+            if (onChange) {
+              const docs = await this.ensureCache();
+              const doc = docs.get(slug);
+              if (doc) {
+                onChange({ documentId: doc.id, category: doc.category, title: doc.title });
+              }
             }
+          } catch {
+            // Non-critical — debounced callback error shouldn't crash the watcher
           }
         }, 500);
+      });
+      // Handle watcher errors (ENOSPC, permission issues, etc.)
+      this.watcher.on("error", () => {
+        // Silently stop watching on error (e.g., ENOSPC — no inotify watches available)
+        this.watcher = null;
       });
     } catch {
       // fs.watch not available or permission denied — non-critical

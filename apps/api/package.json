@@ -8,7 +8,7 @@
     "start": "tsx src/index.ts",
     "build": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "pnpm exec vitest run"
   },
   "dependencies": {
     "@game-studio/agents": "workspace:*",

@@ -2,6 +2,7 @@ import { Router } from "express";
 import type { Request, Response } from "express";
 import { broadcastEvent } from "../services/data-store.js";
 import { DEFAULT_TICKETS_BOARD, readTicketsBoard, writeTicketsBoard } from "../services/ticket-board.js";
+import { triggerVerification } from "../services/verification-service.js";
 import type {
   TicketsBoard,
   Ticket,
@@ -225,6 +226,10 @@ ticketsRouter.patch("/:id/move", async (req: Request, res: Response) => {
       toColumn: status,
       projectId,
     } as WSEvent);
+
+    if (status === "qa") {
+      triggerVerification(updatedTicket, updatedTicket.description || updatedTicket.title);
+    }
 
     res.json({ success: true, data: updatedTicket });
   } catch (error) {

@@ -17,7 +17,7 @@ export default function AutonomousControlBar({
   producerSessionId,
   onLoopStarted,
 }: AutonomousControlBarProps) {
-  const { status, connected, startLoop, stopLoop, pollStatus } = useAutonomousLoop();
+  const { status, metrics, milestone, connected, startLoop, stopLoop, pollStatus } = useAutonomousLoop();
 
   // Poll status on mount if a session was already running
   useEffect(() => {
@@ -117,6 +117,16 @@ export default function AutonomousControlBar({
               ? `Ticket: ${status.currentTicketId}`
               : `Iteration ${status.iteration} — standby`}
           </span>
+          {milestone && (
+            <span className="font-[var(--font-terminal)] text-[9px] text-[#737688]">
+              {milestone}
+            </span>
+          )}
+          {metrics && (
+            <span className="font-[var(--font-terminal)] text-[9px] text-[#737688]">
+              QA pass {metrics.qaGatePasses} / fail {metrics.qaGateFailures}
+            </span>
+          )}
         </div>
       </div>
 

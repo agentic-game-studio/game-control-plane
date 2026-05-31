@@ -95,7 +95,20 @@ gatesRouter.post("/:gateId/run", async (req: Request, res: Response) => {
       sessionId: effectiveSessionId,
     } as WSEvent);
   } catch (error) {
-    logger.error({ gateId, error: error instanceof Error ? error.message : String(error), event: "gate_error" }, "Gate execution failed");
+    const errMsg = error instanceof Error ? error.message : String(error);
+    logger.error({ gateId, error: errMsg, event: "gate_error" }, "Gate execution failed");
+    const info = getGateInfo(gateId);
+    broadcast({
+      type: "gate:verdict",
+      result: {
+        gateId,
+        verdict: "BLOCKED" as const,
+        details: `Gate execution failed: ${errMsg.slice(0, 200)}`,
+        agent: info?.agent ?? "producer",
+        timestamp: new Date().toISOString(),
+      },
+      sessionId: effectiveSessionId,
+    } as WSEvent);
   }
 });
 
