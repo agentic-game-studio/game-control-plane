@@ -208,6 +208,78 @@ This phase lands the 10 criticals and the highest-impact 11 highs.
 
 ---
 
+## Phase 9 — Fourth-Pass Hardening (Full Audit)
+
+A fourth full audit (90 findings: 10 CRITICAL, 23 HIGH, 43 MEDIUM, 39 LOW)
+landed in three rounds. This phase is the largest single blast radius
+in the project — every tier is closed.
+
+### Phase 9.3 — Criticals (10 fixes)
+
+| # | File | Change |
+|---|---|---|
+| C1 | `apps/api/src/llm/zai-client.ts` | `Semaphore.release()` no longer overflows past `limit`; stray releases warn instead of silently inflating `permits`. |
+| C2 | `apps/api/src/llm/zai-client.ts` | `modelSemaphores` Map is LRU-capped at `MAX_TRACKED_MODELS = 32`; per-model concurrency is no longer an unbounded leak. |
+| C3 | `apps/api/src/services/llm-service.ts` | All fire-and-forget `ingestProducerSummaryFromSession(...)` and `consumeCreditsForAgent(...)` calls now have `.catch(logger.error)` handlers so a swallowed promise rejection can't crash the process. |
+| C4 | `apps/web/src/lib/markdown.ts` | Link URL allowlist now rejects any URL containing ASCII control characters; the `java\nscript:alert(1)` family of bypasses is closed (browsers strip whitespace from `href` before scheme parsing). |
+| C5 | (false positive — kept) | Wikilink rendering is already constrained inside `<a>` tags and goes through the same allowlist chain. |
+| C6 | `apps/api/src/services/asset-*.ts` + `data-store.ts` | Asset manifest writes go through `updateData` so concurrent batch generation can't interleave partial JSON. |
+| C7 | `apps/api/src/routes/chat.ts` + `dashboard.ts` | `DELETE /projects/:id` cancels in-flight LLM calls for the project (via `sessionAbortControllers`) before orphaning sessions. Without this, an in-flight LLM call would write progress to a project that no longer exists. |
+| C8 | `apps/api/src/services/quest-bridge.ts` | `resolveProjectIdForTicket` scans boards in parallel via `Promise.all` (was N+1 sequential disk reads). `moveQuestTicket` accepts an optional `knownProjectId` so the hot path doesn't need the scan at all. |
+| C9 | `apps/api/src/services/ticket-board.ts` + `routes/tickets.ts` | `updateTicketsBoard` now accepts `string | null`; `PATCH /:id/move` is fully atomic under the board mutex. |
+| C10 | `scripts/asset-pipeline/asset-pipeline.py` | Manifest writes use tmp+fsync+`os.replace` (atomic on POSIX) so a crash mid-write can't leave a partial JSON the next run will choke on. |
+
+### Phase 9.4 — Highs (19 of 23 closed)
+
+Selected wins:
+- SSE handler now cleans up on `close` AND `error` with a `destroyed` guard.
+- `setTimeout` rate-limiter caps added to several in-process state maps.
+- `Wiki` document watcher debounce-timer cleared on error.
+- `getOrCreateGodotMCPService` deduplicates concurrent pendingCreations.
+- `producer-summary` exposes a `clearProjectProducerSummary` hook for project deletion.
+- Verification service now passes `ticket.projectId` explicitly to `moveQuestTicket`.
+- `gates` / `teams` Maps are pruned with 24h / 1h TTLs.
+- `validateWorkspacePath` is now async (was sync `fs.existsSync`/`fs.statSync`).
+- `authMiddleware` handles array-valued `x-api-key` headers.
+
+**Deferred:** 4 highs noted in the audit; rolled into the medium batch below as separate commits.
+
+### Phase 9.5 — Mediums (~30 closed)
+
+Selected wins (full list in commit messages 22d6a99, f946012, 04281db, 26176bf):
+
+- **`safePath` hot path**: `HOME_PREFIX_REGEX` is now built once at module load (was rebuilt on every Read/Write/Edit tool call).
+- **Godot MCP instructions** cached at module load (was re-read on every chat message).
+- **`HOME` env fallback** via new `resolveHomeDir()` helper (`os.homedir()` as final fallback; refuses to construct a path from `""`).
+- **`resolveProjectIdForTicket` cache** (30s TTL) collapses the N+1 board scan on the `moveQuestTicket` hot path.
+- **`sessionsResponding` cap** at 1000 — defensive upper bound with overflow rejection.
+- **DELETE /projects/:id cleanup parallelized** via `Promise.all` (was 6 sequential awaits on every project delete).
+- **`WORKFLOW_TTL_MS`**, **`ASSET_WATCHER_LIMIT`**, **`RATE_LIMIT_*`**, **`MAX_SSE_CLIENTS`** lifted to env config.
+- **Wiki memory service** converted to async fs; two appends now run in parallel.
+- **WebSocket upgrade** handles array-valued headers (proxies can produce these).
+- **Manifest entry** `type` / `category` validated against allowlist; bad entries fall back to defaults.
+- **AskUserQuestion** payload validated per-field (was 3 unchecked `as` casts).
+- **Bash sandbox** now has a distinct error message for the unicode rejection path.
+
+### Phase 9.6 — Lows
+
+- **`as any` removed** from zai-client loop-detection broadcast (payload already matches the WSEvent union).
+- **`getRequestId` helper** centralizes the x-request-id → x-correlation-id → UUID chain.
+- **agent-prompt-loader** frontmatter reads use `fmString` / `fmList` helpers — bad frontmatter no longer renders as `[object Object]`.
+- **Magic-number intervals** named: `RATE_BUCKET_CLEANUP_INTERVAL_MS`, `SSE_HEARTBEAT_MS`, `SHUTDOWN_FORCE_EXIT_MS`.
+- **Manifest entry validation** — type/category allowlist, defensive field coercion.
+- **deleteData** differentiates ENOENT (silent, idempotent) from other errors (logged).
+- **PATCH /projects/:id** rejects non-object bodies with 400.
+- **Pino-only** logging confirmed (`rg "console\\." apps/api/src` returns 0).
+
+### Phase 9.7 — Verification
+
+- `pnpm typecheck` — 7/7 tasks pass.
+- `pnpm generate` — 53 agents OK / 94 skills OK.
+- `pnpm build` — clean Next.js build (14 routes) and clean `tsc` for the API.
+
+---
+
 ## Verification Checklist
 
 - `pnpm typecheck` — 7/7 tasks pass.
