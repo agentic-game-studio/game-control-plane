@@ -18,7 +18,11 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
   if (req.path.match(/^\/api\/assets\/[^/]+\/thumbnail$/)) return next();
 
   const config = loadConfig();
-  const apiKey = req.headers["x-api-key"] as string | undefined;
+  // req.headers values are string | string[] | undefined; an array value
+  // (which can happen behind some proxies) would slip past the `!apiKey`
+  // check after being cast. Take the first element if so.
+  const rawKey = req.headers["x-api-key"];
+  const apiKey = Array.isArray(rawKey) ? rawKey[0] : rawKey;
 
   if (!apiKey || !timingSafeCompare(apiKey, config.API_SECRET)) {
     res.status(401).json({ success: false, error: "Unauthorized" });
