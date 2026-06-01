@@ -19,6 +19,7 @@ interface ProjectGridProps {
   currentProject: Project | null;
   onSelectProject: (project: Project) => void;
   onNewProject: () => void;
+  onDemoProject?: () => void;
   onDeleteProject?: (id: string) => void;
   mcpStatuses?: Record<string, MCPStatus>;
   onLaunchEditor?: (projectId: string) => void;
@@ -29,6 +30,7 @@ export function ProjectGrid({
   currentProject,
   onSelectProject,
   onNewProject,
+  onDemoProject,
   onDeleteProject,
   mcpStatuses = {},
   onLaunchEditor,
@@ -93,18 +95,28 @@ export function ProjectGrid({
       </div>
 
       {/* Section Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
         <div className="flex items-center gap-2">
           <span className="font-[var(--font-terminal)] text-xs font-bold uppercase tracking-wider">
             {`> ACTIVE_DIRECTORIES`}
           </span>
         </div>
-        <button
-          onClick={onNewProject}
-          className="border-2 border-black bg-black text-white px-4 py-2 font-[var(--font-label)] text-xs font-bold uppercase tracking-wider hover:bg-white hover:text-black transition-colors shadow-[4px_4px_0_0_rgba(0,0,0,1)] hover:shadow-[2px_2px_0_0_rgba(0,0,0,1)] hover:translate-x-[2px] hover:translate-y-[2px]"
-        >
-          + NEW_PROJ
-        </button>
+        <div className="flex items-center gap-3 flex-wrap">
+          {onDemoProject && (
+            <button
+              onClick={onDemoProject}
+              className="border-2 border-black bg-[#2ECC71] text-black px-4 py-2 font-[var(--font-label)] text-xs font-bold uppercase tracking-wider hover:bg-white transition-colors shadow-[4px_4px_0_0_rgba(0,0,0,1)] hover:shadow-[2px_2px_0_0_rgba(0,0,0,1)] hover:translate-x-[2px] hover:translate-y-[2px]"
+            >
+              CLOUD_DEMO
+            </button>
+          )}
+          <button
+            onClick={onNewProject}
+            className="border-2 border-black bg-black text-white px-4 py-2 font-[var(--font-label)] text-xs font-bold uppercase tracking-wider hover:bg-white hover:text-black transition-colors shadow-[4px_4px_0_0_rgba(0,0,0,1)] hover:shadow-[2px_2px_0_0_rgba(0,0,0,1)] hover:translate-x-[2px] hover:translate-y-[2px]"
+          >
+            + NEW_PROJ
+          </button>
+        </div>
       </div>
 
       {/* Project Grid */}
@@ -141,7 +153,7 @@ export function ProjectGrid({
             No active directories found.
           </p>
           <p className="font-[var(--font-terminal)] text-xs text-[#737688] mt-1">
-            Create a new project to get started.
+            Use CLOUD_DEMO for an online judge-safe project, or create a new project.
           </p>
         </div>
       )}

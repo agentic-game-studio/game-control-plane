@@ -245,7 +245,7 @@ export function NewProjectModal({ isOpen, onClose, onSubmit }: NewProjectModalPr
               </div>
             )}
             <span className="font-[var(--font-terminal)] text-[10px] text-[#737688]">
-              Absolute path to link an existing project, or relative name to create inside workspace.
+              On the hosted demo, Browse shows the Railway server workspace. Use a relative name, or use CLOUD_DEMO from the dashboard.
             </span>
           </div>
         </FormField>

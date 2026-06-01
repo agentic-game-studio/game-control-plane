@@ -43,7 +43,7 @@ export function loadConfig() {
     KIMI_BASE_URL: process.env.KIMI_BASE_URL,
     ZAI_API_KEY: process.env.ZAI_API_KEY ?? "",
     ZAI_BASE_URL: process.env.ZAI_BASE_URL,
-    API_PORT: process.env.API_PORT,
+    API_PORT: process.env.API_PORT ?? process.env.PORT,
     API_SECRET: process.env.API_SECRET,
     CORS_ORIGIN: process.env.CORS_ORIGIN,
     WORKSPACE_DIR: process.env.WORKSPACE_DIR,

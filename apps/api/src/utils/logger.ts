@@ -12,6 +12,7 @@ if (!existsSync(LOG_DIR)) {
 }
 
 const LOG_FILE = join(LOG_DIR, "api.log");
+const enableFileLogs = process.env.LOG_TO_FILE !== "false" && !process.env.RAILWAY_ENVIRONMENT_ID;
 
 const transport = pino.transport({
   targets: [
@@ -24,24 +25,28 @@ const transport = pino.transport({
         ignore: "pid,hostname",
       },
     },
-    {
-      level: "info",
-      target: "pino-file-transport",
-      options: {
-        path: LOG_FILE,
-        rotation: { maxSize: 50, frequency: "daily", logging: false },
-        retention: { duration: "7d", logging: false },
-      },
-    },
-    {
-      level: "error",
-      target: "pino-file-transport",
-      options: {
-        path: join(LOG_DIR, "error.log"),
-        rotation: { maxSize: 20, frequency: "daily", logging: false },
-        retention: { duration: "14d", logging: false },
-      },
-    },
+    ...(enableFileLogs
+      ? [
+          {
+            level: "info",
+            target: "pino-file-transport",
+            options: {
+              path: LOG_FILE,
+              rotation: { maxSize: 50, frequency: "daily", logging: false },
+              retention: { duration: "7d", logging: false },
+            },
+          },
+          {
+            level: "error",
+            target: "pino-file-transport",
+            options: {
+              path: join(LOG_DIR, "error.log"),
+              rotation: { maxSize: 20, frequency: "daily", logging: false },
+              retention: { duration: "14d", logging: false },
+            },
+          },
+        ]
+      : []),
   ],
 });
 

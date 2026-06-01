@@ -73,6 +73,14 @@ export function useDashboard() {
     [fetchDashboard]
   );
 
+  const createDemoProject = useCallback(async () => {
+    const demoProject = await apiFetch<Project>("/api/dashboard/demo-project", {
+      method: "POST",
+    });
+    await fetchDashboard();
+    return demoProject;
+  }, [fetchDashboard]);
+
   const deleteProject = useCallback(
     async (id: string) => {
       await apiFetch(`/api/dashboard/projects/${id}`, {
@@ -107,6 +115,7 @@ export function useDashboard() {
     error,
     retry,
     createProject,
+    createDemoProject,
     deleteProject,
     updateProject,
   };

@@ -1,8 +1,14 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  // Silence warning about multiple lockfiles
-  serverExternalPackages: ["@game-studio/types", "@game-studio/agents", "@game-studio/skills"],
+  transpilePackages: ["@game-studio/types", "@game-studio/agents", "@game-studio/skills"],
+  webpack: (config) => {
+    config.resolve.extensionAlias = {
+      ...config.resolve.extensionAlias,
+      ".js": [".ts", ".tsx", ".js"],
+    };
+    return config;
+  },
 };
 
 export default nextConfig;
