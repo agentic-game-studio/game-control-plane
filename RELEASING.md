@@ -169,6 +169,45 @@ A follow-up audit uncovered additional bugs that landed in the first
 
 ---
 
+## Phase 8 — Third-Pass Hardening
+
+A third full-audit uncovered 101 findings (10 CRITICAL, 13 HIGH, 29 MEDIUM, 49 LOW).
+This phase lands the 10 criticals and the highest-impact 11 highs.
+
+### Phase 8.1 — Criticals (10 fixes)
+
+| # | File | Change |
+|---|---|---|
+| 8.1.1 | `apps/api/src/llm/zai-client.ts` | `Semaphore.release()` is now bounded — refuses to inflate `permits` past `limit` and warns on stray release without a matching acquire. |
+| 8.1.2 | `apps/api/src/llm/zai-client.ts` | `modelSemaphores` Map is now LRU-capped at `MAX_TRACKED_MODELS = 32`; long-idle models get evicted so an attacker (or bug) can't grow it unbounded. |
+| 8.1.3 | `apps/api/src/services/data-store.ts` | `readData` now produces a clearer error on ENOENT (filename + path); `updateData` lock-safety contract documented inline so future maintainers don't accidentally strand the lock. |
+| 8.1.4 | `apps/api/src/routes/chat.ts` | `sessionsResponding.add(id)` moved to immediately after the has-check, closing the TOCTOU window that let two concurrent /messages both call the LLM. |
+| 8.1.5 | `apps/api/src/routes/chat.ts` | Compaction is now atomic across the critical mutations: status→compacted and new-session registration land in a single `saveChatState` call; cleanup of older generations is a best-effort follow-up. Project-id prefix collision is fixed via `escapeRegExp` helper. |
+| 8.1.6 | `apps/api/src/routes/teams.ts` | `/run` now rejects with 409 if a workflow is already in flight for the same `effectiveSessionId` (uses `startWorkflow`'s createdAt-vs-request-time check). |
+| 8.1.7 | `apps/api/src/routes/autonomous.ts` | `/start` does a post-project-lookup re-check on persisted status — a concurrent `/stop` that flipped the disk state to `idle` now cancels the in-flight /start with 409. |
+| 8.1.8 | `apps/api/src/routes/autonomous.ts` | Per-session `AbortController` is signalled by `/stop` to cancel the in-flight `invokeAgent` (and the LLM fetch). Without this, a 20-minute agent call kept running for 20 minutes after the user pressed Stop, burning LLM credits. |
+| 8.1.9 | `apps/api/src/routes/chat.ts` + `llm-service.ts` + `zai-client.ts` | `req.on("close")` in `/messages` creates a per-request `AbortController` that's passed all the way through `continueConversation` → `callLLMWithTools` → `callZAI`. A browser tab close or page reload now cancels the in-flight LLM fetch instead of leaving it running to completion. |
+| 8.1.10 | `apps/api/src/services/verification-service.ts` | Dead-letter move lazily creates the `failed` column if it doesn't exist on the board. Older boards (created before the column was added) no longer have a silent no-op when verification dead-letters. |
+
+### Phase 8.2 — Highs (clear wins)
+
+| # | File | Change |
+|---|---|---|
+| 8.2.1 | `apps/api/src/routes/documents.ts` + `dashboard.ts` | New `dropProjectStore(projectId)` is called on `DELETE /projects/:id` — closes the per-project `fs.watch` handle and frees the in-memory document graph. Without this, `projectStores` grew unbounded as projects were created and deleted. |
+| 8.2.2 | `apps/api/src/routes/assets.ts` + `dashboard.ts` | `unwatchProjectAssets` is now exported and called on `DELETE /projects/:id` — same reasoning as the document store. |
+| 8.2.3 | `apps/api/src/index.ts` | WebSocket upgrade now validates the `Origin` header against `CORS_ORIGIN` allowlist. Cross-origin WS hijacking rejected with 403. |
+| 8.2.4 | `apps/api/src/routes/autonomous.ts` | `saveRunRecord` is now serialized through a single `historyWriteChain` promise. The previous read-modify-write on `runs.json` could lose a record if `/start` and `/stop` saved concurrently. |
+| 8.2.5 | `apps/api/src/routes/chat.ts` | `/spawn` now reports the actual outcome in its response (`status: "completed" \| "failed" \| "ready"`, `success: false` on agent failure). Previously the response always said `success: true` even when the spawned agent crashed. |
+
+**Deferred (out of scope for Phase 8):**
+- Native `alert()`/`confirm()` replacement with Radix `AlertDialog` (5 files).
+- MCP-health poll consolidation (3 sites).
+- `SubagentDrawer` focus trap.
+- 23 of 29 MEDIUM findings.
+- 49 LOW findings.
+
+---
+
 ## Verification Checklist
 
 - `pnpm typecheck` — 7/7 tasks pass.

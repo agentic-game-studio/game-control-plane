@@ -70,6 +70,20 @@ const server = createServer(app);
 server.on("upgrade", (request, socket, head) => {
   const { pathname, searchParams } = new URL(request.url ?? "/", "http://localhost");
 
+  // Origin check: prevent cross-origin WebSocket hijacking. Browsers send
+  // an Origin header on the upgrade request; we reject any origin not in
+  // the CORS allowlist. Same-origin requests have an Origin header that
+  // matches the server's own URL — we also accept those.
+  const origin = request.headers.origin as string | undefined;
+  if (origin && !corsOrigins.includes("*")) {
+    const allowed = corsOrigins.some((o) => o === origin || (o !== "*" && new URL(o).origin === new URL(origin).origin));
+    if (!allowed) {
+      socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
+      socket.destroy();
+      return;
+    }
+  }
+
   // S5: Validate API key on WebSocket upgrade with a timing-safe comparison.
   // The previous `!==` comparison was vulnerable to a byte-by-byte timing
   // attack against the secret. The HTTP middleware already uses

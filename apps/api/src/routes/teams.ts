@@ -58,6 +58,29 @@ teamsRouter.post("/:team/run", async (req: Request, res: Response) => {
   const effectiveSessionId = sessionId || `team-${Date.now()}`;
   const teamMembers = team.teamMembers || [];
 
+  // Reject if a workflow is already in flight for this sessionId. Without this
+  // guard, two concurrent /run calls with the same sessionId (or two /run
+  // calls in the same millisecond with no sessionId) would both pass the
+  // check, both overwrite teamSessions, and both create duplicate quest
+  // tickets. We capture the timestamp before startWorkflow so we can tell
+  // whether the returned workflow is one we just created (createdAt ≥ t0)
+  // or a pre-existing one (createdAt < t0).
+  const requestStart = Date.now();
+  const workflowId = startWorkflow(effectiveSessionId);
+  const existing = getWorkflow(effectiveSessionId);
+  if (existing && existing.createdAt < requestStart) {
+    logger.warn(
+      { sessionId: effectiveSessionId, existingWorkflowId: existing.workflowId, event: "team_run_duplicate" },
+      "Refusing to start team workflow — one is already in flight for this session",
+    );
+    res.status(409).json({
+      success: false,
+      error: "A team workflow is already in flight for this sessionId",
+      sessionId: effectiveSessionId,
+    });
+    return;
+  }
+
   // Initialize team session
   const teamSession: { messages: LLMMessage[]; startedAt: string } = {
     messages: [],

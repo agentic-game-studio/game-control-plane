@@ -221,7 +221,7 @@ async function scanAssetsDir(
 const assetWatchers = new Map<string, ReturnType<typeof watch>>();
 
 /** Stop watching a project's assets directory */
-function unwatchProjectAssets(projectId: string): void {
+export function unwatchProjectAssets(projectId: string): void {
   const watcher = assetWatchers.get(projectId);
   if (watcher) {
     watcher.close();

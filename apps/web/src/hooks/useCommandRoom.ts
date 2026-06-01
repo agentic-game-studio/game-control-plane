@@ -157,7 +157,13 @@ function purgeStaleCacheKeys(): void {
     }
     keysToRemove.forEach((k) => localStorage.removeItem(k));
     if (keysToRemove.length > 0) {
-      console.log("[Cache] Purged", keysToRemove.length, "stale keys");
+      // Dev-time visibility only. Removing this would lose signal in
+      // troubleshooting but keeping it as console.log floods production
+      // devtools. The cache-purge marker is the persistent artifact; this
+      // log is best-effort.
+      if (process.env.NODE_ENV !== "production") {
+        console.log("[Cache] Purged", keysToRemove.length, "stale keys");
+      }
     }
     localStorage.setItem(CACHE_PURGE_MARKER, "1");
   } catch { /* ignore */ }
@@ -2339,7 +2345,9 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
   }, [sessions, visibleSubagents, currentSession, producerSessionId, isLoading]);
 
   const compactSession = useCallback(async (sessionId: string) => {
-    console.log("[Compact] Requested for sessionId:", sessionId, "producerRef:", producerSessionIdRef.current);
+    if (process.env.NODE_ENV !== "production") {
+      console.log("[Compact] Requested for sessionId:", sessionId, "producerRef:", producerSessionIdRef.current);
+    }
     setCompactingSessionId(sessionId);
     addSessionMessage(producerSessionIdRef.current, {
       type: "system",

@@ -14,6 +14,8 @@ import type {
 import type { WSEvent } from "@game-studio/types";
 import { orphanProjectSessions } from "./chat.js";
 import { removeGodotMCPService, installGodotMCPPlugin, isGodotMCPPluginInstalled, isGodotMCPPluginEnabled, launchGodotEditor } from "../services/godot-mcp-service.js";
+import { dropProjectStore } from "./documents.js";
+import { unwatchProjectAssets } from "./assets.js";
 import { detectEngineFromWorkspace } from "../services/llm-service.js";
 import { resolveProjectWorkspace, validateWorkspacePath } from "../utils/workspace.js";
 import { getTicketsBoardFile, writeTicketsBoard } from "../services/ticket-board.js";
@@ -564,6 +566,15 @@ dashboardRouter.delete("/projects/:id", async (req: Request, res: Response) => {
 
     // Stop Godot MCP service if running for this project
     await removeGodotMCPService(String(id)).catch(() => {});
+
+    // Drop the per-project document store (closes its fs.watch handle and
+    // frees the in-memory graph). Without this, projectStores grows
+    // unbounded as projects are created and deleted.
+    dropProjectStore(String(id));
+
+    // Drop the per-project assets fs.watch handle. Same reasoning as
+    // dropProjectStore — the watcher entry is otherwise never cleaned up.
+    unwatchProjectAssets(String(id));
 
     // Clean up associated data files (tickets board, autonomous loop state)
     const ticketsFile = getTicketsBoardFile(String(id));

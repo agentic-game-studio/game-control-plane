@@ -54,6 +54,18 @@ async function getProjectStore(projectId: string): Promise<DocumentStore | null>
   return store;
 }
 
+/** Drop the in-memory DocumentStore for a project (called on project delete).
+ * Without this, the projectStores Map grows unbounded as projects are created
+ * and deleted — each entry holds an active fs.watch handle and the in-memory
+ * document graph. */
+export function dropProjectStore(projectId: string): boolean {
+  const store = projectStores.get(projectId);
+  if (!store) return false;
+  store.stopWatching();
+  projectStores.delete(projectId);
+  return true;
+}
+
 /** Resolve store from request — project-scoped or global */
 async function resolveStore(req: Request): Promise<DocumentStore> {
   const projectId = req.query.projectId as string | undefined;

@@ -243,6 +243,15 @@ export async function verifyTicket(
       if (projectId) {
         try {
           await updateTicketsBoard(projectId, (board) => {
+            // Older boards (created before the `failed` column was added to
+            // DEFAULT_TICKETS_BOARD) may not have it. Without this guard,
+            // the dead-letter move silently no-ops: the ticket stays in its
+            // current column with `deadLetter: true` set, but the UI never
+            // surfaces it in the Failed column. Lazily create the column
+            // here so dead-letter always lands somewhere visible.
+            if (!board.columns.some((c) => c.id === "failed")) {
+              board.columns.push({ id: "failed", label: "Failed", tickets: [] });
+            }
             for (const col of board.columns) {
               if (col.id === "failed") {
                 const t = col.tickets.find((x) => x.id === ticket.id);

@@ -128,6 +128,10 @@ interface ExtendedChatSession extends ChatSession {
   cumulativeOutputTokens: number;
 }
 
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 const CHAT_STATE_FILE = "chat-state.json";
 
 /**
@@ -1049,17 +1053,27 @@ Max 4000 characters. Respond ONLY with the summary.`;
       generation: newGeneration,
     };
 
-    // Archive old session
+    // Archive old session + register new one as a single atomic write.
+    // The previous order was: mutate old.status → add new to map → cleanup
+    // old generations → save. A crash between mutate and save left the
+    // old session marked "compacted" with no successor on disk, breaking
+    // generation traversal forever. Now: stage the critical mutations,
+    // save, then perform the (re-runnable) cleanup.
     session.status = "compacted";
-
     chatStore.sessions[newId] = newSession;
+    sessionsResponding.delete(id);
+
+    await saveChatState();
 
     // Clean up compacted sessions more than 2 generations behind the current one.
     // They're only needed for generation traversal which stops at the first non-compacted session.
+    // Use a strict regex on the full session id so e.g. "producer-project1-g2"
+    // can't accidentally match "producer-project1x-g3" (project id prefix collision).
     const baseSessionId = id.replace(/-g\d+$/, "");
+    const ancestorPattern = new RegExp(`^${escapeRegExp(baseSessionId)}-g\\d+$`);
     for (const [sid, sess] of Object.entries(chatStore.sessions)) {
-      if (sid === baseSessionId || sid === newId || sid === id) continue;
-      if (sid.startsWith(baseSessionId + "-g") && sess.status === "compacted") {
+      if (sid === id || sid === newId) continue;
+      if (sess.status === "compacted" && ancestorPattern.test(sid)) {
         const genMatch = sid.match(/-g(\d+)$/);
         if (genMatch) {
           const gen = parseInt(genMatch[1], 10);
@@ -1071,10 +1085,17 @@ Max 4000 characters. Respond ONLY with the summary.`;
       }
     }
 
-    // Clean up sessionsResponding for the compacted session itself
-    sessionsResponding.delete(id);
-
-    await saveChatState();
+    // Best-effort second save after cleanup. If this fails, the only impact
+    // is stale compacted sessions in disk (a non-critical leak that the next
+    // successful compaction on the same baseSessionId will GC).
+    try {
+      await saveChatState();
+    } catch (cleanupSaveErr) {
+      logger.warn(
+        { err: cleanupSaveErr, oldSessionId: id, newSessionId: newId, event: "compaction_cleanup_save_failed" },
+        "Compaction cleanup save failed; stale compacted sessions may persist on disk",
+      );
+    }
 
     logger.info({ oldSessionId: id, newSessionId: newId, generation: newGeneration, summaryChars: summaryText.length }, "Session compacted");
 
@@ -1113,10 +1134,20 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
     return;
   }
 
-  // Prevent concurrent agent responses for the same session
-  if (body.type !== "system" && body.type !== "progress" && body.type !== "producer_update" && sessionsResponding.has(id)) {
-    res.status(409).json({ success: false, error: "Agent is already responding — please wait" });
-    return;
+  // Acquire per-session lock BEFORE any async work. The previous
+  // version did `if (sessionsResponding.has(id)) return 409` first
+  // and added the id later — that created a TOCTOU window: two
+  // concurrent requests could both pass the has() check before
+  // either added the id, then both would proceed to call the LLM
+  // concurrently. By installing the lock right after the check and
+  // before any await, the second request will see the id present
+  // and be rejected.
+  if (body.type !== "system" && body.type !== "progress" && body.type !== "producer_update") {
+    if (sessionsResponding.has(id)) {
+      res.status(409).json({ success: false, error: "Agent is already responding — please wait" });
+      return;
+    }
+    sessionsResponding.add(id);
   }
 
   const userMessageId = `msg-${crypto.randomUUID().slice(0, 8)}`;
@@ -1172,9 +1203,6 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
   // Get response from LLM
   const agentRole = session.role as AgentRole;
 
-  // Acquire per-session lock
-  sessionsResponding.add(id);
-
   // Add thinking/progress message
   const progressMsgId = `msg-${crypto.randomUUID().slice(0, 8)}`;
   const progressMessage: ChatMessage = {
@@ -1223,6 +1251,22 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
       } as WSEvent);
     }, 2000);
 
+    // Wire the HTTP request's "close" event to an AbortController so that
+    // when the client disconnects mid-LLM-call (browser tab closed, page
+    // reload, network drop), the in-flight LLM fetch is cancelled. Without
+    // this, an orphaned client can keep an LLM request running for the full
+    // fetch timeout (60s+) and burn tokens the user already gave up on.
+    // The signal is also passed to continueConversation → callLLMWithTools
+    // so the fetch itself sees the abort.
+    const clientAbort = new AbortController();
+    req.on("close", () => {
+      if (!clientAbort.signal.aborted) {
+        logger.info({ sessionId: id, event: "chat_client_disconnected" },
+          "Client disconnected mid-response — cancelling in-flight LLM call");
+        clientAbort.abort();
+      }
+    });
+
     // Call the LLM with progress callback
     const projectContext = await getProjectContextForSession(session);
 
@@ -1258,6 +1302,7 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
       onFileOperation,
       continueCtx || undefined,
       onTokenUsage,
+      clientAbort.signal,
     );
 
     // Stop heartbeat
@@ -1521,6 +1566,7 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
   });
 
   // If a task is provided, execute it immediately
+  let spawnStatus: "completed" | "failed" | "ready" = "ready";
   if (task) {
     // Create a progress message for this invocation
     const progressMsgId = `msg-${crypto.randomUUID().slice(0, 8)}`;
@@ -1673,6 +1719,7 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
       // Update agent session status to done
       newSession.progress = 100;
       newSession.status = "completed";
+      spawnStatus = "completed";
       broadcast({
         type: "chat:session:updated",
         sessionId,
@@ -1693,6 +1740,7 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
       }
     } catch (err: unknown) {
       clearInterval(heartbeat);
+      spawnStatus = "failed";
       const error = err as Error;
       logger.error({ event: "spawn_failed", agentRole, sessionId, error: error.message, stack: error.stack }, `Agent ${agentRole} failed: ${error.message}`);
 
@@ -1729,8 +1777,8 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
 
   await saveChatState();
   res.json({
-    success: true,
-    data: { invocationId, role, sessionId, status: task ? "completed" : "ready" },
+    success: spawnStatus !== "failed",
+    data: { invocationId, role, sessionId, status: spawnStatus },
   });
 });
 

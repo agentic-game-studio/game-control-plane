@@ -1430,6 +1430,7 @@ export async function continueConversation(
   onFileOperation?: FileOperationCallback,
   continuationContext?: string,
   onTokenUsage?: import("../llm/zai-client.js").TokenUsageCallback,
+  abortSignal?: AbortSignal,
 ): Promise<InvokeResult> {
   try {
     // Inject continuation context temporarily (not persisted to session)
@@ -1469,6 +1470,7 @@ export async function continueConversation(
         tools: allTools,
         systemPrompt,
         model,
+        signal: abortSignal,
       },
       toolExecutor,
       onProgress,

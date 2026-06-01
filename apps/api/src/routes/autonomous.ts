@@ -44,6 +44,12 @@ type ReadyProjectContext = ProjectContext & { workspacePath: string };
 
 /** In-memory registry of running loop session IDs for graceful shutdown */
 const activeLoopSessions = new Set<string>();
+
+/** AbortController per session, signalled by /stop to cancel in-flight work.
+ * Without this, /stop only takes effect at the next loop iteration boundary —
+ * so a 20-minute invokeAgent call would keep running for up to 20 minutes
+ * after the user pressed Stop, burning LLM credits. */
+const loopAbortControllers = new Map<string, AbortController>();
 const STALE_LOOP_HEARTBEAT_MS = 5 * 60 * 1000; // 5 minutes without heartbeat = stale
 
 const DEBUG_FILE = "/tmp/autonomous-debug.txt";
@@ -401,11 +407,21 @@ function saveHistory(history: LoopRunRecord[]): void {
   writeFileSync(path, JSON.stringify(history, null, 2), "utf-8");
 }
 
+// Serialize run-history writes. Two concurrent /start or /stop calls each
+// call saveRunRecord which does read → mutate → write — without a mutex
+// the second caller reads stale state and clobbers the first caller's
+// record. Single in-flight chain is enough since writes are rare.
+let historyWriteChain: Promise<void> = Promise.resolve();
 function saveRunRecord(record: LoopRunRecord): void {
-  const history = loadHistory();
-  // Keep last 50 runs
-  const updated = [record, ...history].slice(0, 50);
-  saveHistory(updated);
+  const next = historyWriteChain.then(async () => {
+    const history = loadHistory();
+    const updated = [record, ...history].slice(0, 50);
+    saveHistory(updated);
+  }).catch(() => {
+    // Swallow per-record failure so one bad write doesn't poison the chain
+    // (best-effort logging).
+  });
+  historyWriteChain = next;
 }
 
 // ─── Ticket helpers ──────────────────────────────────────────────────────────
@@ -556,7 +572,7 @@ async function getProjectContext(projectId: string): Promise<ProjectContext | un
 
 // ─── Core loop step ──────────────────────────────────────────────────────────
 
-async function runIteration(state: LoopState, board: TicketsBoard, projectContext: ReadyProjectContext): Promise<{ ticket: Ticket | null; done: boolean; error?: string }> {
+async function runIteration(state: LoopState, board: TicketsBoard, projectContext: ReadyProjectContext, abortSignal?: AbortSignal): Promise<{ ticket: Ticket | null; done: boolean; error?: string }> {
   debugLog(`runIteration ENTRY iter=${state.currentIteration}, projectContext.engine=${projectContext.engine}, workspacePath=${projectContext.workspacePath}`);
 
   // Clean up stale in_progress tickets (from crashed/timed-out iterations)
@@ -675,7 +691,18 @@ async function runIteration(state: LoopState, board: TicketsBoard, projectContex
     // promise but the LLM fetch would keep running, eventually completing and
     // potentially mutating shared state (token usage, broadcast events) after
     // the autonomous loop has moved on.
+    //
+    // The abort signal is also linked to the loop-level abort signal
+    // (signalled by /stop) so that stopping the loop cancels the in-flight
+    // invokeAgent immediately rather than waiting for the 20-minute timeout.
     const agentAbort = new AbortController();
+    if (abortSignal) {
+      if (abortSignal.aborted) {
+        agentAbort.abort();
+      } else {
+        abortSignal.addEventListener("abort", () => agentAbort.abort(), { once: true });
+      }
+    }
     const agentPromise = invokeAgent(
       state.currentAgentRole as AgentRole,
       `[AUTONOMOUS TICKET] ${activeTicket.description || activeTicket.title}${attempt > 1 ? ` (retry ${attempt}/${MAX_TICKET_RETRIES})` : ""}`,
@@ -1056,8 +1083,30 @@ autonomousRouter.post("/start", async (req: Request, res: Response) => {
 
   saveLoopState(state);
 
+  // Re-check after all the disk + project lookups. A /stop that came in
+  // while we were awaiting getProjectContext would have set the persisted
+  // state back to "idle" — starting a new IIFE in that case would race
+  // against the just-stopped loop and start a fresh run. Bail before we
+  // even create the AbortController.
+  const postCheck = loadLoopState(sessionId);
+  if (postCheck && postCheck.status === "idle" && postCheck.lastHeartbeat !== state.lastHeartbeat) {
+    logger.warn({ sessionId, event: "autonomous_start_race_stopped" },
+      "Concurrent /stop cancelled /start — abandoning new loop");
+    res.status(409).json({
+      success: false,
+      error: "Loop was stopped while /start was processing",
+      data: postCheck,
+    });
+    return;
+  }
+
   // Kick off the loop asynchronously (don't block the HTTP response)
   activeLoopSessions.add(sessionId);
+  // Per-session AbortController: /stop signals it to cancel the in-flight
+  // invokeAgent (and the LLM fetch) so the loop exits immediately rather
+  // than waiting for the current ticket to finish (up to 20 min).
+  const loopAbort = new AbortController();
+  loopAbortControllers.set(sessionId, loopAbort);
   (async () => {
     debugLog(`batch ${state.sessionId}] async loop started, projectId=${state.projectId}`);
 
@@ -1114,11 +1163,11 @@ autonomousRouter.post("/start", async (req: Request, res: Response) => {
     let done = false;
 
     debugLog(`batch ${state.sessionId}] starting while loop`);
-    while (!done && currentState.status === "running") {
+    while (!done && currentState.status === "running" && !loopAbort.signal.aborted) {
       try {
         debugLog(`batch ${state.sessionId}] calling runIteration`);
         const board = await readTicketsBoard(state.projectId);
-        const result = await runIteration(currentState, board, readyProjectContext);
+        const result = await runIteration(currentState, board, readyProjectContext, loopAbort.signal);
         debugLog(`batch ${state.sessionId}] runIteration returned, done=${result.done}`);
         currentState = loadLoopState(state.sessionId)!;
         done = result.done;
@@ -1194,6 +1243,7 @@ autonomousRouter.post("/start", async (req: Request, res: Response) => {
     logger.error({ error: err, event: "autonomous_loop_crash" }, "Autonomous loop crashed");
   }).finally(() => {
     activeLoopSessions.delete(sessionId);
+    loopAbortControllers.delete(sessionId);
   });
 
   res.status(202).json({ success: true, data: state });
@@ -1212,6 +1262,16 @@ autonomousRouter.post("/stop", async (req: Request, res: Response) => {
   if (!state) {
     res.status(404).json({ success: false, error: "No loop state found for session" });
     return;
+  }
+
+  // Signal the in-flight invokeAgent (and the LLM fetch) to abort. Without
+  // this, /stop only takes effect at the next loop-iteration boundary — a
+  // 20-minute agent call would keep running for up to 20 minutes after Stop.
+  const loopAbort = loopAbortControllers.get(sessionId);
+  if (loopAbort) {
+    loopAbort.abort();
+    logger.info({ sessionId, event: "autonomous_stop_aborted_inflight" },
+      "Stop signalled — in-flight invokeAgent will be cancelled");
   }
 
   state.status = "idle";

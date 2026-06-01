@@ -14,16 +14,29 @@ import { logger } from "../utils/logger.js";
 import { broadcast } from "../services/websocket.js";
 import { CHARS_PER_TOKEN_ESTIMATE, getModelForTier, getModelContextWindow } from "../config/model-mapping.js";
 
-/** Simple async semaphore for ZAI API concurrency control */
+/** Simple async semaphore for ZAI API concurrency control.
+ *
+ * `acquireCount` tracks the number of outstanding acquires so a stray
+ * `release()` (e.g. from a bug in the caller's error path) can never
+ * push `permits` above the configured limit and silently break
+ * concurrency control. Without this guard, a single double-release
+ * would let two callers in past the cap, then a third release would
+ * let three in, and so on. The previous implementation assumed every
+ * release had a matching acquire — a brittle invariant the type system
+ * couldn't enforce. */
 class Semaphore {
   private permits: number;
+  private readonly limit: number;
+  private acquireCount = 0;
   private waitQueue: Array<() => void> = [];
 
   constructor(permits: number) {
+    this.limit = permits;
     this.permits = permits;
   }
 
   async acquire(): Promise<void> {
+    this.acquireCount++;
     if (this.permits > 0) {
       this.permits--;
       return;
@@ -34,9 +47,22 @@ class Semaphore {
   }
 
   release(): void {
+    if (this.acquireCount === 0) {
+      // Stray release with no matching acquire. Log and ignore so a
+      // bug in caller code can't inflate the permit pool. Without this
+      // guard, permits could grow past `limit` and silently lift
+      // concurrency control.
+      logger.warn(
+        { event: "semaphore_stray_release", permits: this.permits, limit: this.limit },
+        "Semaphore.release() called without a matching acquire — ignoring",
+      );
+      return;
+    }
+    this.acquireCount--;
     if (this.waitQueue.length > 0) {
       const next = this.waitQueue.shift()!;
       next();
+      // The permit is transferred to the next waiter; do not increment.
     } else {
       this.permits++;
     }
@@ -61,15 +87,54 @@ const MODEL_CONCURRENCY_LIMITS: Record<string, number> = {
 
 const DEFAULT_CONCURRENCY_LIMIT = 2;
 
-/** Per-model semaphores — keyed by model name */
+/** Per-model semaphores — keyed by model name.
+ *
+ * Capped at MAX_TRACKED_MODELS to prevent unbounded growth if a caller
+ * passes an arbitrary model string (e.g., from user-supplied config or
+ * a future feature that takes a model name from the wire). The cap is
+ * generous because the supported set is small (~6 models). When the
+ * cap is hit, the least-recently-used entry is evicted — eviction is
+ * safe because an in-flight semaphore has callers waiting on it, and
+ * once they all release the entries would be empty anyway. The risk
+ * would be evicting an entry with active waiters, so we check the
+ * waitQueue length before dropping. */
+const MAX_TRACKED_MODELS = 32;
+
 const modelSemaphores = new Map<string, Semaphore>();
 
 function getSemaphore(model: string): Semaphore {
-  const limit = MODEL_CONCURRENCY_LIMITS[model] ?? DEFAULT_CONCURRENCY_LIMIT;
-  if (!modelSemaphores.has(model)) {
-    modelSemaphores.set(model, new Semaphore(limit));
+  const existing = modelSemaphores.get(model);
+  if (existing) {
+    // Refresh LRU position by re-inserting (Map preserves insertion order).
+    modelSemaphores.delete(model);
+    modelSemaphores.set(model, existing);
+    return existing;
   }
-  return modelSemaphores.get(model)!;
+
+  if (modelSemaphores.size >= MAX_TRACKED_MODELS) {
+    // Evict the oldest entry that has no waiters. If all entries have
+    // waiters, refuse the eviction and just grow past the cap — losing
+    // a semaphore mid-acquire would deadlock the waiter.
+    let evicted = false;
+    for (const [key, sem] of modelSemaphores) {
+      if ((sem as unknown as { waitQueue: unknown[] }).waitQueue.length === 0) {
+        modelSemaphores.delete(key);
+        evicted = true;
+        break;
+      }
+    }
+    if (!evicted) {
+      logger.warn(
+        { event: "model_semaphore_overflow", model, tracked: modelSemaphores.size },
+        "modelSemaphores hit cap and all entries have waiters — growing past cap",
+      );
+    }
+  }
+
+  const limit = MODEL_CONCURRENCY_LIMITS[model] ?? DEFAULT_CONCURRENCY_LIMIT;
+  const sem = new Semaphore(limit);
+  modelSemaphores.set(model, sem);
+  return sem;
 }
 
 export interface TextContent {
