@@ -9,7 +9,7 @@ export const wss = new WebSocketServer({ noServer: true });
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const HEARTBEAT_TIMEOUT_MS = 10_000;
 
-const heartbeatInterval = setInterval(() => {
+export const heartbeatInterval = setInterval(() => {
   for (const client of wss.clients) {
     if (client.readyState !== WebSocket.OPEN) continue;
     const ws = client as WebSocket & { isAlive?: boolean };

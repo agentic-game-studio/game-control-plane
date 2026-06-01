@@ -133,11 +133,11 @@ export async function verifyTicket(
       `Ticket ${ticket.id} verification: ${verdict}`,
     );
 
-    // Move ticket based on verdict
+    // Move ticket based on verdict (pass knownProjectId to skip resolver N+1)
     if (passed) {
-      await moveQuestTicket(ticket.id, "completed", ticket.assignee);
+      await moveQuestTicket(ticket.id, "completed", ticket.assignee, ticket.projectId);
     } else {
-      await moveQuestTicket(ticket.id, "available", ticket.assignee);
+      await moveQuestTicket(ticket.id, "available", ticket.assignee, ticket.projectId);
       if (ticket.sessionId && verdict !== "PASS") {
         await createFixTicket(
           ticket.sessionId,

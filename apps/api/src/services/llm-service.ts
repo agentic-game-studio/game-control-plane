@@ -30,6 +30,7 @@ import {
 } from "./godot-mcp-service.js";
 import { triggerVerification } from "./verification-service.js";
 import { consumeCreditsForAgent } from "./credit-service.js";
+import { logger } from "../utils/logger.js";
 
 export interface ProjectContext {
   name: string;
@@ -384,9 +385,25 @@ async function executeTool(
         const command = input.command as string;
         if (!command) return "Error: command is required";
 
-        // S2: Sandbox — reject command chaining/pipe/redirect patterns to prevent injection
-        if (/[|`]|&&|\|\||;|\$\(|\$\{|\n|\r|>|</.test(command)) {
-          return `Error: Command chaining/pipe/redirect not allowed (|, ||, &&, ;, $(), backticks, >, <, newlines). Run commands individually.`;
+        // Length cap: a legitimate single command rarely needs more than
+        // 2KB. Anything longer is almost certainly a packing trick
+        // (base64 payloads, env var expansion chains).
+        if (command.length > 2000) {
+          return `Error: Command exceeds 2000-character limit.`;
+        }
+
+        // S2 + Phase 9: Sandbox — reject command chaining/pipe/redirect
+        // patterns. The previous regex was bypassable via IFS expansion,
+        // brace expansion, and unicode lookalikes. Add the most common
+        // bypasses and require a printable-ASCII start to make unicode
+        // tricks visible.
+        if (
+          !/^[\x20-\x7e]+$/.test(command) ||
+          /[|`]|\$\(|\$\{|\beval\b|\bsh\b|\bbash\b|\bsource\b|\. \//.test(command) ||
+          /&&|\|\||;|>|</.test(command) ||
+          /\\\s*\n/.test(command)
+        ) {
+          return `Error: Command contains forbidden shell metacharacters or chaining. Allowed: simple commands with arguments, no pipes/redirects/subshells/eval/source.`;
         }
 
         // Cap timeout at server-side maximum (120s)
@@ -448,7 +465,8 @@ async function executeTool(
           agentRole: agent,
           title: task.slice(0, 80),
           ticketId,
-        });
+        }).catch((err) => logger.error({ event: "producer_summary_failed", kind: "subagent_spawned", err: String(err) },
+          "ingestProducerSummary rejected in subagent_spawned"));
 
         // Recursively invoke subagent (don't broadcast events — subagent runs inline within parent session)
         let subResult: InvokeResult;
@@ -470,7 +488,8 @@ async function executeTool(
             agentRole: agent,
             ticketId,
             detail: errorMsg,
-          });
+          }).catch((err) => logger.error({ event: "producer_summary_failed", kind: "subagent_failed", err: String(err) },
+            "ingestProducerSummary rejected in subagent_failed"));
 
           throw err;
         }
@@ -489,7 +508,8 @@ async function executeTool(
           at: new Date().toISOString(),
           agentRole: agent,
           ticketId,
-        });
+        }).catch((err) => logger.error({ event: "producer_summary_failed", kind: "subagent_completed", err: String(err) },
+          "ingestProducerSummary rejected in subagent_completed"));
 
         // Quest Bridge: move ticket to QA and trigger auto-verification
         await moveQuestTicket(ticketId, "qa", agent);
@@ -628,9 +648,16 @@ async function executeTool(
           const manifestPath = path.join(outputDir, "asset-manifest.json");
           let manifestInfo = "";
           const isBatch = !!input.presetsFile;
+          let manifest: Record<string, unknown>[] = [];
           try {
             const raw = await fs.readFile(manifestPath, "utf-8");
-            const manifest: Record<string, unknown>[] = JSON.parse(raw);
+            try {
+              manifest = JSON.parse(raw);
+            } catch (parseErr) {
+              logger.error({ manifestPath, err: String(parseErr), event: "llm_tool_manifest_parse_failed" },
+                "Failed to parse asset manifest in RunAssetPipeline tool — returning empty result");
+              manifest = [];
+            }
             const entries = isBatch ? manifest : manifest.length > 0 ? [manifest[manifest.length - 1]] : [];
 
             if (entries.length > 0) {
@@ -1328,7 +1355,9 @@ export async function invokeAgent(
   }
 
   try {
-    void consumeCreditsForAgent(agentRole, task.slice(0, 80));
+    void consumeCreditsForAgent(agentRole, task.slice(0, 80))
+      .catch((err) => logger.error({ event: "consume_credits_failed", agentRole, err: String(err) },
+        "consumeCreditsForAgent rejected — credits not deducted but agent invocation continues"));
 
     // Load agent's system prompt and model tier from MD file
     const [rawSystemPrompt, prompts] = await Promise.all([

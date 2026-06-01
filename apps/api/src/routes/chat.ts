@@ -278,6 +278,32 @@ export { chatStoreReady };
 /** Per-session lock to prevent concurrent agent responses for the same session */
 const sessionsResponding = new Set<string>();
 
+/**
+ * Per-session AbortController for the in-flight LLM call. Registered when the
+ * LLM fetch starts and unregistered when it settles, so external events
+ * (project delete, broadcast) can cancel the call without depending on the
+ * HTTP request lifetime. The registry is the only place outside the request
+ * handler that can reach into an ongoing LLM call.
+ */
+const sessionAbortControllers = new Map<string, AbortController>();
+
+/** Abort the in-flight LLM for every session tied to a project. Called
+ *  from `dashboard.deleteProject` BEFORE orphaning so an orphan session
+ *  can't continue to write to a project that's about to be gone. */
+export function cancelSessionsForProject(projectId: string): number {
+  let cancelled = 0;
+  for (const [sessionId, session] of Object.entries(chatStore.sessions)) {
+    if (session.projectId === projectId) {
+      const controller = sessionAbortControllers.get(sessionId);
+      if (controller && !controller.signal.aborted) {
+        controller.abort();
+        cancelled++;
+      }
+    }
+  }
+  return cancelled;
+}
+
 async function saveChatState(): Promise<void> {
   await writeData(CHAT_STATE_FILE, chatStore);
 }
@@ -1257,8 +1283,14 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
     // this, an orphaned client can keep an LLM request running for the full
     // fetch timeout (60s+) and burn tokens the user already gave up on.
     // The signal is also passed to continueConversation → callLLMWithTools
-    // so the fetch itself sees the abort.
+    // so the fetch itself sees the abort. The controller is also registered
+    // in the module-level `sessionAbortControllers` map so external events
+    // (project delete, broadcast) can cancel the call without depending on
+    // the HTTP request lifetime.
     const clientAbort = new AbortController();
+    // Attach the close listener BEFORE registering in the abort map so
+    // a client disconnect that races with the assignment is still
+    // caught by the listener and not silently dropped.
     req.on("close", () => {
       if (!clientAbort.signal.aborted) {
         logger.info({ sessionId: id, event: "chat_client_disconnected" },
@@ -1266,6 +1298,7 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
         clientAbort.abort();
       }
     });
+    sessionAbortControllers.set(id, clientAbort);
 
     // Call the LLM with progress callback
     const projectContext = await getProjectContextForSession(session);
@@ -1406,6 +1439,7 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
 
     await saveChatState();
     sessionsResponding.delete(id);
+    sessionAbortControllers.delete(id);
     res.status(201).json({ success: true, data: { userMessage, assistantMessage } });
   } catch (err: unknown) {
     const error = err as Error;
@@ -1413,6 +1447,7 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
     // R1: Clear heartbeat on error to prevent permanent timer leak
     clearInterval(heartbeat);
     sessionsResponding.delete(id);
+    sessionAbortControllers.delete(id);
 
     // Remove the progress placeholder before adding the error message
     const progressIndex = session.messages.findIndex((m) => m.id === progressMsgId);

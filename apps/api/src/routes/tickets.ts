@@ -1,7 +1,7 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
 import { broadcastEvent } from "../services/data-store.js";
-import { DEFAULT_TICKETS_BOARD, readTicketsBoard, writeTicketsBoard } from "../services/ticket-board.js";
+import { DEFAULT_TICKETS_BOARD, readTicketsBoard, writeTicketsBoard, updateTicketsBoard } from "../services/ticket-board.js";
 import { triggerVerification } from "../services/verification-service.js";
 import type {
   TicketsBoard,
@@ -173,68 +173,81 @@ ticketsRouter.patch("/:id/move", async (req: Request, res: Response) => {
     return;
   }
 
-  try {
-    const data = await readTicketsBoard(projectId);
+  // C9: route the read-modify-write through updateTicketsBoard so the
+  // per-file mutex held by updateData serializes concurrent PATCH /tickets
+  // calls. The previous code used readTicketsBoard + writeTicketsBoard
+  // (lock-free) so two concurrent moves on the same board could clobber
+  // each other — last writer wins, with potentially lost intermediate
+  // moves.
+  let notFound = false;
+  let invalidStatus = false;
+  let fromColumnId: string | null = null;
+  let updatedTicket: Ticket | null = null;
 
-    // Find the ticket
+  await updateTicketsBoard(projectId, (board) => {
     let ticket: Ticket | undefined;
-    let fromColumn: number = -1;
-    let ticketIndex: number = -1;
+    let fromColumn = -1;
+    let ticketIndex = -1;
 
-    for (let i = 0; i < data.columns.length; i++) {
-      const idx = data.columns[i].tickets.findIndex((t) => t.id === id);
+    for (let i = 0; i < board.columns.length; i++) {
+      const idx = board.columns[i].tickets.findIndex((t) => t.id === id);
       if (idx !== -1) {
-        ticket = data.columns[i].tickets[idx];
+        ticket = board.columns[i].tickets[idx];
         fromColumn = i;
         ticketIndex = idx;
         break;
       }
     }
 
-    if (!ticket) {
-      res.status(404).json({ success: false, error: "Ticket not found" });
-      return;
-    }
+    if (!ticket) { notFound = true; return board; }
 
-    const toColumnIndex = data.columns.findIndex((col) => col.id === status);
-    if (toColumnIndex === -1) {
-      res.status(400).json({ success: false, error: "Invalid status" });
-      return;
-    }
+    const toColumnIndex = board.columns.findIndex((col) => col.id === status);
+    if (toColumnIndex === -1) { invalidStatus = true; return board; }
 
-    const fromColumnId = data.columns[fromColumn].id;
+    fromColumnId = board.columns[fromColumn].id;
+    board.columns[fromColumn].tickets.splice(ticketIndex, 1);
 
-    // Remove from old column
-    data.columns[fromColumn].tickets.splice(ticketIndex, 1);
-
-    // Update status and add to new column
-    const updatedTicket: Ticket = {
+    const next: Ticket = {
       ...ticket,
       projectId: ticket.projectId ?? projectId ?? undefined,
       status,
       updatedAt: new Date().toISOString(),
     };
+    board.columns[toColumnIndex].tickets.push(next);
+    updatedTicket = next;
+    return board;
+  });
 
-    data.columns[toColumnIndex].tickets.push(updatedTicket);
-    await writeTicketsBoard(data, projectId);
-
-    // Broadcast event
-    broadcastEvent({
-      type: "ticket:moved",
-      ticket: updatedTicket,
-      fromColumn: fromColumnId,
-      toColumn: status,
-      projectId,
-    } as WSEvent);
-
-    if (status === "qa") {
-      triggerVerification(updatedTicket, updatedTicket.description || updatedTicket.title);
-    }
-
-    res.json({ success: true, data: updatedTicket });
-  } catch (error) {
-    res.status(500).json({ success: false, error: "Failed to move ticket" });
+  if (notFound) {
+    res.status(404).json({ success: false, error: "Ticket not found" });
+    return;
   }
+  if (invalidStatus) {
+    res.status(400).json({ success: false, error: "Invalid status" });
+    return;
+  }
+  if (!updatedTicket) {
+    res.status(500).json({ success: false, error: "Failed to move ticket" });
+    return;
+  }
+  // TS can't narrow through the closure that assigns `updatedTicket`, so we
+  // capture a non-null local here. The check above guarantees it's set.
+  const moved: Ticket = updatedTicket;
+
+  // Broadcast event
+  broadcastEvent({
+    type: "ticket:moved",
+    ticket: moved,
+    fromColumn: fromColumnId ?? moved.status,
+    toColumn: status,
+    projectId,
+  } as WSEvent);
+
+  if (status === "qa") {
+    triggerVerification(moved, moved.description || moved.title);
+  }
+
+  res.json({ success: true, data: moved });
 });
 
 // DELETE /api/tickets/:id - Delete ticket

@@ -7,8 +7,18 @@ import type { WSEvent } from "@game-studio/types";
 
 export const gatesRouter: Router = Router();
 
-// Track gate verdicts in memory (could be persisted)
+// Track gate verdicts in memory. Pruned lazily on read so entries don't
+// accumulate forever for sessions that finish all their gates and never
+// come back. A verdict older than the TTL is considered stale.
+const GATE_VERDICT_TTL_MS = 24 * 60 * 60 * 1000; // 24h
 const gateVerdicts: Map<string, { verdict: string; details: string; timestamp: string }> = new Map();
+
+function pruneGateVerdicts(): void {
+  const cutoff = Date.now() - GATE_VERDICT_TTL_MS;
+  for (const [key, v] of gateVerdicts) {
+    if (Date.parse(v.timestamp) < cutoff) gateVerdicts.delete(key);
+  }
+}
 
 // GET /gates — list all gate statuses
 gatesRouter.get("/", async (req: Request, res: Response) => {
@@ -74,8 +84,9 @@ gatesRouter.post("/:gateId/run", async (req: Request, res: Response) => {
 
     const result = await executeGate(gateId, effectiveSessionId, gateContext);
 
-    // Store verdict
+    // Store verdict (after pruning old entries to keep the map bounded)
     const gateKey = `${effectiveSessionId}:${gateId}`;
+    pruneGateVerdicts();
     gateVerdicts.set(gateKey, {
       verdict: result.verdict,
       details: result.details.slice(0, 500),

@@ -251,8 +251,16 @@ async function gracefulShutdown(signal: string) {
   // 3. Kill MCP child processes
   try { await shutdownAllMCPServices(); } catch { /* best effort */ }
 
-  // 4. Clear rate limiter timer
+  // 4. Clear rate limiter + workflow cleanup + WS heartbeat timers
   clearInterval(rateCleanupInterval);
+  try {
+    const { workflowCleanupInterval } = await import("./services/quest-bridge.js");
+    clearInterval(workflowCleanupInterval);
+  } catch { /* best effort */ }
+  try {
+    const { heartbeatInterval } = await import("./services/websocket.js");
+    clearInterval(heartbeatInterval);
+  } catch { /* best effort */ }
 
   wss.close(() => {
     server.close(() => {

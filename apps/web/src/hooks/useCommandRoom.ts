@@ -941,7 +941,7 @@ export function useCommandRoom() {
           const cachedMap = deserializeFromCache(cachedForMerge.sessions);
           for (const [id, backendSession] of sessionMap) {
             const cachedSession = cachedMap.get(id);
-            if (cachedSession && backendSession.status !== "done" && backendSession.status !== "completed") {
+            if (cachedSession && backendSession.status !== "completed") {
               const mergedMessages = mergeCachedMessagesIntoBackendSession(
                 backendSession.messages,
                 cachedSession.messages

@@ -4,7 +4,7 @@
 
 import { existsSync, mkdirSync } from "fs";
 import { join } from "path";
-import { execSync } from "child_process";
+import { execFileSync } from "child_process";
 import { readData, writeData, broadcastEvent } from "./data-store.js";
 import { generateProjectChangelog } from "./changelog-service.js";
 import { resolveProjectWorkspace } from "../utils/workspace.js";
@@ -96,8 +96,19 @@ export async function executeGodotExport(
   const godotBin = process.env.GODOT_BIN ?? join(process.env.HOME ?? "", ".local/bin/godot_bin/Godot");
 
   try {
-    const cmd = `${pythonBin} "${join(scriptDir, "run_godot_headless.py")}" --project "${projectPath}" --command export --godot-bin "${godotBin}" --export-preset "${exportPreset}" --export-output "${artifactAbs}" --timeout 180`;
-    execSync(cmd, { timeout: 240_000 });
+    // execFileSync (no shell) so a projectPath or exportPreset containing
+    // shell metacharacters can't escalate into a shell pipeline. Each arg
+    // is a single argv element to Python, parsed exactly as written.
+    const args = [
+      join(scriptDir, "run_godot_headless.py"),
+      "--project", projectPath,
+      "--command", "export",
+      "--godot-bin", godotBin,
+      "--export-preset", exportPreset,
+      "--export-output", artifactAbs,
+      "--timeout", "180",
+    ];
+    execFileSync(pythonBin, args, { timeout: 240_000 });
     build.status = "success";
     build.artifactPath = join("builds", artifactName);
     build.smokeTestPassed = existsSync(artifactAbs);

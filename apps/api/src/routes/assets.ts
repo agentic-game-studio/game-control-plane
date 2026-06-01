@@ -6,7 +6,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import { watch } from "node:fs";
-import { readData, writeData, broadcastEvent } from "../services/data-store.js";
+import { readData, writeData, updateData, broadcastEvent } from "../services/data-store.js";
 import { logger } from "../utils/logger.js";
 import { resolveProjectWorkspace } from "../utils/workspace.js";
 import type {
@@ -217,7 +217,10 @@ async function scanAssetsDir(
   return results;
 }
 
-/** Active fs.watch watchers keyed by projectId */
+/** Active fs.watch watchers keyed by projectId. Capped via LRU eviction so a
+ *  long-running API process that creates and deletes many projects doesn't
+ *  leak watcher handles (and the OS file descriptors behind them). */
+const ASSET_WATCHER_LIMIT = 32;
 const assetWatchers = new Map<string, ReturnType<typeof watch>>();
 
 /** Stop watching a project's assets directory */
@@ -233,6 +236,13 @@ export function unwatchProjectAssets(projectId: string): void {
 /** Start watching a project's assets directory for changes */
 function watchProjectAssets(projectId: string, assetsDir: string): void {
   if (assetWatchers.has(projectId)) return; // Already watching
+
+  // LRU: if we're at the cap, evict the oldest entry. Map iteration is
+  // insertion order, so the first key is the least-recently-inserted.
+  if (assetWatchers.size >= ASSET_WATCHER_LIMIT) {
+    const oldest = assetWatchers.keys().next().value;
+    if (oldest) unwatchProjectAssets(oldest);
+  }
 
   try {
     const watcher = watch(assetsDir, { recursive: true }, (eventType, filename) => {
@@ -431,9 +441,7 @@ assetsRouter.post("/", async (req: Request, res: Response) => {
   }
 
   try {
-    const data = await readData<AssetsData>("assets.json");
     const now = new Date().toISOString();
-
     const newAsset: GameAsset = {
       id: `asset-${Date.now()}`,
       filename: body.filename,
@@ -445,8 +453,14 @@ assetsRouter.post("/", async (req: Request, res: Response) => {
       updatedAt: now,
     };
 
-    data.assets.push(newAsset);
-    await writeData("assets.json", data);
+    // Route the read-modify-write through updateData so the per-file mutex
+    // serializes concurrent POST /api/assets calls. Without this, two
+    // simultaneous creations can read the same array, both append, and the
+    // second write clobbers the first (one asset disappears).
+    const data = await updateData<AssetsData>("assets.json", (d) => {
+      d.assets.push(newAsset);
+      return d;
+    });
 
     broadcastEvent({
       type: "asset:created",
@@ -465,50 +479,56 @@ assetsRouter.patch("/:id", async (req: Request, res: Response) => {
   const updates = req.body as UpdateAssetRequest;
 
   try {
-    const data = await readData<AssetsData>("assets.json");
-    const assetIndex = data.assets.findIndex((a) => a.id === id);
+    // Capture whether the asset existed before the lock so the response
+    // matches the read-compute-write semantics. updateData's lock prevents
+    // two concurrent PATCHes from clobbering each other.
+    let isNew = false;
+    let updatedAsset: GameAsset | null = null;
 
-    if (assetIndex === -1) {
-      // If not in overlay, we need to add it so the metadata persists
-      const now = new Date().toISOString();
-      const newAsset: GameAsset = {
-        id: String(id),
-        filename: updates.filename ?? "unknown",
-        type: updates.type ?? "texture",
-        category: updates.category ?? "prop",
-        sizeBytes: updates.sizeBytes ?? 0,
-        tags: updates.tags ?? [],
-        createdAt: now,
-        updatedAt: now,
+    const data = await updateData<AssetsData>("assets.json", (d) => {
+      const assetIndex = d.assets.findIndex((a) => a.id === id);
+      if (assetIndex === -1) {
+        const now = new Date().toISOString();
+        const newAsset: GameAsset = {
+          id: String(id),
+          filename: updates.filename ?? "unknown",
+          type: updates.type ?? "texture",
+          category: updates.category ?? "prop",
+          sizeBytes: updates.sizeBytes ?? 0,
+          tags: updates.tags ?? [],
+          createdAt: now,
+          updatedAt: now,
+          ...updates,
+        };
+        d.assets.push(newAsset);
+        isNew = true;
+        updatedAsset = newAsset;
+        return d;
+      }
+      const assetId = String(id);
+      const next: GameAsset = {
+        ...d.assets[assetIndex],
         ...updates,
+        id: assetId,
+        updatedAt: new Date().toISOString(),
       };
-      data.assets.push(newAsset);
-      await writeData("assets.json", data);
-      broadcastEvent({
-        type: "asset:updated",
-        asset: newAsset,
-      } as WSEvent);
-      res.json({ success: true, data: newAsset });
+      d.assets[assetIndex] = next;
+      updatedAsset = next;
+      return d;
+    });
+
+    if (!updatedAsset) {
+      res.status(500).json({ success: false, error: "Failed to update asset" });
       return;
     }
-
-    const assetId = String(id);
-    const updatedAsset: GameAsset = {
-      ...data.assets[assetIndex],
-      ...updates,
-      id: assetId,
-      updatedAt: new Date().toISOString(),
-    };
-
-    data.assets[assetIndex] = updatedAsset;
-    await writeData("assets.json", data);
+    void data; // lock released; reference preserved for any future reads
 
     broadcastEvent({
       type: "asset:updated",
       asset: updatedAsset,
     } as WSEvent);
 
-    res.json({ success: true, data: updatedAsset });
+    res.status(isNew ? 201 : 200).json({ success: true, data: updatedAsset });
   } catch (error) {
     res.status(500).json({ success: false, error: "Failed to update asset" });
   }
@@ -519,21 +539,31 @@ assetsRouter.delete("/:id", async (req: Request, res: Response) => {
   const { id } = req.params;
 
   try {
-    const data = await readData<AssetsData>("assets.json");
-    const assetIndex = data.assets.findIndex((a) => a.id === id);
+    // Snapshot the file-path-to-delete before mutating the list, then
+    // perform the splice under updateData's lock so two concurrent
+    // DELETEs on the same id can't double-unlink.
+    let assetPath: string | null = null;
+    let found = false;
+    await updateData<AssetsData>("assets.json", (data) => {
+      const assetIndex = data.assets.findIndex((a) => a.id === id);
+      if (assetIndex === -1) return data;
+      assetPath = data.assets[assetIndex].path ?? null;
+      data.assets.splice(assetIndex, 1);
+      found = true;
+      return data;
+    });
 
-    if (assetIndex === -1) {
+    if (!found) {
       res.status(404).json({ success: false, error: "Asset not found" });
       return;
     }
 
-    // Optionally delete the actual file too
-    const asset = data.assets[assetIndex];
-    if (asset.path) {
+    // File deletion is best-effort; the metadata is already removed.
+    if (assetPath) {
       try {
         const config = loadConfig();
         const workspaceDir = path.resolve(config.WORKSPACE_DIR);
-        const filePath = path.join(workspaceDir, asset.path);
+        const filePath = path.join(workspaceDir, assetPath);
         const workspacePrefix = workspaceDir.endsWith("/") ? workspaceDir : workspaceDir + "/";
         if (
           (filePath.startsWith(workspacePrefix) || filePath === workspaceDir) &&
@@ -545,9 +575,6 @@ assetsRouter.delete("/:id", async (req: Request, res: Response) => {
         // File may not exist; continue
       }
     }
-
-    data.assets.splice(assetIndex, 1);
-    await writeData("assets.json", data);
 
     broadcastEvent({
       type: "asset:deleted",
@@ -598,9 +625,19 @@ assetsRouter.post("/generate", async (req: Request, res: Response) => {
 
       const manifestPath = path.join(projectAssetsDir, "asset-manifest.json");
       let generated: GameAsset[] = [];
+      let manifest: Record<string, unknown>[] = [];
       try {
         const raw = await fs.readFile(manifestPath, "utf-8");
-        const manifest: Record<string, unknown>[] = JSON.parse(raw);
+        try {
+          manifest = JSON.parse(raw);
+        } catch (parseErr) {
+          // Manifest is malformed — treat as empty rather than crashing the
+          // whole generation request. The Python pipeline already wrote it,
+          // so log the parse failure for diagnostics but continue.
+          logger.error({ manifestPath, err: String(parseErr), event: "asset_manifest_parse_failed" },
+            "Failed to parse asset manifest — treating as empty");
+          manifest = [];
+        }
 
         const data = await readData<AssetsData>("assets.json");
         const existingIds = new Set(data.assets.map((a) => a.id));
@@ -684,7 +721,13 @@ assetsRouter.post("/generate", async (req: Request, res: Response) => {
     let generatedAsset: GameAsset | null = null;
     try {
       const raw = await fs.readFile(manifestPath, "utf-8");
-      const manifest: Record<string, unknown>[] = JSON.parse(raw);
+      let manifest: Record<string, unknown>[] = [];
+      try {
+        manifest = JSON.parse(raw);
+      } catch (parseErr) {
+        logger.error({ manifestPath, err: String(parseErr), event: "asset_manifest_parse_failed_single" },
+          "Failed to parse asset manifest (single mode) — no asset will be registered");
+      }
       const last = manifest[manifest.length - 1];
       if (last) {
         const data = await readData<AssetsData>("assets.json");
@@ -743,16 +786,16 @@ assetsRouter.patch("/art-bible", async (req: Request, res: Response) => {
   const updates = req.body as Partial<ArtBibleConfig>;
 
   try {
-    const data = await readData<AssetsData>("assets.json");
-    const updatedArtBible: ArtBibleConfig = {
-      ...data.artBible,
-      ...updates,
-    };
+    // Read-modify-write under updateData's lock so concurrent PATCHes
+    // don't lose updates to the art-bible object.
+    let updatedArtBible: ArtBibleConfig | null = null;
+    await updateData<AssetsData>("assets.json", (data) => {
+      updatedArtBible = { ...data.artBible, ...updates };
+      data.artBible = updatedArtBible;
+      return data;
+    });
 
-    data.artBible = updatedArtBible;
-    await writeData("assets.json", data);
-
-    res.json({ success: true, data: { artBible: updatedArtBible } });
+    res.json({ success: true, data: { artBible: updatedArtBible ?? updates as ArtBibleConfig } });
   } catch (error) {
     res.status(500).json({ success: false, error: "Failed to update art bible" });
   }

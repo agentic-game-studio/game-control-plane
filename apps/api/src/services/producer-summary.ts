@@ -180,6 +180,18 @@ function scheduleEmit(projectId: string, delayMs: number): void {
   pendingEmitTimers.set(projectId, t);
 }
 
+/** Cancel any pending emit for a project. Called from project-delete
+ *  paths so a deleted project can't fire an emit against a torn-down
+ *  state — the callback would import chat.js and broadcast to a dead
+ *  project. */
+export function clearProjectProducerSummary(projectId: string): void {
+  const t = pendingEmitTimers.get(projectId);
+  if (t) {
+    clearTimeout(t);
+    pendingEmitTimers.delete(projectId);
+  }
+}
+
 async function flushEmitProducerUpdate(projectId: string): Promise<void> {
   const mod = await import("../routes/chat.js");
   await mod.chatStoreReady;

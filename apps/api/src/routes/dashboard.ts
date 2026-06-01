@@ -12,7 +12,7 @@ import type {
   Ticket,
 } from "@game-studio/types";
 import type { WSEvent } from "@game-studio/types";
-import { orphanProjectSessions } from "./chat.js";
+import { orphanProjectSessions, cancelSessionsForProject } from "./chat.js";
 import { removeGodotMCPService, installGodotMCPPlugin, isGodotMCPPluginInstalled, isGodotMCPPluginEnabled, launchGodotEditor } from "../services/godot-mcp-service.js";
 import { dropProjectStore } from "./documents.js";
 import { unwatchProjectAssets } from "./assets.js";
@@ -560,6 +560,17 @@ dashboardRouter.delete("/projects/:id", async (req: Request, res: Response) => {
     data.projects.splice(projectIndex, 1);
     await writeData("dashboard.json", data);
 
+    // Cancel any in-flight LLM calls for sessions of this project BEFORE
+    // orphaning them. Without this, a running LLM call would continue to
+    // write progress messages and tool results to a project that's about
+    // to be gone, leaking tokens and creating race conditions on the
+    // just-orphaned sessions.
+    const cancelled = cancelSessionsForProject(String(id));
+    if (cancelled > 0) {
+      logger.info({ projectId: id, cancelled, event: "project_delete_cancel_llm" },
+        `Cancelled ${cancelled} in-flight LLM call(s) for project`);
+    }
+
     // Orphan any chat sessions tied to this project (history is preserved
     // but the sessions become hidden from the project-scoped UI).
     await orphanProjectSessions(String(id));
@@ -575,6 +586,14 @@ dashboardRouter.delete("/projects/:id", async (req: Request, res: Response) => {
     // Drop the per-project assets fs.watch handle. Same reasoning as
     // dropProjectStore — the watcher entry is otherwise never cleaned up.
     unwatchProjectAssets(String(id));
+
+    // Cancel any pending producer-summary emit timer for this project.
+    // The emit callback imports chat.js and broadcasts to a project id
+    // that's about to be gone — better to drop it now.
+    try {
+      const { clearProjectProducerSummary } = await import("../services/producer-summary.js");
+      clearProjectProducerSummary(String(id));
+    } catch { /* best effort */ }
 
     // Clean up associated data files (tickets board, autonomous loop state)
     const ticketsFile = getTicketsBoardFile(String(id));

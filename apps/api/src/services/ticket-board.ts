@@ -59,7 +59,7 @@ export async function writeTicketsBoard(board: TicketsBoard, projectId?: string 
  * when autonomous loop and quest bridge modify the board concurrently.
  */
 export async function updateTicketsBoard(
-  projectId: string,
+  projectId: string | null,
   updater: (board: TicketsBoard) => TicketsBoard | void
 ): Promise<TicketsBoard> {
   const filename = getTicketsBoardFile(projectId);

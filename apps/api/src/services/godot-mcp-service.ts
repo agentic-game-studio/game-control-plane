@@ -312,7 +312,9 @@ export class GodotMCPService {
       this.pendingRequests.set(id, {
         resolve: (val) => { clearTimeout(timer); resolve(val); },
         reject: (err) => { clearTimeout(timer); reject(err); },
-        timeout: setTimeout(() => {}, 0), // unused, satisfies the type
+        // Store the real timer so the centralized timeout-clear path
+        // (when a response arrives) clears the right handle.
+        timeout: timer,
       });
       const initRequest = {
         jsonrpc: "2.0" as const,
@@ -554,7 +556,10 @@ export class GodotMCPService {
       proc.kill("SIGTERM");
       this.process = null;
 
-      // Force kill if SIGTERM didn't work within 5s
+      // Force kill if SIGTERM didn't work within 5s. Track the handle on
+      // the proc so the process-exit path can clearTimeout it — otherwise
+      // a process that dies within 5s of SIGTERM leaves a phantom timer
+      // whose callback fires and tries to kill a PID that's been reused.
       const forceKillTimer = setTimeout(() => {
         try {
           if (proc.pid) {
@@ -564,6 +569,11 @@ export class GodotMCPService {
         } catch { /* already dead */ }
       }, 5000);
       forceKillTimer.unref();
+      (proc as { _forceKillTimer?: ReturnType<typeof setTimeout> })._forceKillTimer = forceKillTimer;
+      proc.once("exit", () => {
+        const t = (proc as { _forceKillTimer?: ReturnType<typeof setTimeout> })._forceKillTimer;
+        if (t) clearTimeout(t);
+      });
     }
 
     this.isRunning = false;

@@ -3,7 +3,7 @@
  * boot check → GUT → smoke playtest
  */
 
-import { execSync } from "child_process";
+import { execFileSync } from "child_process";
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from "fs";
 import { join } from "path";
 import { loadConfig } from "../config.js";
@@ -37,18 +37,21 @@ function runGodotHeadlessCommand(
   const pythonBin = process.env.PIPELINE_PYTHON ?? "python3";
   const godotBin = process.env.GODOT_BIN ?? join(process.env.HOME ?? "", ".local/bin/godot_bin/Godot");
 
-  const cmd = [
-    pythonBin,
-    `"${join(scriptDir, "run_godot_headless.py")}"`,
-    `--project "${projectPath}"`,
-    `--command ${command}`,
-    `--godot-bin "${godotBin}"`,
-    `--timeout ${Math.min(timeoutSec, 120)}`,
+  // Use execFileSync (no shell) to avoid command injection via projectPath
+  // or any of the other string inputs. A malicious projectPath like
+  // `foo"; rm -rf /; "bar` would have been split into a shell pipeline;
+  // now it's a single argv element that Python receives literally.
+  const args = [
+    join(scriptDir, "run_godot_headless.py"),
+    `--project`, projectPath,
+    `--command`, command,
+    `--godot-bin`, godotBin,
+    `--timeout`, String(Math.min(timeoutSec, 120)),
     ...extraArgs,
-  ].join(" ");
+  ];
 
   try {
-    const result = execSync(cmd, { timeout: (timeoutSec + 30) * 1000 });
+    const result = execFileSync(pythonBin, args, { timeout: (timeoutSec + 30) * 1000 });
     const stdout = result?.toString() ?? "";
     try {
       const parsed = JSON.parse(stdout.trim()) as { success: boolean; returnCode: number; stdout?: string; stderr?: string };

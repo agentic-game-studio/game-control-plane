@@ -706,8 +706,15 @@ def main():
             if entry["id"] not in existing_ids:
                 existing.append(entry)
 
-        with open(manifest_path, "w") as f:
+        # C10: write atomically (tmp + rename) so a kill -9 / power loss
+        # mid-write can't leave a half-written manifest. os.replace is
+        # atomic on POSIX and Windows (Python 3.3+).
+        tmp_manifest = manifest_path.with_suffix(manifest_path.suffix + ".tmp")
+        with open(tmp_manifest, "w") as f:
             json.dump(existing, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_manifest, manifest_path)
         print(f"Manifest updated: {manifest_path} ({len(existing)} total assets)")
 
     # Summary

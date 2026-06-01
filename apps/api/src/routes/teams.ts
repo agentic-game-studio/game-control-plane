@@ -15,8 +15,20 @@ import type { DashboardData } from "@game-studio/types";
 
 export const teamsRouter: Router = Router();
 
-// In-memory session history for team workflows
+// In-memory session history for team workflows. Sweep on access to keep
+// entries bounded — long-running API processes running many team workflows
+// would otherwise accumulate entries for completed sessions forever.
+const TEAM_SESSION_TTL_MS = 60 * 60 * 1000; // 1 hour
 const teamSessions: Map<string, { messages: LLMMessage[]; startedAt: string }> = new Map();
+
+function pruneTeamSessions(): void {
+  const cutoff = Date.now() - TEAM_SESSION_TTL_MS;
+  for (const [id, session] of teamSessions) {
+    if (Date.parse(session.startedAt) < cutoff) {
+      teamSessions.delete(id);
+    }
+  }
+}
 
 /**
  * Get team skill by name
@@ -81,7 +93,9 @@ teamsRouter.post("/:team/run", async (req: Request, res: Response) => {
     return;
   }
 
-  // Initialize team session
+  // Initialize team session. Prune before write so the map doesn't grow
+  // unbounded across many run() calls.
+  pruneTeamSessions();
   const teamSession: { messages: LLMMessage[]; startedAt: string } = {
     messages: [],
     startedAt: new Date().toISOString(),

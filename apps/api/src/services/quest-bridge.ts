@@ -24,15 +24,18 @@ interface WorkflowState {
 const activeWorkflows = new Map<string, WorkflowState>();
 const WORKFLOW_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
-// Periodic cleanup of stale workflows
-setInterval(() => {
+// Periodic cleanup of stale workflows. Handle is exported so the graceful
+// shutdown path in index.ts can clearInterval it; without that, the interval
+// keeps running on a torn-down module graph until the process exits.
+export const workflowCleanupInterval = setInterval(() => {
   const now = Date.now();
   for (const [sessionId, wf] of activeWorkflows) {
     if (now - wf.createdAt > WORKFLOW_TTL_MS) {
       activeWorkflows.delete(sessionId);
     }
   }
-}, 60 * 60 * 1000).unref(); // run hourly, don't keep process alive
+}, 60 * 60 * 1000);
+workflowCleanupInterval.unref(); // don't keep process alive on its own
 
 export function startWorkflow(sessionId: string): string {
   // Guard against concurrent startWorkflow calls for the same session: the
@@ -92,10 +95,12 @@ export function advanceStage(sessionId: string, stage: WorkflowStage, ticketId?:
     ticketId,
     agentRole,
     sessionId,
-  });
+  }).catch((err) => logger.warn({ sessionId, err: String(err), event: "producer_summary_workflow_stage_failed" },
+    "ingestProducerSummary rejected in workflow_stage"));
 
   if (stage === "verify") {
-    void triggerWorkflowVerification(sessionId, wf);
+    void triggerWorkflowVerification(sessionId, wf).catch((err) => logger.warn({ sessionId, err: String(err), event: "workflow_verify_failed" },
+      "triggerWorkflowVerification rejected"));
   }
 }
 
@@ -142,7 +147,8 @@ export function completeWorkflow(sessionId: string, success: boolean): void {
     at: new Date().toISOString(),
     detail: String(success),
     sessionId,
-  });
+  }).catch((err) => logger.warn({ sessionId, err: String(err), event: "producer_summary_workflow_complete_failed" },
+    "ingestProducerSummary rejected in workflow_complete"));
 }
 
 export function cleanupWorkflow(sessionId: string): void {
@@ -235,14 +241,23 @@ export async function createQuestTicket(
       ticketId: ticket.id,
       agentRole: agentRole as string,
       sessionId,
-    });
+    }).catch((err) => logger.warn({ projectId: resolvedProjectId, err: String(err), event: "producer_summary_ticket_created_failed" },
+      "ingestProducerSummaryFact rejected in ticket_created"));
   }
 
   return ticket;
 }
 
-export async function moveQuestTicket(ticketId: string, status: TicketStatus, assignee?: string): Promise<void> {
-  const projectId = await resolveProjectIdForTicket(ticketId);
+export async function moveQuestTicket(
+  ticketId: string,
+  status: TicketStatus,
+  assignee?: string,
+  // C8: callers that already know the projectId can pass it in to skip the
+  // N-project resolver (which still reads every board file). Verification
+  // service has the ticket object; chat/teams route can look it up once.
+  knownProjectId?: string | null,
+): Promise<void> {
+  const projectId = knownProjectId ?? await resolveProjectIdForTicket(ticketId);
 
   // Capture the source column id *before* the mutation runs so the broadcast
   // event can carry the actual fromColumn. Without this snapshot, the
@@ -295,7 +310,8 @@ export async function moveQuestTicket(ticketId: string, status: TicketStatus, as
     fromColumn: fromColumnId ?? ticket.status,
     toColumn: status,
     agentRole: ticket.assignee,
-  });
+  }).catch((err) => logger.warn({ projectId, err: String(err), event: "producer_summary_ticket_moved_failed" },
+    "ingestProducerSummaryFact rejected in ticket_moved"));
 
   if (status === "qa") {
     triggerVerification(ticket, ticket.description || ticket.title);
@@ -330,10 +346,14 @@ async function resolveProjectIdForTicket(ticketId: string): Promise<string | nul
 
   try {
     const dashboard = await readData<DashboardData>("dashboard.json");
-    for (const project of dashboard.projects) {
-      const board = await getBoard(project.id);
-      const found = findTicketInBoard(board, ticketId);
-      if (found) return project.id;
+    if (!dashboard.projects.length) return null;
+    // C8: scan all per-project boards in parallel instead of one-at-a-time
+    // (was N+1 sequential disk reads — quadratic as the project list grows).
+    const boards = await Promise.all(
+      dashboard.projects.map((p) => getBoard(p.id).then((board) => ({ projectId: p.id, board })))
+    );
+    for (const { projectId, board } of boards) {
+      if (findTicketInBoard(board, ticketId)) return projectId;
     }
   } catch {
     // Ignore scan failures and fall back to null.

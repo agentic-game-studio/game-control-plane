@@ -344,7 +344,13 @@ export class DocumentStore {
       });
       // Handle watcher errors (ENOSPC, permission issues, etc.)
       this.watcher.on("error", () => {
-        // Silently stop watching on error (e.g., ENOSPC — no inotify watches available)
+        // Silently stop watching on error (e.g., ENOSPC — no inotify watches available).
+        // Also clear any pending debounce so the callback can't run against a
+        // closed watcher (it would access this.watcher via this.invalidateCache).
+        if (this.debounceTimer) {
+          clearTimeout(this.debounceTimer);
+          this.debounceTimer = null;
+        }
         this.watcher = null;
       });
     } catch {
