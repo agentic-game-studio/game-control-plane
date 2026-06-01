@@ -99,6 +99,76 @@ regex, and a timing-attackable WebSocket auth were publicly reachable.
 
 ---
 
+## Phase 7 — Second-Pass Hardening
+
+A follow-up audit uncovered additional bugs that landed in the first
+6-phase pass plus new medium-severity issues. This phase cleans those up.
+
+### Phase 7.1 — Critical bug fixes
+
+| # | File | Change |
+|---|---|---|
+| 7.1.1 | `apps/api/src/services/verification-service.ts` | Reset `consecutiveFailures=0` and `lastError=undefined` on a successful verify. The dead-letter counter now counts **consecutive** errors, not cumulative. |
+| 7.1.2 | `packages/types/src/gate.ts` | Removed duplicate `"READY"` from the `GateVerdict` union (was on lines 7 and 11). |
+| 7.1.3 | `packages/config/src/schema.ts` | Added `subSkills: z.array(z.string()).optional()` to the phases Zod schema so skill pipelines can declare child pipelines. |
+| 7.1.4 | `packages/agents/src/department-leads.ts` | Fixed 3 delegate lists to match `delegation-map.ts` (added `godot-specialist`, `unity-specialist`, `unreal-specialist`, `code-reviewer` to `lead-programmer`; added `qa-lead` to `release-manager`; populated `localization-lead`). |
+| 7.1.5 | `apps/web/src/app/(studio)/chat/components/ChatThread.tsx` | Hard-coded "19 commands" → "20 commands". |
+| 7.1.6 | `apps/web/src/app/(studio)/dashboard/page.tsx` + `ProjectGrid.tsx` | `launchDemoProject` now disables the button and shows "CREATING…" while in flight, preventing double-click duplicates. |
+
+### Phase 7.2 — Frontend high-severity
+
+| # | File | Change |
+|---|---|---|
+| 7.2.1 | `apps/web/src/hooks/useDashboard.ts` | Error path no longer clobbers `data` with `DEFAULT_DATA`; preserves the previous successful payload so the UI doesn't flash empty state on a transient error. |
+| 7.2.2 | `apps/web/src/hooks/useGodotMCPStatus.ts` | Captures `requestProjectId` at request time so polling for an old project can't overwrite the new project's MCP status. |
+| 7.2.3 | `apps/web/src/components/Modal.tsx` | `role="dialog"`, `aria-modal="true"`, `aria-labelledby`, focus trap, focus restoration on close, `aria-label` on close button. |
+| 7.2.4 | `apps/web/src/app/(studio)/chat/components/CommandInput.tsx` | Image paste now uses `File` objects + `URL.createObjectURL` previews; converts to base64 only at send time; revokes object URLs on unmount; caps at 4 images and 1MB each. |
+| 7.2.5 | `apps/web/src/hooks/useCommandRoom.ts` | Refs (`queueDrainTimerRef`, `cacheSaveTimerRef`, `currentProjectIdRef`, `threadIdRef`, `threadTitleRef`) replace stale-closure-prone `setTimeout` / `localStorage` writes; unmount cleanup for both timers; localStorage save is now debounced (was sync on every WS event). |
+| 7.2.6 | `apps/web/src/hooks/useCommandRoom.ts` | `setAllSessions` updater no longer mutates the React state parameter (`prevSessions`); uses immutable Map updates. |
+| 7.2.7 | `apps/web/src/hooks/useCommandRoom.ts` | `executeCommand` no longer depends on `currentSession` (used a ref instead). |
+
+### Phase 7.3 — Backend high/medium
+
+| # | File | Change |
+|---|---|---|
+| 7.3.1 | `packages/state/src/session-store.ts` | Per-session FIFO mutex (mirrors `data-store.ts` pattern); wraps `addLog` and `createCheckpoint`. `save()` now uses atomic tmp+rename with error cleanup. |
+| 7.3.2 | `apps/api/src/services/quest-bridge.ts` | `moveQuestTicket` captures `fromColumnId` **before** the mutation runs so the broadcast event has the real from-column (was producing self-loops because the post-mutation lookup returned the destination). |
+| 7.3.3 | `apps/api/src/services/document-store.ts` | Wikilink regex now supports `[[link\|alias]]` form (Obsidian-style). Without this, `[[foo\|bar]]` was being slugified to `foobar`. |
+| 7.3.4 | `apps/api/src/routes/settings.ts` | PATCH endpoint deep-merges `credits` (subscription + onTop) so a partial update doesn't clobber sibling fields like `weeklyAllowance` or `resetAt`. Preserves `burnRatePerHour` and any future top-level fields on `CreditPools`. |
+| 7.3.5 | `apps/api/src/routes/dashboard.ts` | `POST /api/dashboard/demo-project` now wraps the read-check-create-write in `updateData` so the check+filesystem-write+push runs under the dashboard.json mutex. Two concurrent judges can no longer race to create duplicate demo projects. |
+| 7.3.6 | `packages/types/src/api.ts` | `InvokeSkillRequest.skillId` is now `SkillName` (was `string`). |
+| 7.3.7 | `packages/types/src/chat.ts` + 4 frontend sites | Removed `"done"` alias from `ChatSessionStatus` (backend only ever set `"completed"`). Updated 4 frontend comparison sites + 1 backend crash-recovery filter. |
+
+### Phase 7.4 — Infra & config
+
+| # | File | Change |
+|---|---|---|
+| 7.4.1 | `Dockerfile.web` | Multi-stage build (`deps` → `build` → `runtime`); `USER node`; `HEALTHCHECK` against Next.js root; `--mount=type=cache` for the pnpm store. |
+| 7.4.2 | `apps/api/src/config.ts` | Added `BODY_LIMIT_MB` (default 5) and `ENABLE_TEST_ENDPOINTS` (default false) to the Zod schema. |
+| 7.4.3 | `apps/api/src/index.ts` | `express.json` body limit now reads from `config.BODY_LIMIT_MB` (was hard-coded `"5mb"`). |
+| 7.4.4 | `DEPLOYMENT.md` | Documented the new `API_TIMEOUT_MS`, `BODY_LIMIT_MB`, `ENABLE_TEST_ENDPOINTS` env vars. |
+
+### Phase 7.5 — Orphan agents experimental flag
+
+| # | File | Change |
+|---|---|---|
+| 7.5.1 | `packages/types/src/agent.ts` | Added `experimental?: boolean` to `AgentDefinition` with explanatory JSDoc. |
+| 7.5.2 | 6 agent def files | Marked 17 orphan agents as `experimental: true`: `code-reviewer`, `game-director`, `godot-csharp-specialist`, `godot-gdextension-specialist`, `prototyper`, `security-engineer`, `tools-programmer`, 5 UE specialists, 5 Unity specialists. |
+
+### Phase 7.6 — Verify & docs
+
+- `pnpm typecheck` — **7/7 tasks pass**.
+- `pnpm generate` — `Agent registry validated: 53 agents OK` / `Skill registry validated: 94 skills OK`.
+- `pnpm build` — clean Next.js build (14 routes) and clean `tsc` for the API.
+
+**Deferred (out of scope for Phase 7):**
+- Native `alert()`/`confirm()` replacement with Radix `AlertDialog` (5 files).
+- MCP-health poll consolidation (3 sites).
+- Asset pipeline white-pixel fallback heuristic.
+- `SubagentDrawer` focus trap.
+
+---
+
 ## Verification Checklist
 
 - `pnpm typecheck` — 7/7 tasks pass.

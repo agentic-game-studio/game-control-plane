@@ -60,5 +60,6 @@ export const leadershipAgents: Partial<Record<AgentRole, AgentDefinition>> = {
     memory: "project",
     reportsTo: [],
     delegates: ["creative-director", "technical-director", "producer"],
+    experimental: true,
   },
 };

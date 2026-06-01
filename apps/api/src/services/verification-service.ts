@@ -160,6 +160,14 @@ export async function verifyTicket(
               ...t.testEvidence,
               llmVerification: { verdict, verifier, at: new Date().toISOString() },
             };
+            if (passed) {
+              // Reset the per-ticket failure counter on a successful verify so
+              // the cap counts *consecutive* errors (as documented at
+              // MAX_VERIFY_FAILURES) rather than cumulative errors across the
+              // ticket's lifetime.
+              t.consecutiveFailures = 0;
+              t.lastError = undefined;
+            }
           }
         }
         return board;

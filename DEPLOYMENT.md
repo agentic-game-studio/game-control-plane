@@ -43,6 +43,9 @@ DEFAULT_MODEL=glm-5.1
 REVIEW_MODE=lean
 MAX_TOOL_CALLS=100
 TOOL_CHECKPOINT_INTERVAL=30
+API_TIMEOUT_MS=120000      # Per-LLM-call timeout (default 120s)
+BODY_LIMIT_MB=50           # Max request body for image paste uploads
+ENABLE_TEST_ENDPOINTS=false # Disable /api/chat/sessions/consultation/test-create in prod
 ```
 
 Railway provides `PORT` automatically; the API also supports `API_PORT` for local/dev.

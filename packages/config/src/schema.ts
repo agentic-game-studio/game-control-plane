@@ -38,6 +38,7 @@ export const skillDefinitionSchema = z.object({
       agents: z.array(z.string()),
       parallel: z.boolean().optional(),
       gates: z.array(z.string()).optional(),
+      subSkills: z.array(z.string()).optional(),
     })
   ),
   model: z.enum(["opus", "sonnet", "haiku"]).optional(),

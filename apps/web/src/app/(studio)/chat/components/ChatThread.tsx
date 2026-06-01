@@ -352,7 +352,7 @@ const WelcomeMessage = memo(function WelcomeMessage({ msg }: { msg: ChatMessage 
             </div>
             <div className="mt-3 pt-2 border-t border-[#e1e1ef]">
               <span className="font-[var(--font-terminal)] text-[10px] text-[#737688]">
-                Type <code className="text-[#0055FF] font-bold">/help</code> to see all {19} commands
+                Type <code className="text-[#0055FF] font-bold">/help</code> to see all {20} commands
               </span>
             </div>
           </div>
@@ -616,7 +616,7 @@ export default function ChatThread({ messages, sessions, threadId, threadTitle, 
     const map = new Map<string, boolean>();
     if (sessions) {
       for (const [key, session] of sessions) {
-        map.set(key, session.status === "done");
+        map.set(key, session.status === "completed");
       }
     }
     return map;

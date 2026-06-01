@@ -212,9 +212,9 @@ async function loadChatState(): Promise<ChatState> {
     let compactedCleaned = 0;
     for (const [key, s] of Object.entries(state.sessions)) {
       const session = s as ExtendedChatSession;
-      // Only filter progress for completed/done sessions (crash recovery cleanup).
+      // Only filter progress for completed sessions (crash recovery cleanup).
       // Keep progress for active sessions so they can resume with accumulated toolCalls.
-      if (session.status === "completed" || session.status === "done") {
+      if (session.status === "completed") {
         session.messages = session.messages.filter((m) => m.type !== "progress");
       }
       // Hydrate fields that may be missing from older persisted sessions

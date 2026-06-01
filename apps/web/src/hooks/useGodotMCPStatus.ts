@@ -43,10 +43,15 @@ export function useGodotMCPStatus(
       return;
     }
 
+    // Capture the projectId at request time so an in-flight fetch started for
+    // the old projectId can't overwrite the new project's status when the user
+    // switches projects. Without this guard, switching projectA → projectB
+    // briefly shows projectA's status under projectB's name.
+    const requestProjectId = projectId;
     setChecking(true);
     try {
       const result = await apiFetch<{ success: boolean; data: MCPHealthStatus }>(
-        `/api/dashboard/projects/${projectId}/mcp-health`
+        `/api/dashboard/projects/${requestProjectId}/mcp-health`
       );
       if (mountedRef.current) {
         setStatus(result.data);

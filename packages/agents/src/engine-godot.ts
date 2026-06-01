@@ -44,6 +44,7 @@ export const godotAgents: Partial<Record<AgentRole, AgentDefinition>> = {
     skills: ["dev-story", "compose-scene", "run-godot-headless", "code-review"],
     memory: "session",
     reportsTo: ["godot-specialist", "lead-programmer"],
+    experimental: true,
   },
   "godot-shader-specialist": {
     name: "godot-shader-specialist",
@@ -66,5 +67,6 @@ export const godotAgents: Partial<Record<AgentRole, AgentDefinition>> = {
     skills: ["dev-story"],
     memory: "session",
     reportsTo: ["godot-specialist"],
+    experimental: true,
   },
 };

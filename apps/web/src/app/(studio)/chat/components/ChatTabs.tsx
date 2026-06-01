@@ -76,7 +76,7 @@ function TabButton({
 }) {
   const icon = getAgentIcon(session.role);
   const label = session.role === "producer" ? "BOARD_ROOM" : session.role.replace(/-/g, "_").toUpperCase();
-  const isDone = session.status === "done";
+  const isDone = session.status === "completed";
   const isProducer = session.role === "producer";
   const statusChip = isProducer
     ? producerState?.mode === "thinking"

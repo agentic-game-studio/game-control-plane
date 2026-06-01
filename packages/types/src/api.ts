@@ -10,6 +10,7 @@ import type { SettingsConfig } from "./settings.js";
 import type { ChatSession, ChatMessage, ContextUsage } from "./chat.js";
 import type { GameBuild } from "./builds.js";
 import type { AutonomousRunMetrics } from "./metrics.js";
+import type { SkillName } from "./skill.js";
 
 /** WebSocket event types for real-time frontend updates */
 export type WSEvent =
@@ -101,7 +102,7 @@ export interface SpawnAgentRequest {
 // Skills
 export interface InvokeSkillRequest {
   sessionId: string;
-  skillId: string;
+  skillId: SkillName;
   args?: Record<string, string>;
   reviewMode?: ReviewMode;
 }

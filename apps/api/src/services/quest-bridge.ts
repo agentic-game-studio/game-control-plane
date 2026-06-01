@@ -244,6 +244,13 @@ export async function createQuestTicket(
 export async function moveQuestTicket(ticketId: string, status: TicketStatus, assignee?: string): Promise<void> {
   const projectId = await resolveProjectIdForTicket(ticketId);
 
+  // Capture the source column id *before* the mutation runs so the broadcast
+  // event can carry the actual fromColumn. Without this snapshot, the
+  // updater mutates the board and the later `findTicketInBoard` lookup
+  // returns the *destination* column, producing a self-loop
+  // (fromColumn === toColumn) for every move.
+  let fromColumnId: string | null = null;
+
   // Serialize the board mutation to prevent lost updates
   const moved = projectId
     ? await updateTicketsBoard(projectId, (board) => {
@@ -253,6 +260,7 @@ export async function moveQuestTicket(ticketId: string, status: TicketStatus, as
           return board;
         }
         const { col, idx, ticket } = found;
+        fromColumnId = board.columns[col].id;
         ticket.status = status;
         ticket.updatedAt = new Date().toISOString();
         if (assignee !== undefined) ticket.assignee = assignee;
@@ -269,12 +277,12 @@ export async function moveQuestTicket(ticketId: string, status: TicketStatus, as
   // Broadcast after the lock is released
   const found = findTicketInBoard(moved, ticketId);
   if (!found) return;
-  const { col, ticket } = found;
+  const { ticket } = found;
 
   broadcastEvent({
     type: "ticket:moved",
     ticket,
-    fromColumn: moved.columns[col].id,
+    fromColumn: fromColumnId ?? ticket.status,
     toColumn: status,
     projectId,
   } as WSEvent);
@@ -284,7 +292,7 @@ export async function moveQuestTicket(ticketId: string, status: TicketStatus, as
     at: ticket.updatedAt,
     ticketId,
     title: ticket.title,
-    fromColumn: moved.columns[col].id,
+    fromColumn: fromColumnId ?? ticket.status,
     toColumn: status,
     agentRole: ticket.assignee,
   });

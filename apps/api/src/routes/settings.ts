@@ -72,13 +72,34 @@ settingsRouter.patch("/", async (req: Request, res: Response) => {
   }
 
   try {
-    const updatedSettings = await updateData<SettingsConfig>("settings.json", (data) => ({
-      ...data,
-      ...updates,
-      credits: updates.credits ? { ...data.credits, ...updates.credits } : data.credits,
-      topUpHistory: updates.topUpHistory ?? data.topUpHistory,
-      usageLog: updates.usageLog ?? data.usageLog,
-    }));
+    const updatedSettings = await updateData<SettingsConfig>("settings.json", (data) => {
+      // Deep-merge credits so a partial PATCH (e.g. only subscription.current)
+      // doesn't clobber sibling fields like weeklyAllowance or resetAt.
+      // Shallow-spreading `...updates.credits` would replace the whole
+      // subscription/onTop objects and lose the unrelated fields. We
+      // also preserve burnRatePerHour (and any other top-level fields
+      // that may be added to CreditPools later) by spreading the source
+      // first, then layering the merged subscription/onTop on top.
+      const mergedCredits = updates.credits
+        ? {
+            ...data.credits,
+            ...(updates.credits.subscription
+              ? { subscription: { ...data.credits.subscription, ...updates.credits.subscription } }
+              : {}),
+            ...(updates.credits.onTop
+              ? { onTop: { ...data.credits.onTop, ...updates.credits.onTop } }
+              : {}),
+          }
+        : data.credits;
+
+      return {
+        ...data,
+        ...updates,
+        credits: mergedCredits,
+        topUpHistory: updates.topUpHistory ?? data.topUpHistory,
+        usageLog: updates.usageLog ?? data.usageLog,
+      };
+    });
 
     broadcastEvent({ type: "settings:updated", settings: updatedSettings } as WSEvent);
     res.json({ success: true, data: updatedSettings });

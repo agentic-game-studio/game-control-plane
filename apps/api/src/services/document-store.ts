@@ -67,9 +67,12 @@ function parseFrontmatter(content: string): { frontmatter: Record<string, string
   return { frontmatter: result, body };
 }
 
-/** Extract [[wikilink]] targets from markdown body */
+/** Extract [[wikilink]] targets from markdown body. Supports the
+ * `[[link|alias]]` form (Obsidian-style) — only the link portion before
+ * the pipe is used as the slug. Without this, `[[foo|bar]]` was being
+ * slugified to `foobar`, corrupting the link graph. */
 function extractWikilinks(body: string): string[] {
-  const matches = body.matchAll(/\[\[([^\]]+)\]\]/g);
+  const matches = body.matchAll(/\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g);
   const links = new Set<string>();
   for (const m of matches) {
     links.add(slugify(m[1]));

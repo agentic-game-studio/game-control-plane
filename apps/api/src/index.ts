@@ -112,7 +112,7 @@ app.use(cors({ origin: corsOrigins.length === 1 ? corsOrigins[0] : corsOrigins }
 // route, which let a single buggy or malicious client OOM the process via
 // /api/chat/sessions/.../messages. Individual upload routes (e.g. asset
 // thumbnail serving) can attach their own parser with a higher cap.
-app.use(express.json({ limit: "5mb" }));
+app.use(express.json({ limit: `${config.BODY_LIMIT_MB}mb` }));
 app.use(authMiddleware);
 app.use(requestLogger());
 

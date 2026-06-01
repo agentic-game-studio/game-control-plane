@@ -1,23 +1,77 @@
-FROM node:22-bookworm-slim
+# syntax=docker/dockerfile:1.7
 
+# ---------- deps stage ----------
+# Pre-install dependencies in a separate stage so the (slow) pnpm install
+# cache survives source-only rebuilds. NODE_ENV=development here so devDeps
+# (e.g. typescript, tailwind) are available for the build step.
+FROM node:22-bookworm-slim AS deps
 WORKDIR /app
+
+RUN corepack enable
+
+# Copy lockfile + workspace manifest first for the best layer cache
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json tsconfig.base.json ./
+# Source for package.json discovery (pnpm needs each workspace package.json)
+COPY apps ./apps
+COPY packages ./packages
+
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
+    NODE_ENV=development pnpm install --frozen-lockfile
+
+# ---------- build stage ----------
+FROM deps AS build
+ENV NODE_ENV=production
 
 ARG NEXT_PUBLIC_API_URL
 ARG NEXT_PUBLIC_WS_URL
 ARG NEXT_PUBLIC_API_KEY
 
-ENV NODE_ENV=production
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 ENV NEXT_PUBLIC_WS_URL=$NEXT_PUBLIC_WS_URL
 ENV NEXT_PUBLIC_API_KEY=$NEXT_PUBLIC_API_KEY
 
-RUN corepack enable
-
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json tsconfig.base.json ./
-COPY apps ./apps
-COPY packages ./packages
-
-RUN pnpm install --frozen-lockfile
+# next build needs the source; pnpm build:web runs the Next.js build.
+# The /workspace volume (if mounted at runtime) is not used here.
 RUN pnpm build:web
+
+# ---------- runtime stage ----------
+# Slim runtime, non-root, distroless-ish. The Next.js standalone build
+# (apps/web/.next/standalone) already has its own server.js; we copy only
+# what's needed.
+FROM node:22-bookworm-slim AS runtime
+WORKDIR /app
+
+ENV NODE_ENV=production
+ENV PORT=3000
+ENV HOSTNAME=0.0.0.0
+
+# Bring the built app + node_modules. We copy from the build stage's
+# pnpm store cache path implicitly by re-installing with --offline.
+COPY --from=build /app/apps ./apps
+COPY --from=build /app/packages ./packages
+COPY --from=build /app/package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json ./
+
+# Re-install in production mode (drops devDeps) using the cached store.
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
+    corepack enable && \
+    pnpm install --frozen-lockfile --prod
+
+# Next.js standalone needs .next/static and public served from the
+# project root at runtime. We pre-bake them into the image so the
+# container needs no external volume to serve the app.
+COPY --from=build /app/apps/web/.next ./apps/web/.next
+COPY --from=build /app/apps/web/public ./apps/web/public 2>/dev/null || true
+
+# Drop privileges. node:22-bookworm-slim ships a `node` user (uid 1000).
+# Using the standard "node" user keeps it consistent with the API image
+# and avoids the need to create a new user.
+USER node
+
+EXPOSE 3000
+
+# Healthcheck hits the Next.js root. If you add a /api/health route
+# later, switch HEALTHCHECK_PATH to "/api/health".
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD wget -qO- http://localhost:3000/ >/dev/null 2>&1 || exit 1
 
 CMD ["pnpm", "start:web"]

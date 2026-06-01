@@ -92,6 +92,14 @@ export interface AgentDefinition {
   memory: "user" | "project" | "session";
   delegates?: AgentRole[];
   reportsTo?: AgentRole[];
+  /**
+   * Mark this agent as experimental. Experimental agents are defined but
+   * not yet wired into any skill's `uses`/`agents` list. The UI should
+   * render an "experimental" badge on these so users know they're not
+   * reachable from the standard workflow. Mark true to surface a new
+   * agent without committing to the delegation wiring in the same PR.
+   */
+  experimental?: boolean;
   /** The prompt injected into the system message */
   systemPrompt?: string;
 }

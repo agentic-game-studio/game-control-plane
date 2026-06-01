@@ -99,6 +99,7 @@ export const specialistAgents: Partial<Record<AgentRole, AgentDefinition>> = {
     skills: ["dev-story"],
     memory: "session",
     reportsTo: ["lead-programmer"],
+    experimental: true,
   },
   "ui-programmer": {
     name: "ui-programmer",
@@ -209,6 +210,7 @@ export const specialistAgents: Partial<Record<AgentRole, AgentDefinition>> = {
     skills: ["security-audit"],
     memory: "session",
     reportsTo: ["technical-director"],
+    experimental: true,
   },
   prototyper: {
     name: "prototyper",
@@ -220,6 +222,7 @@ export const specialistAgents: Partial<Record<AgentRole, AgentDefinition>> = {
     skills: ["prototype"],
     memory: "session",
     reportsTo: ["producer"],
+    experimental: true,
   },
   "accessibility-specialist": {
     name: "accessibility-specialist",

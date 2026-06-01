@@ -15,5 +15,6 @@ export const codeReviewerAgents: Partial<Record<AgentRole, AgentDefinition>> = {
     skills: [],
     memory: "session",
     reportsTo: [],
+    experimental: true,
   },
 };

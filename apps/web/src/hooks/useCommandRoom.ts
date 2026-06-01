@@ -806,8 +806,27 @@ export function useCommandRoom() {
   isLoadingRef.current = isLoading;
   const messageQueueRef = useRef(messageQueue);
   messageQueueRef.current = messageQueue;
+  // Refs for cache-flush values on unmount. These are read by the
+  // `[]`-deps unmount-only effect (see the second localStorage save effect
+  // below) which captures stale state on first render; the refs let the
+  // cleanup see the latest values.
+  const currentProjectIdRef = useRef(currentProjectId);
+  currentProjectIdRef.current = currentProjectId;
+  const threadIdRef = useRef(threadId);
+  threadIdRef.current = threadId;
+  const threadTitleRef = useRef(threadTitle);
+  threadTitleRef.current = threadTitle;
   // Ref for executeCommand to avoid stale closures when dequeuing
   const executeCommandRef = useRef<(input: string, images?: string[], targetSessionId?: string) => void>(() => {});
+  // Refs for queue-drain timers so we can cancel them on unmount. The three
+  // setTimeouts at lines 2069, 2123, 2142 all schedule a recursive
+  // executeCommand call 100ms after the previous response/error. Without
+  // tracking them, navigating away mid-queue leaves dangling timers that
+  // will call apiFetch on an unmounted component.
+  const queueDrainTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Local-storage save timer — debounced 500ms. The save itself runs in the
+  // effect, the ref just lets us clear and reschedule from multiple sites.
+  const cacheSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Filter sessions visible for the active project. The producer session
   // for the current project plus any specialist sessions tagged with
@@ -971,11 +990,18 @@ export function useCommandRoom() {
     };
   }, [currentProjectId]);
 
-  // Debounced cache save — serialize all messages including progress with toolCalls + logs
+  // Debounced cache save — serialize all messages including progress with toolCalls + logs.
+  // We debounce so a stream of WS events doesn't trigger a synchronous
+  // localStorage write per message. The previous implementation also did a
+  // full sync write in the cleanup, which ran on every dep change — that's
+  // the same write the debounce was trying to avoid, so the cleanup now only
+  // clears the pending timer. The final save on unmount/navigation is done
+  // in a separate `[]`-deps effect below.
   useEffect(() => {
     if (!currentProjectId || !initialized) return;
 
-    const timeout = setTimeout(() => {
+    if (cacheSaveTimerRef.current) clearTimeout(cacheSaveTimerRef.current);
+    cacheSaveTimerRef.current = setTimeout(() => {
       saveCache(currentProjectId, {
         version: CACHE_VERSION,
         sessions: serializeForCache(sessions),
@@ -990,28 +1016,59 @@ export function useCommandRoom() {
     }, 500);
 
     return () => {
-      clearTimeout(timeout);
-      // Flush latest state on unmount / navigation (Next.js client-side nav
-      // doesn't fire beforeunload, so we save via ref in cleanup)
+      if (cacheSaveTimerRef.current) {
+        clearTimeout(cacheSaveTimerRef.current);
+        cacheSaveTimerRef.current = null;
+      }
+    };
+  }, [sessions, subagents, currentSession, threadId, threadTitle, currentProjectId, initialized, isLoading, messageQueue]);
+
+  // Unmount-only flush. Reads the latest values from refs (set in
+  // parallel with the state, see lines around 805) so we always save the
+  // freshest data even if the cleanup fires before the debounced effect had
+  // a chance to run.
+  useEffect(() => {
+    return () => {
+      const projectId = currentProjectIdRef.current;
+      if (!projectId) return;
       const sess = latestSessionsRef.current;
-      saveCache(currentProjectId, {
+      saveCache(projectId, {
         version: CACHE_VERSION,
         sessions: serializeForCache(sess),
         subagents: subagentsForProjectParents(latestSubagentsRef.current, new Set(sess.keys())),
         currentSession: currentSessionRef.current,
-        threadId,
-        threadTitle,
-        isLoading,
-        messageQueue,
+        threadId: threadIdRef.current,
+        threadTitle: threadTitleRef.current,
+        isLoading: isLoadingRef.current,
+        messageQueue: messageQueueRef.current,
         cachedAt: new Date().toISOString(),
       });
     };
-  }, [sessions, subagents, currentSession, threadId, threadTitle, currentProjectId, initialized, isLoading, messageQueue]);
+  }, []);
 
   useEffect(() => {
     setActivityFeed([]);
     setToastNotifications([]);
   }, [currentProjectId]);
+
+  // Cancel any pending queue-drain or cache-save timer on unmount. The
+  // queue-drain timer would otherwise fire executeCommand on an unmounted
+  // component if the user navigates away within 100ms of a response. The
+  // cache-save timer is a no-op on its own (the debounced effect re-runs
+  // when deps change), but clearing it avoids a stale write right before
+  // teardown.
+  useEffect(() => {
+    return () => {
+      if (queueDrainTimerRef.current) {
+        clearTimeout(queueDrainTimerRef.current);
+        queueDrainTimerRef.current = null;
+      }
+      if (cacheSaveTimerRef.current) {
+        clearTimeout(cacheSaveTimerRef.current);
+        cacheSaveTimerRef.current = null;
+      }
+    };
+  }, []);
 
   const addSessionMessage = useCallback((sessionRole: string, msg: Omit<ChatMessage, "id" | "timestamp">) => {
     setAllSessions((prev) => {
@@ -1296,19 +1353,24 @@ export function useCommandRoom() {
 
     setAllSessions((prevSessions) => {
       const updated = handleWSEvent(event, prevSessions, producerSessionIdRef.current, recentApiMessagesRef.current);
-      // Process any messages that were generated by the handler
-      updated.messages.forEach(({ sessionRole, msg }) => {
-        const session = prevSessions.get(sessionRole);
+      // Build a single new map instead of reassigning the prevSessions
+      // parameter — reassigning the React updater argument is an anti-pattern
+      // (Strict Mode invokes the updater twice in dev) and on a fast event
+      // stream can lose intermediate messages. Start from the handler's
+      // result if it produced one; otherwise from prevSessions.
+      let next = updated.sessions ?? prevSessions;
+      for (const { sessionRole, msg } of updated.messages) {
+        const session = next.get(sessionRole);
         if (session) {
-          const next = new Map(prevSessions);
-          next.set(sessionRole, {
+          const merged = new Map(next);
+          merged.set(sessionRole, {
             ...session,
             messages: [...session.messages, { ...msg, id: uid(), timestamp: timestamp() }],
           });
-          prevSessions = next;
+          next = merged;
         }
-      });
-      return updated.sessions ?? prevSessions;
+      }
+      return next;
     });
   }, []);
 
@@ -2066,7 +2128,11 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
       if (queue.length > 0) {
         const [next, ...rest] = queue;
         setMessageQueue(rest);
-        setTimeout(() => executeCommandRef.current(next.input, next.images, next.targetSessionId), 100);
+        if (queueDrainTimerRef.current) clearTimeout(queueDrainTimerRef.current);
+        queueDrainTimerRef.current = setTimeout(
+          () => executeCommandRef.current(next.input, next.images, next.targetSessionId),
+          100,
+        );
       }
     }, 5 * 60 * 1000);
 
@@ -2120,7 +2186,11 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
         if (queue.length > 0) {
           const [next, ...rest] = queue;
           setMessageQueue(rest);
-          setTimeout(() => executeCommandRef.current(next.input, next.images, next.targetSessionId), 100);
+          if (queueDrainTimerRef.current) clearTimeout(queueDrainTimerRef.current);
+          queueDrainTimerRef.current = setTimeout(
+            () => executeCommandRef.current(next.input, next.images, next.targetSessionId),
+            100,
+          );
         }
       })
       .catch((error) => {
@@ -2139,10 +2209,14 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
         if (queue.length > 0) {
           const [next, ...rest] = queue;
           setMessageQueue(rest);
-          setTimeout(() => executeCommandRef.current(next.input, next.images, next.targetSessionId), 100);
+          if (queueDrainTimerRef.current) clearTimeout(queueDrainTimerRef.current);
+          queueDrainTimerRef.current = setTimeout(
+            () => executeCommandRef.current(next.input, next.images, next.targetSessionId),
+            100,
+          );
         }
       });
-  }, [addSessionMessage, spawnAgent, approveAgent, currentSession]);
+  }, [addSessionMessage, spawnAgent, approveAgent]);
 
   // Keep ref updated for queue processing
   executeCommandRef.current = executeCommand;

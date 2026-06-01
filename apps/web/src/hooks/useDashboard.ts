@@ -26,7 +26,10 @@ export function useDashboard() {
     } catch (err) {
       console.error("Failed to fetch dashboard:", err);
       setError(err instanceof Error ? err.message : "Failed to load dashboard");
-      setData(DEFAULT_DATA);
+      // Preserve the previous data on a transient fetch failure — wiping it
+      // to DEFAULT_DATA hides already-loaded projects/activity on every
+      // momentary backend hiccup. The initial load (when `data === DEFAULT_DATA`)
+      // is the only case where we want to leave an empty state.
     } finally {
       setLoading(false);
     }

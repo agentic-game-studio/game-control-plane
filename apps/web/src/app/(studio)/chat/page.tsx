@@ -495,7 +495,7 @@ function AgentStatusBar({
   onPrioritize: () => void;
   onRequestStop: () => void;
 }) {
-  const isDone = session?.status === "done";
+  const isDone = session?.status === "completed";
   const label = session?.role.replace(/-/g, "_").toUpperCase() ?? "AGENT";
 
   return (

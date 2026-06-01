@@ -57,7 +57,11 @@ export interface ProducerSummarySnapshot {
   /** Short line for autonomous activity */
   autonomousHint?: string | null;
 }
-export type ChatSessionStatus = "active" | "done" | "completed" | "compacted";
+// "done" was an alias for "completed" — removed. The backend only ever sets
+// "completed" (chat.ts:1352, 1675); the frontend still has 4 sites that
+// compare against "done". Those are updated to "completed" in the same PR
+// to keep the type accurate.
+export type ChatSessionStatus = "active" | "completed" | "compacted";
 
 export interface QuestionOption {
   id: string;

@@ -1,7 +1,7 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
 import fs from "fs";
-import { readData, writeData, broadcastEvent, deleteData } from "../services/data-store.js";
+import { readData, writeData, updateData, broadcastEvent, deleteData } from "../services/data-store.js";
 import { logger } from "../utils/logger.js";
 import type {
   DashboardData,
@@ -167,42 +167,77 @@ function writeDemoGodotProject(projectDir: string): void {
 // POST /api/dashboard/demo-project - Seed a judge-friendly cloud demo project
 dashboardRouter.post("/demo-project", async (_req: Request, res: Response) => {
   try {
-    const data = await readDashboardOrDefault();
     const workspacePath = "demo-godot-platformer";
-    const existing = data.projects.find((p) => p.workspacePath === workspacePath);
-    if (existing) {
-      res.json({ success: true, data: existing });
+    const now = new Date().toISOString();
+
+    // Use updateData so the read-then-check-then-create runs under the
+    // dashboard.json mutex. Without this, two concurrent judges hitting
+    // the endpoint in the same tick both see `existing === undefined`,
+    // both call writeDemoGodotProject(), and both append to projects,
+    // producing duplicate demo entries. The filesystem side effect lives
+    // inside the updater so it only runs for the first caller. We capture
+    // `created` + the project via closure (same pattern as the fromColumn
+    // capture in quest-bridge) since updateData only returns the data.
+    let demoProject: Project | null = null;
+    let created = false;
+
+    await updateData<DashboardData>("dashboard.json", (data) => {
+      const existing = data.projects.find((p) => p.workspacePath === workspacePath);
+      if (existing) {
+        demoProject = existing;
+        created = false;
+        return data;
+      }
+
+      const projectId = `proj-demo-${Date.now()}`;
+      const projectDir = resolveProjectWorkspace(workspacePath);
+      writeDemoGodotProject(projectDir);
+
+      const newProject = normalizeProject({
+        id: projectId,
+        name: "Railway Demo Platformer",
+        description: "Cloud-hosted Godot sample for hackathon judges",
+        engine: "godot",
+        progress: 35,
+        status: "active",
+        workspacePath,
+        icon: "sports_esports",
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      data.projects.push(newProject);
+      data.activityLog.unshift({
+        id: `log-${Date.now()}`,
+        timestamp: now,
+        level: "info",
+        source: "demo",
+        message: "Seeded Railway demo project in cloud workspace",
+      });
+      demoProject = newProject;
+      created = true;
+      return data;
+    });
+
+    if (!demoProject) {
+      // Should not happen — updater always sets this. Treat as failure.
+      res.status(500).json({ success: false, error: "Failed to create demo project" });
       return;
     }
 
-    const now = new Date().toISOString();
-    const projectId = `proj-demo-${Date.now()}`;
-    const projectDir = resolveProjectWorkspace(workspacePath);
-    writeDemoGodotProject(projectDir);
+    // Capture into a const so TypeScript narrows the type once and the
+    // remaining code doesn't have to thread the `Project | null` through
+    // every reference. The closure assignment in the updater is the
+    // (sole) source of this value, so after the null check above, the
+    // `as Project` cast is safe.
+    const project: Project = demoProject;
 
-    const demoProject = normalizeProject({
-      id: projectId,
-      name: "Railway Demo Platformer",
-      description: "Cloud-hosted Godot sample for hackathon judges",
-      engine: "godot",
-      progress: 35,
-      status: "active",
-      workspacePath,
-      icon: "sports_esports",
-      createdAt: now,
-      updatedAt: now,
-    });
+    if (!created) {
+      res.json({ success: true, data: project });
+      return;
+    }
 
-    data.projects.push(demoProject);
-    data.activityLog.unshift({
-      id: `log-${Date.now()}`,
-      timestamp: now,
-      level: "info",
-      source: "demo",
-      message: "Seeded Railway demo project in cloud workspace",
-    });
-    await writeData("dashboard.json", data);
-
+    const projectId = project.id;
     const tickets: Ticket[] = [
       {
         id: `ticket-demo-${Date.now()}-movement`,
@@ -265,10 +300,10 @@ dashboardRouter.post("/demo-project", async (_req: Request, res: Response) => {
 
     broadcastEvent({
       type: "project:created",
-      project: demoProject,
+      project,
     } as WSEvent);
 
-    res.status(201).json({ success: true, data: demoProject });
+    res.status(201).json({ success: true, data: project });
   } catch (err) {
     logger.error({ error: err instanceof Error ? err.message : String(err) }, "Failed to create demo project");
     res.status(500).json({ success: false, error: "Failed to create demo project" });

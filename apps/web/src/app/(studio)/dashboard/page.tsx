@@ -33,6 +33,7 @@ export default function DashboardPage() {
   const [mcpStatuses, setMcpStatuses] = useState<Record<string, MCPStatus>>({});
   const [serverStatus, setServerStatus] = useState<ServerStatus | null>(null);
   const [settingUp, setSettingUp] = useState(false);
+  const [creatingDemo, setCreatingDemo] = useState(false);
 
   // Check server status
   const checkServerStatus = useCallback(async () => {
@@ -72,11 +73,18 @@ export default function DashboardPage() {
   };
 
   const launchDemoProject = async () => {
+    // Guard against double-clicks: the CLOUD_DEMO button is also disabled
+    // while in-flight, but a double-click faster than React's re-render can
+    // still queue two requests. This state check catches that case.
+    if (creatingDemo) return;
+    setCreatingDemo(true);
     try {
       const project = await createDemoProject();
       selectProject(project.id);
     } catch (err) {
       console.error("Failed to create demo project:", err);
+    } finally {
+      setCreatingDemo(false);
     }
   };
 
@@ -194,6 +202,7 @@ export default function DashboardPage() {
               onSelectProject={(project) => selectProject(project.id)}
               onNewProject={() => setIsModalOpen(true)}
               onDemoProject={launchDemoProject}
+              isCreatingDemo={creatingDemo}
               onDeleteProject={deleteProject}
               mcpStatuses={mcpStatuses}
               onLaunchEditor={launchEditor}
