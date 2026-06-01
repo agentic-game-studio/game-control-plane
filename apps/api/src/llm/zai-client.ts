@@ -722,8 +722,12 @@ export async function callLLMWithTools(
     for (const tc of response.tool_calls) {
       onProgress?.({ iteration, totalTools, currentTool: tc.name, phase: "executing" });
       const result = await toolExecutor(tc.name, tc.input);
-      // Track file operations for long-running task context
-      const filePath = (tc.input?.file_path ?? tc.input?.path) as string | undefined;
+      // Track file operations for long-running task context. Coerce the
+      // tool input to a string defensively rather than `as string` — a
+      // bad payload with `file_path: 42` would otherwise surface as the
+      // literal string "42" in the activity log and confuse operators.
+      const filePathRaw = tc.input?.file_path ?? tc.input?.path;
+      const filePath = typeof filePathRaw === "string" ? filePathRaw : undefined;
       const isFileOp = ["Read", "Write", "Edit", "Glob", "Grep", "Bash"].includes(tc.name);
       if (isFileOp) {
         onFileOperation?.({ tool: tc.name, path: filePath, result: result.startsWith("Error:") ? "failed" : "success" });
