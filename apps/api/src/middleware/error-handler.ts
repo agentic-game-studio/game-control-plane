@@ -1,10 +1,8 @@
 import type { Request, Response, NextFunction } from "express";
-import { logger } from "../utils/logger.js";
+import { logger, getRequestId } from "../utils/logger.js";
 
 export function errorHandler(err: Error, req: Request, res: Response, _next: NextFunction) {
-  const requestId = req.headers["x-request-id"] as string
-    ?? req.headers["x-correlation-id"] as string
-    ?? "unknown";
+  const requestId = getRequestId(req);
 
   logger.error(
     {

@@ -22,6 +22,7 @@ const envSchema = z
     API_TIMEOUT_MS: z.coerce.number().default(120_000),
     BODY_LIMIT_MB: z.coerce.number().default(5),
     WORKFLOW_TTL_MS: z.coerce.number().default(24 * 60 * 60 * 1000),
+    ASSET_WATCHER_LIMIT: z.coerce.number().default(32),
     ENABLE_TEST_ENDPOINTS: z
       .union([z.literal("true"), z.literal("false")])
       .default("false")
@@ -61,6 +62,7 @@ export function loadConfig() {
     API_TIMEOUT_MS: process.env.API_TIMEOUT_MS,
     BODY_LIMIT_MB: process.env.BODY_LIMIT_MB,
     WORKFLOW_TTL_MS: process.env.WORKFLOW_TTL_MS,
+    ASSET_WATCHER_LIMIT: process.env.ASSET_WATCHER_LIMIT,
     ENABLE_TEST_ENDPOINTS: process.env.ENABLE_TEST_ENDPOINTS,
   };
 

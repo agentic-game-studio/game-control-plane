@@ -512,6 +512,14 @@ dashboardRouter.post("/projects", async (req: Request, res: Response) => {
 // PATCH /api/dashboard/projects/:id - Update project
 dashboardRouter.patch("/projects/:id", async (req: Request, res: Response) => {
   const { id } = req.params;
+  // Validate that req.body is a plain object before we cast — a non-object
+  // body (array, string, number) would still pass the cast below and
+  // explode at the `in updates` check with a confusing TypeError. Refuse
+  // early with a 400 so the caller gets a meaningful error.
+  if (!req.body || typeof req.body !== "object" || Array.isArray(req.body)) {
+    res.status(400).json({ success: false, error: "Request body must be a JSON object" });
+    return;
+  }
   const updates = req.body as UpdateProjectRequest;
 
   try {

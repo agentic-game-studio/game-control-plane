@@ -234,8 +234,8 @@ async function scanAssetsDir(
 
 /** Active fs.watch watchers keyed by projectId. Capped via LRU eviction so a
  *  long-running API process that creates and deletes many projects doesn't
- *  leak watcher handles (and the OS file descriptors behind them). */
-const ASSET_WATCHER_LIMIT = 32;
+ *  leak watcher handles (and the OS file descriptors behind them). The cap
+ *  is read from config so it can be tuned per deployment. */
 const assetWatchers = new Map<string, ReturnType<typeof watch>>();
 
 /** Stop watching a project's assets directory */
@@ -254,7 +254,8 @@ function watchProjectAssets(projectId: string, assetsDir: string): void {
 
   // LRU: if we're at the cap, evict the oldest entry. Map iteration is
   // insertion order, so the first key is the least-recently-inserted.
-  if (assetWatchers.size >= ASSET_WATCHER_LIMIT) {
+  const watcherLimit = loadConfig().ASSET_WATCHER_LIMIT;
+  if (assetWatchers.size >= watcherLimit) {
     const oldest = assetWatchers.keys().next().value;
     if (oldest) unwatchProjectAssets(oldest);
   }
