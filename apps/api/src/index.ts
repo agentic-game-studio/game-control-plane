@@ -34,13 +34,17 @@ const START_TIME = Date.now();
 // without redeploying code.
 const rateBuckets = new Map<string, { count: number; resetAt: number }>();
 
-// Evict expired rate bucket entries every 5 minutes to prevent unbounded memory growth
+// Evict expired rate bucket entries every 5 minutes to prevent unbounded
+// memory growth. The interval is short enough to keep the working set
+// tight but long enough that a typical client doesn't get its bucket
+// reaped mid-request.
+const RATE_BUCKET_CLEANUP_INTERVAL_MS = 5 * 60_000;
 const rateCleanupInterval = setInterval(() => {
   const now = Date.now();
   for (const [ip, bucket] of rateBuckets) {
     if (now >= bucket.resetAt) rateBuckets.delete(ip);
   }
-}, 5 * 60_000);
+}, RATE_BUCKET_CLEANUP_INTERVAL_MS);
 rateCleanupInterval.unref();
 
 function rateLimiter(req: express.Request, res: express.Response, next: express.NextFunction) {
@@ -195,9 +199,10 @@ app.get("/api/sessions/:sessionId/stream", (req, res) => {
   sseClients.add(client);
 
   // R8: Send heartbeat comment every 15 seconds to keep connection alive
+  const SSE_HEARTBEAT_MS = 15_000;
   const heartbeat = setInterval(() => {
     res.write(": heartbeat\n\n");
-  }, 15_000);
+  }, SSE_HEARTBEAT_MS);
 
   // Cleanup runs on close AND on error. A socket that dies in a way that does
   // not emit `close` (NAT timeout, broken pipe with no RST, process-level
@@ -287,8 +292,11 @@ async function gracefulShutdown(signal: string) {
       process.exit(0);
     });
   });
-  // Force exit after 10s if connections don't close
-  setTimeout(() => process.exit(1), 10_000);
+  // Force exit after 10s if connections don't close. The hard deadline
+  // matters for SIGTERM-then-SIGKILL behavior under k8s/railway: a
+  // long-tail SSE client must not hold up the pod's drain indefinitely.
+  const SHUTDOWN_FORCE_EXIT_MS = 10_000;
+  setTimeout(() => process.exit(1), SHUTDOWN_FORCE_EXIT_MS);
 }
 
 process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
