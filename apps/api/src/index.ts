@@ -33,6 +33,7 @@ const START_TIME = Date.now();
 const rateBuckets = new Map<string, { count: number; resetAt: number }>();
 const RATE_LIMIT = 10; // requests per window
 const RATE_WINDOW_MS = 60_000; // 1 minute
+const RATE_BUCKET_CAP = 10_000; // hard cap on tracked IPs (LRU evict beyond)
 
 // Evict expired rate bucket entries every 5 minutes to prevent unbounded memory growth
 const rateCleanupInterval = setInterval(() => {
@@ -49,6 +50,12 @@ function rateLimiter(req: express.Request, res: express.Response, next: express.
   const bucket = rateBuckets.get(ip);
 
   if (!bucket || now >= bucket.resetAt) {
+    // LRU cap: a botnet rotating IPs can otherwise grow the map forever —
+    // periodic cleanup only removes EXPIRED entries, never over-cap ones.
+    if (rateBuckets.size >= RATE_BUCKET_CAP) {
+      const oldest = rateBuckets.keys().next().value;
+      if (oldest) rateBuckets.delete(oldest);
+    }
     rateBuckets.set(ip, { count: 1, resetAt: now + RATE_WINDOW_MS });
     return next();
   }
@@ -74,7 +81,7 @@ server.on("upgrade", (request, socket, head) => {
   // an Origin header on the upgrade request; we reject any origin not in
   // the CORS allowlist. Same-origin requests have an Origin header that
   // matches the server's own URL — we also accept those.
-  const origin = request.headers.origin as string | undefined;
+  const origin = request.headers.origin;
   if (origin && !corsOrigins.includes("*")) {
     const allowed = corsOrigins.some((o) => o === origin || (o !== "*" && new URL(o).origin === new URL(origin).origin));
     if (!allowed) {
@@ -87,9 +94,13 @@ server.on("upgrade", (request, socket, head) => {
   // S5: Validate API key on WebSocket upgrade with a timing-safe comparison.
   // The previous `!==` comparison was vulnerable to a byte-by-byte timing
   // attack against the secret. The HTTP middleware already uses
-  // crypto.timingSafeEqual; we mirror that here.
-  const wsKey = request.headers["x-api-key"] as string | undefined
-    ?? searchParams.get("apiKey");
+  // crypto.timingSafeEqual; we mirror that here. x-api-key is
+  // string | string[] | undefined under Node's IncomingHttpHeaders — some
+  // proxies can produce an array value, which would have made
+  // `Buffer.from(wsKey)` throw inside the original `as string` cast.
+  const rawWsKey = request.headers["x-api-key"];
+  const wsKeyRaw = Array.isArray(rawWsKey) ? rawWsKey[0] : rawWsKey;
+  const wsKey = wsKeyRaw ?? searchParams.get("apiKey") ?? undefined;
   if (!wsKey) {
     socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
     socket.destroy();
@@ -119,8 +130,15 @@ wss.on("connection", (socket) => {
 // Middleware
 // CORS_ORIGIN accepts a single origin or a comma-separated list of allowed
 // origins (e.g. "http://localhost:3000,http://localhost:4000"). A single
-// origin string still works for the common dev case.
+// origin string still works for the common dev case. An unset / empty
+// config is a misconfiguration — refuse to start so a typo doesn't
+// silently block all browsers.
 const corsOrigins = config.CORS_ORIGIN.split(",").map((s) => s.trim()).filter(Boolean);
+if (corsOrigins.length === 0) {
+  logger.error({ CORS_ORIGIN: config.CORS_ORIGIN, event: "cors_misconfigured" },
+    "CORS_ORIGIN is empty — refusing to start. Set CORS_ORIGIN to one or more comma-separated origins.");
+  throw new Error("CORS_ORIGIN must be set to at least one origin");
+}
 app.use(cors({ origin: corsOrigins.length === 1 ? corsOrigins[0] : corsOrigins }));
 // 5MB default JSON body limit. The previous 50MB limit applied to every
 // route, which let a single buggy or malicious client OOM the process via
