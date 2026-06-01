@@ -8,6 +8,7 @@ import { broadcastEvent } from "./data-store.js";
 import { readData } from "./data-store.js";
 import { DEFAULT_TICKETS_BOARD, readTicketsBoard, resolveProjectIdForSession, writeTicketsBoard, updateTicketsBoard } from "./ticket-board.js";
 import { logger } from "../utils/logger.js";
+import { loadConfig } from "../config.js";
 import type { TicketsBoard, Ticket, TicketStatus, AgentRole, WSEvent, WorkflowStage, DashboardData } from "@game-studio/types";
 import { ingestProducerSummaryFact, ingestProducerSummaryFromSession } from "./producer-summary.js";
 import { triggerVerification } from "./verification-service.js";
@@ -22,15 +23,15 @@ interface WorkflowState {
 }
 
 const activeWorkflows = new Map<string, WorkflowState>();
-const WORKFLOW_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 // Periodic cleanup of stale workflows. Handle is exported so the graceful
 // shutdown path in index.ts can clearInterval it; without that, the interval
 // keeps running on a torn-down module graph until the process exits.
 export const workflowCleanupInterval = setInterval(() => {
   const now = Date.now();
+  const ttl = loadConfig().WORKFLOW_TTL_MS;
   for (const [sessionId, wf] of activeWorkflows) {
-    if (now - wf.createdAt > WORKFLOW_TTL_MS) {
+    if (now - wf.createdAt > ttl) {
       activeWorkflows.delete(sessionId);
     }
   }
@@ -161,7 +162,10 @@ async function getBoard(projectId?: string | null): Promise<TicketsBoard> {
   try {
     return await readTicketsBoard(projectId);
   } catch {
-    await writeTicketsBoard(DEFAULT_TICKETS_BOARD, projectId);
+    // Don't persist a phantom default board on a transient read error —
+    // a network blip or a corrupt file would otherwise create an empty
+    // board that overwrites the real one on the next save. Return the
+    // default in-memory only; first successful POST will persist.
     return structuredClone(DEFAULT_TICKETS_BOARD);
   }
 }
@@ -339,25 +343,47 @@ export async function createFixTicket(
   return ticket;
 }
 
+// Short-TTL cache for resolveProjectIdForTicket. A ticket's owning project
+// is invariant for the ticket's lifetime; the lookup is N+1 disk reads
+// (legacy board + every per-project board), so caching the result for
+// a few seconds collapses the read storm on the hot moveQuestTicket path.
+const TICKET_PROJECT_CACHE_TTL_MS = 30_000;
+const ticketProjectCache = new Map<string, { value: string | null; expiresAt: number }>();
+
 async function resolveProjectIdForTicket(ticketId: string): Promise<string | null> {
+  const cached = ticketProjectCache.get(ticketId);
+  const now = Date.now();
+  if (cached && cached.expiresAt > now) return cached.value;
+
   const legacyBoard = await getBoard(null);
   const legacyFound = findTicketInBoard(legacyBoard, ticketId);
-  if (legacyFound) return legacyFound.ticket.projectId ?? null;
+  if (legacyFound) {
+    const value = legacyFound.ticket.projectId ?? null;
+    ticketProjectCache.set(ticketId, { value, expiresAt: now + TICKET_PROJECT_CACHE_TTL_MS });
+    return value;
+  }
 
   try {
     const dashboard = await readData<DashboardData>("dashboard.json");
-    if (!dashboard.projects.length) return null;
+    if (!dashboard.projects.length) {
+      ticketProjectCache.set(ticketId, { value: null, expiresAt: now + TICKET_PROJECT_CACHE_TTL_MS });
+      return null;
+    }
     // C8: scan all per-project boards in parallel instead of one-at-a-time
     // (was N+1 sequential disk reads — quadratic as the project list grows).
     const boards = await Promise.all(
       dashboard.projects.map((p) => getBoard(p.id).then((board) => ({ projectId: p.id, board })))
     );
     for (const { projectId, board } of boards) {
-      if (findTicketInBoard(board, ticketId)) return projectId;
+      if (findTicketInBoard(board, ticketId)) {
+        ticketProjectCache.set(ticketId, { value: projectId, expiresAt: now + TICKET_PROJECT_CACHE_TTL_MS });
+        return projectId;
+      }
     }
   } catch {
     // Ignore scan failures and fall back to null.
   }
 
+  ticketProjectCache.set(ticketId, { value: null, expiresAt: now + TICKET_PROJECT_CACHE_TTL_MS });
   return null;
 }

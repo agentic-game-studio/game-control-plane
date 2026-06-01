@@ -12,6 +12,27 @@ import { realpathSync as realpathSyncCb, readFileSync as readFileSyncCb } from "
 import path from "node:path";
 import os from "node:os";
 import { loadConfig } from "../config.js";
+
+// Module-level cache for the Godot MCP Pro instructions file. It is a static
+// file shipped with the godot-mcp-pro package and never changes during a
+// server's lifetime, but we were re-reading it synchronously on every chat
+// message. Read it once at module load and reuse.
+let cachedGodotInstructions: string | null | undefined;
+function getGodotInstructions(): string | null {
+  if (cachedGodotInstructions !== undefined) return cachedGodotInstructions;
+  const instructionsPath = path.join(
+    process.cwd(),
+    "godot-mcp-pro-v1.11.0",
+    "instructions",
+    "CLAUDE.md"
+  );
+  try {
+    cachedGodotInstructions = readFileSyncCb(instructionsPath, "utf-8");
+  } catch {
+    cachedGodotInstructions = null;
+  }
+  return cachedGodotInstructions;
+}
 import { resolveProjectWorkspace } from "../utils/workspace.js";
 import { getAgentSystemPrompt, loadAgentPrompts } from "../prompts/agent-prompt-loader.js";
 import { callLLMWithTools, GAME_STUDIO_TOOLS, type LLMMessage, type ProgressCallback, type FileOperationCallback } from "../llm/zai-client.js";
@@ -87,15 +108,8 @@ function appendProjectContext(systemPrompt: string, project: ProjectContext): st
 
   // Inject Godot MCP instructions for godot projects
   if (project.engine === "godot") {
-    const godotInstructionsPath = path.join(
-      process.cwd(),
-      "godot-mcp-pro-v1.11.0",
-      "instructions",
-      "CLAUDE.md"
-    );
-    try {
-      // Load synchronously since this is a hot path
-      const godotInstructions = readFileSyncCb(godotInstructionsPath, "utf-8");
+    const godotInstructions = getGodotInstructions();
+    if (godotInstructions) {
       return `${base}
 
 # Godot MCP Pro — Use These Tools Instead of File I/O
@@ -119,8 +133,6 @@ When interacting with a Godot project:
 **Important**: Godot MCP Pro connects to the Godot editor via WebSocket. The editor must be running with the Godot MCP Pro plugin enabled for runtime tools (play_scene, simulate_key, capture_frames, etc.) to work.
 
 ${godotInstructions}`;
-    } catch {
-      // Godot MCP instructions not found — skip injection
     }
   }
 
@@ -148,6 +160,15 @@ function logEntry(sessionId: string, level: string, message: string, agent?: Age
 function escapeRegExp(literal: string): string {
   return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+
+// Hoist the home-prefix matcher to module load. `process.env.HOME` is
+// constant for the lifetime of the process, so building a RegExp inside
+// `safePath` (which is called once per Read/Write/Edit tool invocation)
+// is wasted work. Cached as null on platforms without HOME / USERPROFILE.
+const HOME_DIR_FOR_REGEX = process.env.HOME || process.env.USERPROFILE || "";
+const HOME_PREFIX_REGEX: RegExp | null = HOME_DIR_FOR_REGEX
+  ? new RegExp(`^${escapeRegExp(HOME_DIR_FOR_REGEX).replace(/\//g, "\\/")}\\/([^\\/]+)(\\/.*)?$`)
+  : null;
 
 /** Validate that a resolved path stays within the workspace boundary */
 function safePath(inputPath: string, baseDir: string): string {
@@ -177,15 +198,10 @@ function safePath(inputPath: string, baseDir: string): string {
   }
 
   // Handle absolute paths to projects that are mirrored in the workspace.
-  // Escape HOME so any regex metacharacters in it (`.`, `$`, `+`, etc.) are
-  // matched literally, and use a global replace to escape every `/` (not just
-  // the first, which the previous `String.prototype.replace` with a string
-  // pattern would miss).
-  const homeDir = process.env.HOME || "";
-  if (homeDir) {
-    const escapedHome = escapeRegExp(homeDir).replace(/\//g, "\\/");
-    const homePrefix = new RegExp(`^${escapedHome}\\/([^\\/]+)(\\/.*)?$`);
-    const godotPathMatch = inputPath.match(homePrefix);
+  // The regex is pre-built at module load (HOME is constant for the
+  // process lifetime), so we just consult the cached one here.
+  if (HOME_PREFIX_REGEX) {
+    const godotPathMatch = inputPath.match(HOME_PREFIX_REGEX);
     if (godotPathMatch && godotPathMatch[2]) {
       const projectName = godotPathMatch[1];
       const relativePath = godotPathMatch[2].substring(1);
@@ -397,8 +413,10 @@ async function executeTool(
         // brace expansion, and unicode lookalikes. Add the most common
         // bypasses and require a printable-ASCII start to make unicode
         // tricks visible.
+        if (!/^[\x20-\x7e]+$/.test(command)) {
+          return `Error: Command contains non-ASCII or control characters. The sandbox requires printable ASCII only — unicode lookalikes are not allowed.`;
+        }
         if (
-          !/^[\x20-\x7e]+$/.test(command) ||
           /[|`]|\$\(|\$\{|\beval\b|\bsh\b|\bbash\b|\bsource\b|\. \//.test(command) ||
           /&&|\|\||;|>|</.test(command) ||
           /\\\s*\n/.test(command)

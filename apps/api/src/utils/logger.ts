@@ -2,6 +2,22 @@ import pino from "pino";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { existsSync, mkdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import type { Request } from "express";
+
+/**
+ * Extract a stable request ID from incoming headers, falling back to a
+ * short random UUID when none is supplied. Centralized so the request
+ * logger middleware and any future cross-cutting middleware (error
+ * handler, request validator) agree on the same header precedence:
+ * x-request-id → x-correlation-id → generated.
+ */
+export function getRequestId(req: Request): string {
+  const headerVal = req.headers["x-request-id"] ?? req.headers["x-correlation-id"];
+  if (typeof headerVal === "string" && headerVal.length > 0) return headerVal;
+  if (Array.isArray(headerVal) && headerVal.length > 0 && headerVal[0]) return headerVal[0];
+  return randomUUID().slice(0, 8);
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);

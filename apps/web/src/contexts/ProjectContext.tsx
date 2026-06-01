@@ -14,6 +14,7 @@ import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "@/hooks/useWebSocket";
 
 const STORAGE_KEY = "studio:current-project-id";
+const CACHE_KEY = "studio:projects-cache";
 
 interface ProjectContextValue {
   projects: Project[];
@@ -39,10 +40,21 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
       const result = await apiFetch<Project[]>("/api/dashboard/projects");
       setProjects(result);
       setError(null);
+      // Cache the fresh list so a transient API failure on the next load
+      // can still surface a usable (if stale) UI instead of a broken one.
+      try {
+        localStorage.setItem(CACHE_KEY, JSON.stringify(result));
+      } catch { /* localStorage unavailable */ }
     } catch (err) {
       console.error("Failed to fetch projects:", err);
       setError(err instanceof Error ? err.message : "Failed to load projects");
-      setProjects([]);
+      // Fall back to cached projects on error so the UI stays usable
+      // through a brief API outage. Empty array if nothing cached.
+      try {
+        const cached = localStorage.getItem(CACHE_KEY);
+        if (cached) setProjects(JSON.parse(cached) as Project[]);
+        else setProjects([]);
+      } catch { setProjects([]); }
     } finally {
       setLoading(false);
     }

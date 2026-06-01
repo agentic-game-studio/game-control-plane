@@ -8,6 +8,7 @@ import { existsSync, mkdirSync, writeFileSync, readFileSync } from "fs";
 import { join } from "path";
 import { loadConfig } from "../config.js";
 import { resolveProjectWorkspace } from "../utils/workspace.js";
+import { resolveHomeDir } from "../utils/paths.js";
 import { logger } from "../utils/logger.js";
 import { runRegressionCheck } from "./regression-service.js";
 import type { TicketTestEvidence } from "@game-studio/types";
@@ -35,7 +36,8 @@ function runGodotHeadlessCommand(
   const config = loadConfig();
   const scriptDir = join(config.WORKSPACE_DIR, "scripts", "godot");
   const pythonBin = process.env.PIPELINE_PYTHON ?? "python3";
-  const godotBin = process.env.GODOT_BIN ?? join(process.env.HOME ?? "", ".local/bin/godot_bin/Godot");
+  const home = resolveHomeDir();
+  const godotBin = process.env.GODOT_BIN ?? (home ? join(home, ".local/bin/godot_bin/Godot") : "");
 
   // Use execFileSync (no shell) to avoid command injection via projectPath
   // or any of the other string inputs. A malicious projectPath like

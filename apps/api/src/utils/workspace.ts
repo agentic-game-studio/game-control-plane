@@ -27,18 +27,19 @@ export function resolveProjectWorkspace(workspacePath: string): string {
  * Validate that a workspace path is usable for a project.
  * Returns an object describing whether the path is valid and why not.
  */
-export function validateWorkspacePath(workspacePath: string): {
+export async function validateWorkspacePath(workspacePath: string): Promise<{
   valid: boolean;
   resolved: string;
   exists: boolean;
   isDirectory: boolean;
   error?: string;
-} {
+}> {
   try {
     const resolved = resolveProjectWorkspace(workspacePath);
-    const exists = fs.existsSync(resolved);
-
-    if (!exists) {
+    let stat;
+    try {
+      stat = await fs.promises.stat(resolved);
+    } catch (statErr) {
       return {
         valid: false,
         resolved,
@@ -50,7 +51,6 @@ export function validateWorkspacePath(workspacePath: string): {
       };
     }
 
-    const stat = fs.statSync(resolved);
     if (!stat.isDirectory()) {
       return {
         valid: false,

@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { broadcast } from "./websocket.js";
+import { logger } from "../utils/logger.js";
 import type { WSEvent } from "@game-studio/types";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -98,7 +99,13 @@ export async function deleteData(filename: string): Promise<boolean> {
   try {
     await fs.unlink(filePath);
     return true;
-  } catch {
+  } catch (err) {
+    // ENOENT = file already gone, treat as a successful no-op (idempotent
+    // delete). Other errors (EACCES, EROFS, EBUSY) bubble up to the logger
+    // so we don't silently leak cleanup failures across project deletes.
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return true;
+    logger.warn({ filePath, err: (err as Error).message, event: "data_delete_failed" },
+      "deleteData failed for non-ENOENT reason — file may be leaked");
     return false;
   }
 }

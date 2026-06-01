@@ -34,7 +34,9 @@ const DEFAULT_DATA: DashboardData = {
 
 function normalizeProject(project: Partial<Project>): Project {
   return {
-    id: project.id ?? `proj-${Date.now()}`,
+    // Append 4 chars of randomness so two projects created in the same
+    // millisecond don't collide on the same auto-generated id.
+    id: project.id ?? `proj-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
     name: project.name ?? "Untitled Project",
     description: project.description ?? "",
     engine: project.engine ?? null,
@@ -319,7 +321,7 @@ dashboardRouter.post("/validate-path", async (req: Request, res: Response) => {
     res.status(400).json({ success: false, error: "path is required" });
     return;
   }
-  const result = validateWorkspacePath(inputPath);
+  const result = await validateWorkspacePath(inputPath);
   res.json({ success: true, data: result });
 });
 
@@ -343,12 +345,18 @@ dashboardRouter.post("/browse-directory", async (req: Request, res: Response) =>
       return;
     }
 
-    if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
+    try {
+      const stat = await fs.promises.stat(resolved);
+      if (!stat.isDirectory()) {
+        res.status(400).json({ success: false, error: "Not a valid directory" });
+        return;
+      }
+    } catch {
       res.status(400).json({ success: false, error: "Not a valid directory" });
       return;
     }
 
-    const dirents = fs.readdirSync(resolved, { withFileTypes: true });
+    const dirents = await fs.promises.readdir(resolved, { withFileTypes: true });
     const directories = dirents
       .filter((d) => d.isDirectory())
       .map((d) => d.name)
@@ -430,7 +438,7 @@ dashboardRouter.post("/projects", async (req: Request, res: Response) => {
     // Validate workspacePath if provided
     const workspacePath = body.workspacePath ?? null;
     if (workspacePath) {
-      const validation = validateWorkspacePath(workspacePath);
+      const validation = await validateWorkspacePath(workspacePath);
       if (path.isAbsolute(workspacePath)) {
         // Absolute paths must exist AND be within the workspace directory
         if (!validation.exists) {
@@ -575,29 +583,21 @@ dashboardRouter.delete("/projects/:id", async (req: Request, res: Response) => {
     // but the sessions become hidden from the project-scoped UI).
     await orphanProjectSessions(String(id));
 
-    // Stop Godot MCP service if running for this project
-    await removeGodotMCPService(String(id)).catch(() => {});
-
-    // Drop the per-project document store (closes its fs.watch handle and
-    // frees the in-memory graph). Without this, projectStores grows
-    // unbounded as projects are created and deleted.
-    dropProjectStore(String(id));
-
-    // Drop the per-project assets fs.watch handle. Same reasoning as
-    // dropProjectStore — the watcher entry is otherwise never cleaned up.
-    unwatchProjectAssets(String(id));
-
-    // Cancel any pending producer-summary emit timer for this project.
-    // The emit callback imports chat.js and broadcasts to a project id
-    // that's about to be gone — better to drop it now.
-    try {
-      const { clearProjectProducerSummary } = await import("../services/producer-summary.js");
-      clearProjectProducerSummary(String(id));
-    } catch { /* best effort */ }
-
-    // Clean up associated data files (tickets board, autonomous loop state)
-    const ticketsFile = getTicketsBoardFile(String(id));
-    deleteData(ticketsFile).catch(() => {});
+    // All of the following are independent of each other and of the
+    // broadcast below, so fan them out in parallel. Each is best-effort
+    // and must not block the DELETE response on slow filesystem I/O.
+    const projectIdStr = String(id);
+    const ticketsFile = getTicketsBoardFile(projectIdStr);
+    const [{ clearProjectProducerSummary }] = await Promise.all([
+      import("../services/producer-summary.js").catch(() => ({ clearProjectProducerSummary: () => {} })),
+    ]);
+    await Promise.all([
+      removeGodotMCPService(projectIdStr).catch(() => {}),
+      Promise.resolve(dropProjectStore(projectIdStr)),
+      Promise.resolve(unwatchProjectAssets(projectIdStr)),
+      Promise.resolve(clearProjectProducerSummary(projectIdStr)),
+      deleteData(ticketsFile).catch(() => {}),
+    ]);
 
     // Broadcast event
     broadcastEvent({

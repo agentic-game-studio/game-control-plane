@@ -21,6 +21,7 @@ const envSchema = z
     CONTEXT_WINDOW_TOKENS: z.coerce.number().default(256_000),
     API_TIMEOUT_MS: z.coerce.number().default(120_000),
     BODY_LIMIT_MB: z.coerce.number().default(5),
+    WORKFLOW_TTL_MS: z.coerce.number().default(24 * 60 * 60 * 1000),
     ENABLE_TEST_ENDPOINTS: z
       .union([z.literal("true"), z.literal("false")])
       .default("false")
@@ -59,6 +60,7 @@ export function loadConfig() {
     CONTEXT_WINDOW_TOKENS: process.env.CONTEXT_WINDOW_TOKENS,
     API_TIMEOUT_MS: process.env.API_TIMEOUT_MS,
     BODY_LIMIT_MB: process.env.BODY_LIMIT_MB,
+    WORKFLOW_TTL_MS: process.env.WORKFLOW_TTL_MS,
     ENABLE_TEST_ENDPOINTS: process.env.ENABLE_TEST_ENDPOINTS,
   };
 

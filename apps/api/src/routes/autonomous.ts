@@ -24,6 +24,7 @@ import { readTicketsBoard, writeTicketsBoard, updateTicketsBoard } from "../serv
 import { broadcast } from "../services/websocket.js";
 import { logger } from "../utils/logger.js";
 import { resolveProjectWorkspace } from "../utils/workspace.js";
+import { resolveHomeDir } from "../utils/paths.js";
 import type { AgentRole, WSEvent } from "@game-studio/types";
 import type { TicketsBoard, Ticket, DashboardData } from "@game-studio/types";
 import { getOrCreateGodotMCPService, launchGodotEditor, type GodotMCPServiceOptions } from "../services/godot-mcp-service.js";
@@ -181,7 +182,8 @@ async function runBootCheck(projectPath: string): Promise<{ bootOk: boolean; err
   // scripts/godot lives inside WORKSPACE_DIR (workspace/scripts/godot, via symlink)
   const scriptDir = join(config.WORKSPACE_DIR, "scripts", "godot");
   const pythonBin = process.env.PIPELINE_PYTHON ?? "python3";
-  const godotBin = process.env.GODOT_BIN ?? join(process.env.HOME ?? "", ".local/bin/godot_bin/Godot");
+  const home = resolveHomeDir();
+  const godotBin = process.env.GODOT_BIN ?? (home ? join(home, ".local/bin/godot_bin/Godot") : "");
 
   // Validate projectPath is inside the workspace to prevent command injection
   // or path traversal before we even build the command array.
@@ -389,7 +391,17 @@ function loadLoopState(sessionId: string): LoopState | null {
 
 function saveLoopState(state: LoopState): void {
   const path = getLoopStatePath(state.sessionId);
-  writeFileSync(path, JSON.stringify(state, null, 2), "utf-8");
+  // Atomic write: write to .tmp + fsync + rename so a crash mid-write can't
+  // leave a truncated loop-state.json that fails to parse on next read.
+  const tmp = `${path}.tmp`;
+  const fd = openSync(tmp, "w");
+  try {
+    writeFileSync(fd, JSON.stringify(state, null, 2), "utf-8");
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(tmp, path);
 }
 
 function loadHistory(): LoopRunRecord[] {
@@ -404,7 +416,16 @@ function loadHistory(): LoopRunRecord[] {
 
 function saveHistory(history: LoopRunRecord[]): void {
   const path = getLoopHistoryPath();
-  writeFileSync(path, JSON.stringify(history, null, 2), "utf-8");
+  // Atomic write — see saveLoopState above.
+  const tmp = `${path}.tmp`;
+  const fd = openSync(tmp, "w");
+  try {
+    writeFileSync(fd, JSON.stringify(history, null, 2), "utf-8");
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(tmp, path);
 }
 
 // Serialize run-history writes. Two concurrent /start or /stop calls each
@@ -417,9 +438,11 @@ function saveRunRecord(record: LoopRunRecord): void {
     const history = loadHistory();
     const updated = [record, ...history].slice(0, 50);
     saveHistory(updated);
-  }).catch(() => {
-    // Swallow per-record failure so one bad write doesn't poison the chain
-    // (best-effort logging).
+  }).catch((err) => {
+    // Log the failure so a long-running chain of broken writes is visible
+    // — but still swallow it so one bad write doesn't poison the chain.
+    logger.warn({ err: err instanceof Error ? err.message : String(err), event: "autonomous_history_write_failed" },
+      "Failed to persist loop run record — continuing");
   });
   historyWriteChain = next;
 }
@@ -475,8 +498,9 @@ async function cleanupStaleInProgress(board: TicketsBoard, projectId: string): P
 function getNextAvailableTicket(board: TicketsBoard): Ticket | null {
   const col = board.columns.find((c) => c.id === "available");
   if (!col || col.tickets.length === 0) return null;
-  // Pick oldest ticket (FIFO)
-  return col.tickets.sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0];
+  // Pick oldest ticket (FIFO) — copy first so the in-place sort doesn't
+  // mutate the caller's board state and re-order tickets on every poll.
+  return [...col.tickets].sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0];
 }
 
 function assignTicketToAgent(ticket: Ticket): AgentRole {

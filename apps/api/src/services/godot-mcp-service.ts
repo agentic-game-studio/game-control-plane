@@ -18,6 +18,7 @@ import { accessSync, globSync, rmSync } from "node:fs";
 import type { LLMTool } from "../llm/zai-client.js";
 import { logger } from "../utils/logger.js";
 import { loadConfig } from "../config.js";
+import { resolveHomeDir } from "../utils/paths.js";
 
 // Re-export tool type for consumers
 export type { LLMTool } from "../llm/zai-client.js";
@@ -857,7 +858,7 @@ export function launchGodotEditor(projectDir: string): { success: boolean; pid?:
 
   // Find Godot binary — platform-specific candidates
   const localAppData = process.env.LOCALAPPDATA ?? "";
-  const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
+  const home = resolveHomeDir() ?? "";
   const candidates: string[] = platform === "win32" ? [
     // Windows: Program Files, user installs, Steam
     "C:\\Program Files\\Godot\\Godot.exe",

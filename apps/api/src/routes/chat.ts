@@ -55,13 +55,27 @@ function parseQuestionFromToolResult(toolCalls?: { name: string; input: Record<s
         // Try parsing from raw input
         if (typeof tc.input === "object") {
           const input = tc.input as Record<string, unknown>;
-          if (input.questionId && input.question && input.options) {
+          // Validate field types before returning — the previous version
+          // cast everything to `string`/`as QuestionData["options"]`
+          // without checking, which let a malformed payload crash the
+          // chat UI on `undefined.options.map(...)`.
+          if (
+            typeof input.questionId === "string" &&
+            typeof input.question === "string" &&
+            Array.isArray(input.options) &&
+            input.options.every(
+              (o): o is { id: string; label: string; description?: string } =>
+                typeof o === "object" && o !== null &&
+                typeof (o as Record<string, unknown>).id === "string" &&
+                typeof (o as Record<string, unknown>).label === "string",
+            )
+          ) {
             return {
-              questionId: input.questionId as string,
-              question: input.question as string,
+              questionId: input.questionId,
+              question: input.question,
               options: input.options as QuestionData["options"],
-              allowMultiple: (input.allowMultiple as boolean) ?? false,
-              allowCustomInput: (input.allowCustomInput as boolean) ?? false,
+              allowMultiple: typeof input.allowMultiple === "boolean" ? input.allowMultiple : false,
+              allowCustomInput: typeof input.allowCustomInput === "boolean" ? input.allowCustomInput : false,
             };
           }
         }
@@ -277,6 +291,19 @@ export { chatStoreReady };
 
 /** Per-session lock to prevent concurrent agent responses for the same session */
 const sessionsResponding = new Set<string>();
+// Defensive upper bound. The lock should only ever hold sessionIds that
+// are currently mid-LLM-call, so the set should stay tiny. If a request
+// error path ever leaks a sessionId without `delete`, the set can grow
+// unbounded — past a few thousand entries something is very wrong, and
+// we'd rather reject a new request than OOM the process. 1000 is well
+// above the realistic max (one per project + a handful of stragglers).
+const SESSIONS_RESPONDING_CAP = 1000;
+
+// Upper bound on the chain of compacted sessions we walk when resolving
+// a producer session id. In practice a session is compacted at most a
+// few times before becoming inactive; 20 is a defensive ceiling that
+// prevents a corrupted `compacted → compacted` chain from looping forever.
+const MAX_COMPACTION_CHAIN_DEPTH = 20;
 
 /**
  * Per-session AbortController for the in-flight LLM call. Registered when the
@@ -519,8 +546,7 @@ chatRouter.get("/sessions/producer/:projectId", async (req: Request, res: Respon
   if (activeSession && activeSession.status === "compacted") {
     let gen = activeSession.generation ?? 1;
     let depth = 0;
-    const MAX_GEN_DEPTH = 20;
-    while (depth < MAX_GEN_DEPTH) {
+    while (depth < MAX_COMPACTION_CHAIN_DEPTH) {
       const nextGen = gen + 1;
       const nextId = `${sessionId}-g${nextGen}`;
       const next = chatStore.sessions[nextId];
@@ -1171,6 +1197,14 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
   if (body.type !== "system" && body.type !== "progress" && body.type !== "producer_update") {
     if (sessionsResponding.has(id)) {
       res.status(409).json({ success: false, error: "Agent is already responding — please wait" });
+      return;
+    }
+    if (sessionsResponding.size >= SESSIONS_RESPONDING_CAP) {
+      logger.error(
+        { size: sessionsResponding.size, cap: SESSIONS_RESPONDING_CAP, event: "sessions_responding_overflow" },
+        "sessionsResponding hit the defensive cap — a cleanup path is leaking entries",
+      );
+      res.status(503).json({ success: false, error: "Server at capacity — try again shortly" });
       return;
     }
     sessionsResponding.add(id);

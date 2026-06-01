@@ -140,9 +140,18 @@ export class DocumentStore {
           const { frontmatter, body } = parseFrontmatter(content);
           const links = extractWikilinks(body);
 
+          // Frontmatter values are typed `string | string[]`; coerce to
+          // string before using as a title or status. Arrays are joined
+          // with a space so a malformed `tags: [foo, bar]` frontmatter
+          // still produces a renderable title rather than throwing.
+          const pickString = (val: string | string[] | undefined): string | undefined => {
+            if (typeof val === "string") return val;
+            if (Array.isArray(val)) return val.join(" ");
+            return undefined;
+          };
           const title =
-            (frontmatter.title as string) ??
-            (frontmatter.name as string) ??
+            pickString(frontmatter.title) ??
+            pickString(frontmatter.name) ??
             file.replace(".md", "").replace(/[-_]/g, " ");
 
           const stat = await fs.stat(filePath).catch(() => null);
@@ -153,7 +162,7 @@ export class DocumentStore {
             filename: file,
             category,
             path: relPath,
-            status: (frontmatter.status as string) ?? undefined,
+            status: pickString(frontmatter.status),
             links,
             backlinks: [],
             createdAt: stat?.birthtime?.toISOString(),

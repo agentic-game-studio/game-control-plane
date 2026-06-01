@@ -100,22 +100,37 @@ const DEFAULT_ASSETS: AssetsData = {
 };
 
 function manifestEntryToGameAsset(entry: Record<string, unknown>): GameAsset {
-  const generatedWith: AssetGenerationMeta | undefined = entry.generatedWith
-    ? (entry.generatedWith as AssetGenerationMeta)
-    : undefined;
+  // Validate the discriminator fields before casting — an unknown type or
+  // category string would otherwise leak through as an un-castable value
+  // and crash downstream code (e.g. `assets.filter(a => a.type === "2d")`).
+  const VALID_TYPES: GameAsset["type"][] = ["3d", "2d", "vfx", "audio", "texture"];
+  const VALID_CATEGORIES: GameAsset["category"][] = [
+    "prop", "character", "env", "weapon", "ui", "tex", "sfx", "music",
+  ];
+  const type = VALID_TYPES.includes(entry.type as GameAsset["type"])
+    ? (entry.type as GameAsset["type"])
+    : "2d";
+  const category = VALID_CATEGORIES.includes(entry.category as GameAsset["category"])
+    ? (entry.category as GameAsset["category"])
+    : "prop";
+
+  const generatedWith: AssetGenerationMeta | undefined =
+    entry.generatedWith && typeof entry.generatedWith === "object"
+      ? (entry.generatedWith as AssetGenerationMeta)
+      : undefined;
 
   return {
-    id: entry.id as string,
-    filename: entry.filename as string,
-    type: entry.type as GameAsset["type"],
-    category: entry.category as GameAsset["category"],
-    sizeBytes: (entry.sizeBytes as number) ?? 0,
-    tags: (entry.tags as string[]) ?? [],
-    createdAt: entry.createdAt as string,
-    updatedAt: entry.updatedAt as string,
-    path: entry.path as string | undefined,
-    rawPath: entry.rawPath as string | undefined,
-    thumbnailPath: entry.thumbnailPath as string | undefined,
+    id: typeof entry.id === "string" ? entry.id : "",
+    filename: typeof entry.filename === "string" ? entry.filename : "unknown",
+    type,
+    category,
+    sizeBytes: typeof entry.sizeBytes === "number" ? entry.sizeBytes : 0,
+    tags: Array.isArray(entry.tags) ? (entry.tags as string[]) : [],
+    createdAt: typeof entry.createdAt === "string" ? entry.createdAt : new Date().toISOString(),
+    updatedAt: typeof entry.updatedAt === "string" ? entry.updatedAt : new Date().toISOString(),
+    path: typeof entry.path === "string" ? entry.path : undefined,
+    rawPath: typeof entry.rawPath === "string" ? entry.rawPath : undefined,
+    thumbnailPath: typeof entry.thumbnailPath === "string" ? entry.thumbnailPath : undefined,
     generatedWith,
   };
 }
@@ -602,11 +617,25 @@ assetsRouter.post("/generate", async (req: Request, res: Response) => {
 
   // Support batch mode via presets file
   if (body.presetsFile) {
-    // Validate presetsFile is a bare filename within the script directory
+    // Validate presetsFile is a bare filename within the script directory.
+    // Then realpath the candidate so a symlink pointing outside scriptDir
+    // is rejected — basename + access alone is bypassable.
     const presetsBasename = path.basename(body.presetsFile);
     const presetsPath = path.join(scriptDir, presetsBasename);
-    if (presetsBasename !== body.presetsFile || !(await fs.access(presetsPath).then(() => true).catch(() => false))) {
+    if (presetsBasename !== body.presetsFile) {
       res.status(400).json({ success: false, error: `Invalid presets file: ${body.presetsFile}. Must be a filename in ${scriptDir}` });
+      return;
+    }
+    let presetsReal: string;
+    try {
+      presetsReal = await fs.realpath(presetsPath);
+    } catch {
+      res.status(400).json({ success: false, error: `Invalid presets file: ${body.presetsFile}. Must be a filename in ${scriptDir}` });
+      return;
+    }
+    const scriptReal = await fs.realpath(scriptDir);
+    if (!presetsReal.startsWith(scriptReal + path.sep) && presetsReal !== scriptReal) {
+      res.status(400).json({ success: false, error: `Presets file escapes script directory: ${body.presetsFile}` });
       return;
     }
     const args = [
