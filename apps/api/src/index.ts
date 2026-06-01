@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import { WebSocketServer } from "ws";
 import { createServer } from "node:http";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { loadConfig } from "./config.js";
 import { sessionsRouter } from "./routes/sessions.js";
 import { agentsRouter } from "./routes/agents.js";
@@ -69,10 +70,20 @@ const server = createServer(app);
 server.on("upgrade", (request, socket, head) => {
   const { pathname, searchParams } = new URL(request.url ?? "/", "http://localhost");
 
-  // S5: Validate API key on WebSocket upgrade
+  // S5: Validate API key on WebSocket upgrade with a timing-safe comparison.
+  // The previous `!==` comparison was vulnerable to a byte-by-byte timing
+  // attack against the secret. The HTTP middleware already uses
+  // crypto.timingSafeEqual; we mirror that here.
   const wsKey = request.headers["x-api-key"] as string | undefined
     ?? searchParams.get("apiKey");
-  if (!wsKey || wsKey !== config.API_SECRET) {
+  if (!wsKey) {
+    socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+    socket.destroy();
+    return;
+  }
+  const a = Buffer.from(wsKey);
+  const b = Buffer.from(config.API_SECRET);
+  if (a.length !== b.length || !timingSafeEqual(a, b)) {
     socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
     socket.destroy();
     return;
@@ -92,8 +103,16 @@ wss.on("connection", (socket) => {
 });
 
 // Middleware
-app.use(cors({ origin: config.CORS_ORIGIN }));
-app.use(express.json({ limit: "50mb" }));
+// CORS_ORIGIN accepts a single origin or a comma-separated list of allowed
+// origins (e.g. "http://localhost:3000,http://localhost:4000"). A single
+// origin string still works for the common dev case.
+const corsOrigins = config.CORS_ORIGIN.split(",").map((s) => s.trim()).filter(Boolean);
+app.use(cors({ origin: corsOrigins.length === 1 ? corsOrigins[0] : corsOrigins }));
+// 5MB default JSON body limit. The previous 50MB limit applied to every
+// route, which let a single buggy or malicious client OOM the process via
+// /api/chat/sessions/.../messages. Individual upload routes (e.g. asset
+// thumbnail serving) can attach their own parser with a higher cap.
+app.use(express.json({ limit: "5mb" }));
 app.use(authMiddleware);
 app.use(requestLogger());
 
@@ -137,7 +156,7 @@ app.get("/api/sessions/:sessionId/stream", (req, res) => {
   res.setHeader("Connection", "keep-alive");
 
   const sessionId = req.params.sessionId;
-  const clientId = crypto.randomUUID();
+  const clientId = randomUUID();
 
   const client = { id: clientId, sessionId, send: (data: string) => { res.write(`data: ${data}\n\n`); } };
   sseClients.add(client);
@@ -147,10 +166,21 @@ app.get("/api/sessions/:sessionId/stream", (req, res) => {
     res.write(": heartbeat\n\n");
   }, 15_000);
 
-  req.on("close", () => {
+  // Cleanup runs on close AND on error. A socket that dies in a way that does
+  // not emit `close` (NAT timeout, broken pipe with no RST, process-level
+  // kill) would otherwise leak the client and its heartbeat interval. We also
+  // guard the writes with a `destroyed` flag so a late `heartbeat` callback
+  // after cleanup doesn't throw on the dead socket.
+  let destroyed = false;
+  const cleanup = () => {
+    if (destroyed) return;
+    destroyed = true;
     clearInterval(heartbeat);
     sseClients.delete(client);
-  });
+  };
+  req.on("close", cleanup);
+  req.on("error", cleanup);
+  res.on("error", cleanup);
 });
 
 // Error handler

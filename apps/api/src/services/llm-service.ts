@@ -8,7 +8,7 @@
  */
 
 import fs from "node:fs/promises";
-import { realpathSync as realpathSyncCb } from "node:fs";
+import { realpathSync as realpathSyncCb, readFileSync as readFileSyncCb } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { loadConfig } from "../config.js";
@@ -94,7 +94,7 @@ function appendProjectContext(systemPrompt: string, project: ProjectContext): st
     );
     try {
       // Load synchronously since this is a hot path
-      const godotInstructions = require("fs").readFileSync(godotInstructionsPath, "utf-8");
+      const godotInstructions = readFileSyncCb(godotInstructionsPath, "utf-8");
       return `${base}
 
 # Godot MCP Pro — Use These Tools Instead of File I/O
@@ -140,6 +140,14 @@ function logEntry(sessionId: string, level: string, message: string, agent?: Age
   } as WSEvent);
 }
 
+/** Escape special regex metacharacters in a literal string so it can be safely
+ * embedded in a `new RegExp(...)` pattern. Without this, characters like `.`,
+ * `+`, `*`, `(`, `[`, `\\`, `$`, `^`, `|` in `process.env.HOME` would be
+ * interpreted as regex syntax. */
+function escapeRegExp(literal: string): string {
+  return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 /** Validate that a resolved path stays within the workspace boundary */
 function safePath(inputPath: string, baseDir: string): string {
   const workspaceDir = loadConfig().WORKSPACE_DIR;
@@ -167,13 +175,21 @@ function safePath(inputPath: string, baseDir: string): string {
     workingPath = path.join(workspaceDir, pathAfterWorkspace);
   }
 
-  // Handle absolute paths to projects that are mirrored in the workspace
+  // Handle absolute paths to projects that are mirrored in the workspace.
+  // Escape HOME so any regex metacharacters in it (`.`, `$`, `+`, etc.) are
+  // matched literally, and use a global replace to escape every `/` (not just
+  // the first, which the previous `String.prototype.replace` with a string
+  // pattern would miss).
   const homeDir = process.env.HOME || "";
-  const godotPathMatch = inputPath.match(new RegExp(`^${homeDir.replace("/", "\\/")}\/([^\/]+)(\/.*)?$`));
-  if (godotPathMatch && godotPathMatch[2]) {
-    const projectName = godotPathMatch[1];
-    const relativePath = godotPathMatch[2].substring(1);
-    workingPath = path.join(workspaceDir, projectName, relativePath);
+  if (homeDir) {
+    const escapedHome = escapeRegExp(homeDir).replace(/\//g, "\\/");
+    const homePrefix = new RegExp(`^${escapedHome}\\/([^\\/]+)(\\/.*)?$`);
+    const godotPathMatch = inputPath.match(homePrefix);
+    if (godotPathMatch && godotPathMatch[2]) {
+      const projectName = godotPathMatch[1];
+      const relativePath = godotPathMatch[2].substring(1);
+      workingPath = path.join(workspaceDir, projectName, relativePath);
+    }
   }
 
   const normalizedResolved = path.resolve(workingPath);

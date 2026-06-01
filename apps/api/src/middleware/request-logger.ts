@@ -1,4 +1,5 @@
 import type { Request, Response, NextFunction } from "express";
+import { randomUUID } from "node:crypto";
 import { createRequestLogger } from "../utils/logger.js";
 
 export interface RequestLogOptions {
@@ -25,7 +26,7 @@ export function requestLogger(options: RequestLogOptions = {}): (
 
     const requestId = req.headers["x-request-id"] as string
       ?? req.headers["x-correlation-id"] as string
-      ?? crypto.randomUUID().slice(0, 8);
+      ?? randomUUID().slice(0, 8);
 
     const correlationId = req.headers["x-correlation-id"] as string | undefined;
 

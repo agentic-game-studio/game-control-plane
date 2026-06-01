@@ -81,10 +81,21 @@ export function renderMarkdown(md: string): string {
   // Strikethrough
   html = html.replace(/~~(.+?)~~/g, '<del class="opacity-60 line-through">$1</del>');
 
-  // Links [text](url) — filter dangerous URI schemes (S6)
+  // Links [text](url) — allowlist safe schemes (S6). The previous blocklist
+  // approach could be bypassed by ` Javascript:alert(1)` (leading whitespace
+  // or case-mismatched scheme). We now normalize the URL and allowlist only
+  // http, https, mailto, fragment, and protocol-relative paths.
   html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, text, url) => {
-    const safe = /^[a-z][a-z0-9+.-]*:/i.test(url) && !/^(\s*)(javascript|data|vbscript)\s*:/i.test(url);
-    if (!safe) return `[${text}](${url})`;
+    const normalized = url.trim().toLowerCase();
+    const isSafe =
+      normalized.startsWith("https:") ||
+      normalized.startsWith("http:") ||
+      normalized.startsWith("mailto:") ||
+      normalized.startsWith("#") ||
+      normalized.startsWith("/") ||
+      // Protocol-relative URL
+      normalized.startsWith("//") === false && !normalized.includes(":");
+    if (!isSafe) return `[${text}](${url})`;
     return `<a href="${url}" target="_blank" rel="noopener noreferrer" class="text-[#0055FF] underline hover:bg-[#0055FF] hover:text-white px-0.5 transition-colors">${text}</a>`;
   });
 

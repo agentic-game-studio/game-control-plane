@@ -31,6 +31,7 @@ export type WSEvent =
   | { type: "ticket:deleted"; ticketId: string; projectId?: string | null }
   | { type: "ticket:moved"; ticket: Ticket; fromColumn: string; toColumn: string; projectId?: string | null }
   | { type: "ticket:verified"; ticketId: string; projectId?: string | null; verdict: string; passed: boolean; verifier: AgentRole }
+  | { type: "ticket:deadletter"; ticketId: string; projectId?: string | null; reason: string; attempts: number }
   | { type: "asset:created"; asset: GameAsset }
   | { type: "asset:updated"; asset: GameAsset }
   | { type: "asset:deleted"; assetId: string }

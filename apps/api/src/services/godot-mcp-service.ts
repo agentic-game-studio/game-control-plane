@@ -14,7 +14,7 @@
 
 import { spawn, execSync, ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { accessSync, globSync } from "node:fs";
+import { accessSync, globSync, rmSync } from "node:fs";
 import type { LLMTool } from "../llm/zai-client.js";
 import { logger } from "../utils/logger.js";
 import { loadConfig } from "../config.js";
@@ -240,11 +240,23 @@ export class GodotMCPService {
     // Handle stdout — read JSON-RPC responses
     this.process.stdout?.on("data", (chunk: Buffer) => {
       this.stdoutBuffer += chunk.toString();
-      // Cap buffer to prevent OOM from runaway MCP output
+      // Cap buffer to prevent OOM from runaway MCP output. Slice at the last
+      // newline before the cap so we never throw away the start of an
+      // in-flight JSON-RPC message. The previous implementation sliced at a
+      // raw byte offset, which could straddle a message boundary and silently
+      // drop a response.
       if (this.stdoutBuffer.length > this.MAX_STDOUT_BUFFER) {
-        const discarded = this.stdoutBuffer.length - this.MAX_STDOUT_BUFFER;
-        this.stdoutBuffer = this.stdoutBuffer.slice(discarded);
-        logger.warn({ discarded, event: "godot_mcp_buffer_overflow" }, "MCP stdout buffer overflow — discarded old data");
+        const excess = this.stdoutBuffer.length - this.MAX_STDOUT_BUFFER;
+        const lastNewline = this.stdoutBuffer.indexOf("\n", excess);
+        if (lastNewline === -1) {
+          // No newline found in the excess — fall back to dropping the
+          // entire pre-excess region as malformed input (better than OOM).
+          this.stdoutBuffer = this.stdoutBuffer.slice(excess);
+          logger.warn({ excess, event: "godot_mcp_buffer_overflow_no_newline" }, "MCP stdout buffer overflow with no newline — dropped pre-excess data");
+        } else {
+          this.stdoutBuffer = this.stdoutBuffer.slice(lastNewline + 1);
+          logger.warn({ droppedBytes: lastNewline, event: "godot_mcp_buffer_overflow" }, "MCP stdout buffer overflow — dropped data up to last newline");
+        }
       }
       this.processStdout();
     });
@@ -267,12 +279,59 @@ export class GodotMCPService {
       logger.error({ error: err.message, event: "godot_mcp_error" }, "MCP process error");
     });
 
-    // Wait briefly for server to initialize
-    await new Promise((r) => setTimeout(r, 1000));
+    // Wait for the MCP `initialize` JSON-RPC handshake to actually complete
+    // before flipping isRunning. The previous 1-second setTimeout was a
+    // best-effort guess — the server may take longer to import modules, and
+    // `executeTool` calls in the meantime could race with init and receive
+    // "method not found" responses. We send the standard MCP initialize
+    // request and await the result, with a generous timeout.
+    try {
+      await this.sendInitializeHandshake();
+      this.initialized = true;
+    } catch (initErr) {
+      logger.warn(
+        { error: initErr instanceof Error ? initErr.message : String(initErr), event: "godot_mcp_init_failed" },
+        "MCP initialize handshake did not complete — service will start in degraded mode",
+      );
+    }
     this.isRunning = true;
-    this.initialized = true;
 
     logger.info({ mode: this.mode, event: "godot_mcp_start" }, "Service started");
+  }
+
+  /** Send the standard MCP `initialize` JSON-RPC request and await the
+   * server's `result` (which contains its protocol version and capabilities).
+   * This replaces the previous "sleep 1s and hope" pattern. */
+  private sendInitializeHandshake(): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      const id = `init-${Date.now()}`;
+      const timer = setTimeout(
+        () => reject(new Error("MCP initialize handshake timed out after 5s")),
+        5000,
+      );
+      this.pendingRequests.set(id, {
+        resolve: (val) => { clearTimeout(timer); resolve(val); },
+        reject: (err) => { clearTimeout(timer); reject(err); },
+        timeout: setTimeout(() => {}, 0), // unused, satisfies the type
+      });
+      const initRequest = {
+        jsonrpc: "2.0" as const,
+        id,
+        method: "initialize",
+        params: {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: { name: "game-control-plane", version: "0.1.0" },
+        },
+      };
+      try {
+        this.process?.stdin?.write(JSON.stringify(initRequest) + "\n");
+      } catch (writeErr) {
+        clearTimeout(timer);
+        this.pendingRequests.delete(id);
+        reject(writeErr);
+      }
+    });
   }
 
   private processStdout() {
@@ -651,13 +710,7 @@ export function installGodotMCPPlugin(
 
     // Remove existing plugin folder if it exists (for clean reinstall)
     if (existsSync(projectPluginDir)) {
-      // Use rmSync if available (Node 14.14+), otherwise skip
-      try {
-        const { rmSync } = require("node:fs");
-        rmSync(projectPluginDir, { recursive: true, force: true });
-      } catch {
-        // Fallback: skip removal, just overwrite
-      }
+      rmSync(projectPluginDir, { recursive: true, force: true });
     }
 
     // Copy the plugin files

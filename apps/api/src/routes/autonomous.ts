@@ -14,8 +14,8 @@
 
 import { Router } from "express";
 import type { Request, Response } from "express";
-import { existsSync, mkdirSync, openSync, readFileSync, writeFileSync, fsyncSync, closeSync, readdirSync } from "fs";
-import { join } from "path";
+import { existsSync, mkdirSync, openSync, readFileSync, writeFileSync, fsyncSync, closeSync, readdirSync, statSync, unlinkSync, renameSync } from "fs";
+import { join, resolve, sep } from "path";
 import { loadConfig } from "../config.js";
 import { invokeAgent, detectEngineFromWorkspace, type ProjectContext } from "../services/llm-service.js";
 import { readData, writeData, broadcastEvent } from "../services/data-store.js";
@@ -38,7 +38,7 @@ import { fireWebhook } from "../services/webhook-service.js";
 import { executeGodotExport } from "../services/build-service.js";
 import { generateProjectChangelog } from "../services/changelog-service.js";
 
-import { execSync } from "child_process";
+import { execFileSync, execSync } from "node:child_process";
 
 type ReadyProjectContext = ProjectContext & { workspacePath: string };
 
@@ -47,12 +47,56 @@ const activeLoopSessions = new Set<string>();
 const STALE_LOOP_HEARTBEAT_MS = 5 * 60 * 1000; // 5 minutes without heartbeat = stale
 
 const DEBUG_FILE = "/tmp/autonomous-debug.txt";
-function debugLog(msg: string) {
+const DEBUG_FILE_MAX_BYTES = 5 * 1024 * 1024; // 5MB before rotation
+const DEBUG_FILE_BACKUP = `${DEBUG_FILE}.1`;
+
+// Lazily opened write stream. The previous implementation opened, wrote,
+// fsynced, and closed a file descriptor on EVERY iteration (up to 200× per
+// loop) — burning I/O and growing the file without bound. This version
+// keeps a single stream open for the lifetime of the process and rotates
+// when the file exceeds 5MB. The whole thing is gated on
+// `DEBUG_AUTONOMOUS=1` so it's a no-op in production.
+let debugStream: ReturnType<typeof openSync> | null = null;
+let debugBytesWritten = 0;
+
+function debugLog(msg: string): void {
+  if (process.env.DEBUG_AUTONOMOUS !== "1") return;
   const line = `[${new Date().toISOString()}] ${msg}\n`;
-  const fd = openSync(DEBUG_FILE, "a");
-  writeFileSync(fd, line);
-  fsyncSync(fd);
-  closeSync(fd);
+
+  // Open the stream on first use.
+  if (debugStream === null) {
+    try {
+      debugStream = openSync(DEBUG_FILE, "a");
+      debugBytesWritten = existsSync(DEBUG_FILE) ? statSync(DEBUG_FILE).size : 0;
+    } catch {
+      // If the file can't be opened, silently fall through — debug logging
+      // must never break the production path.
+      return;
+    }
+  }
+
+  // Rotate when the file grows past the cap. Rename the current file to
+  // .1 (overwriting any prior backup) and start a fresh stream.
+  if (debugBytesWritten + Buffer.byteLength(line) > DEBUG_FILE_MAX_BYTES) {
+    try {
+      closeSync(debugStream);
+      unlinkSync(DEBUG_FILE_BACKUP);
+      renameSync(DEBUG_FILE, DEBUG_FILE_BACKUP);
+    } catch {
+      // Rotation failure isn't fatal — keep writing to the existing fd.
+    }
+    debugStream = openSync(DEBUG_FILE, "a");
+    debugBytesWritten = 0;
+  }
+
+  try {
+    writeFileSync(debugStream, line);
+    debugBytesWritten += Buffer.byteLength(line);
+  } catch {
+    // Write failure — close and reset so the next call re-opens.
+    try { closeSync(debugStream); } catch { /* already closed */ }
+    debugStream = null;
+  }
 }
 
 /**
@@ -60,33 +104,54 @@ function debugLog(msg: string) {
  * times out. The RunGodotHeadless tool uses `python3 run_godot_headless.py` which
  * spawns a godot subprocess. If the parent python3 is orphaned (agent timed out),
  * it keeps running indefinitely with its child godot process.
+ *
+ * Cross-platform: uses `pgrep` + `pkill` on POSIX, `taskkill` on Windows.
  */
 function killOrphanedSubprocesses(): void {
+  const platform = process.platform;
+
   try {
-    // Find all python3 processes running run_godot_headless.py
-    const output = execSync(
-      "ps aux | grep run_godot_headless | grep -v grep | awk '{print $2}'",
-      { timeout: 5000 }
-    ).toString().trim();
+    if (platform === "win32") {
+      // /F = force, /T = tree (include child processes), /IM = image name match.
+      // Targets the `godot` child directly; the python parent is a separate
+      // process and would be killed by the tree walk.
+      execFileSync("taskkill", ["/F", "/T", "/IM", "godot.exe"], { timeout: 5000, stdio: "ignore" });
+      logger.info({ event: "kill_orphaned_subprocesses_win32" }, "Killed orphaned godot subprocess(es) via taskkill");
+      return;
+    }
 
-    if (!output) return;
+    // POSIX: pgrep finds the python3 parent processes running our runner script,
+    // pkill -P walks the process tree so the child godot process is killed too
+    // (without this we'd leak a godot child even when the python parent died).
+    const pids = execFileSync("pgrep", ["-f", "run_godot_headless"], { timeout: 5000 })
+      .toString()
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((s) => parseInt(s, 10))
+      .filter((n) => Number.isFinite(n) && n > 0);
 
-    const pids = output.split("\n").filter(Boolean);
     if (pids.length === 0) return;
 
-    logger.info({ pids, event: "kill_orphaned_subprocesses" }, `Killing ${pids.length} orphaned godot headless subprocess(es)`);
+    logger.info(
+      { pids, event: "kill_orphaned_subprocesses" },
+      `Killing ${pids.length} orphaned godot headless subprocess(es)`,
+    );
 
     for (const pid of pids) {
       try {
-        // Kill the python3 parent (this also kills its child godot subprocess)
-        process.kill(parseInt(pid, 10), "SIGKILL");
-        logger.info({ pid, event: "killed_orphaned_subprocess" }, `Killed orphaned subprocess pid=${pid}`);
+        // Kill the entire process group (the python parent + its godot child).
+        // Negative PID signals the whole group on POSIX.
+        process.kill(-pid, "SIGKILL");
+        logger.info({ pid, event: "killed_orphaned_subprocess" }, `Killed orphaned subprocess group pid=${pid}`);
       } catch {
-        // Process may have already exited
+        // Process group may not exist (race with natural exit) — fall back to
+        // killing just the parent PID.
+        try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
       }
     }
   } catch {
-    // ps or kill failed — non-fatal, continue
+    // pgrep, pkill, or taskkill not installed / no matches — non-fatal.
   }
 }
 
@@ -112,12 +177,23 @@ async function runBootCheck(projectPath: string): Promise<{ bootOk: boolean; err
   const pythonBin = process.env.PIPELINE_PYTHON ?? "python3";
   const godotBin = process.env.GODOT_BIN ?? join(process.env.HOME ?? "", ".local/bin/godot_bin/Godot");
 
-  try {
-    const cmd = `${pythonBin} "${join(scriptDir, "run_godot_headless.py")}" --project "${projectPath}" --command boot --godot-bin "${godotBin}" --timeout 45`;
+  // Validate projectPath is inside the workspace to prevent command injection
+  // or path traversal before we even build the command array.
+  const resolvedProject = resolve(projectPath);
+  const resolvedWorkspace = resolve(config.WORKSPACE_DIR);
+  if (!resolvedProject.startsWith(resolvedWorkspace + sep) &&
+      resolvedProject !== resolvedWorkspace) {
+    return { bootOk: false, errors: [`Project path outside workspace: ${projectPath}`] };
+  }
 
-    const result = execSync(cmd, {
-      timeout: 90_000, // 90s max (boot is fast, 60s timeout inside script)
-    });
+  try {
+    // execFileSync passes args as a vector — no shell interpolation, no injection risk.
+    const scriptPath = join(scriptDir, "run_godot_headless.py");
+    const result = execFileSync(
+      pythonBin,
+      [scriptPath, "--project", projectPath, "--command", "boot", "--godot-bin", godotBin, "--timeout", "45"],
+      { timeout: 90_000 }, // 90s max (boot is fast, 60s timeout inside script)
+    );
 
     const stdout = result?.toString() ?? "";
 
@@ -142,7 +218,7 @@ async function runBootCheck(projectPath: string): Promise<{ bootOk: boolean; err
       return { bootOk: true, errors: [] };
     }
   } catch (err: unknown) {
-    // execSync throws on non-zero exit — that's the normal failure case
+    // execFileSync throws on non-zero exit — that's the normal failure case
     let errors: string[] = [];
     let errorMsg = "";
 
@@ -593,6 +669,13 @@ async function runIteration(state: LoopState, board: TicketsBoard, projectContex
     attempt++;
     const AGENT_TIMEOUT_MS = 1_200_000; // 20 minutes per attempt
 
+    // AbortController is wired through `invokeAgent` → `callLLMWithTools` so
+    // that when the timeout fires, the in-flight LLM request is actually
+    // cancelled. Without this, `Promise.race` would stop awaiting the agent
+    // promise but the LLM fetch would keep running, eventually completing and
+    // potentially mutating shared state (token usage, broadcast events) after
+    // the autonomous loop has moved on.
+    const agentAbort = new AbortController();
     const agentPromise = invokeAgent(
       state.currentAgentRole as AgentRole,
       `[AUTONOMOUS TICKET] ${activeTicket.description || activeTicket.title}${attempt > 1 ? ` (retry ${attempt}/${MAX_TICKET_RETRIES})` : ""}`,
@@ -605,10 +688,15 @@ async function runIteration(state: LoopState, board: TicketsBoard, projectContex
       projectContext,
       undefined,
       makeTokenTracker(state.sessionId, state.projectId),
+      agentAbort.signal,
     );
 
     const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error(`Agent timed out after ${AGENT_TIMEOUT_MS / 1000}s — godot-specialist likely hanging on a Godot MCP tool. The MCP per-tool timeout is 30s; if a tool hangs past that the MCP service kills it. Check that Godot editor is running with godot_mcp plugin and MCP port 6005 is reachable.`)), AGENT_TIMEOUT_MS)
+      setTimeout(() => {
+        // Cancel the LLM call so it doesn't keep running in the background.
+        agentAbort.abort();
+        reject(new Error(`Agent timed out after ${AGENT_TIMEOUT_MS / 1000}s — godot-specialist likely hanging on a Godot MCP tool. The MCP per-tool timeout is 30s; if a tool hangs past that the MCP service kills it. Check that Godot editor is running with godot_mcp plugin and MCP port 6005 is reachable.`));
+      }, AGENT_TIMEOUT_MS)
     );
 
     agentRejected = false;
@@ -873,11 +961,16 @@ If the failure is an infinite loop or hang (timeout), suggest a workaround.`,
 
 // POST /autonomous/start — Start or resume the autonomous loop
 autonomousRouter.post("/start", async (req: Request, res: Response) => {
-  const { sessionId, projectId, maxIterations = 200 } = req.body as {
+  const { sessionId, projectId } = req.body as {
     sessionId?: string;
     projectId?: string;
     maxIterations?: number;
   };
+  // Clamp maxIterations to [1, 500] so a client can't request an effectively
+  // infinite loop. Anything beyond 500 iterations is almost certainly a bug
+  // or a runaway request.
+  const rawMaxIterations = (req.body as { maxIterations?: number }).maxIterations ?? 200;
+  const maxIterations = Math.min(Math.max(parseInt(String(rawMaxIterations), 10) || 200, 1), 500);
 
   if (!sessionId) {
     res.status(400).json({ success: false, error: "sessionId is required" });

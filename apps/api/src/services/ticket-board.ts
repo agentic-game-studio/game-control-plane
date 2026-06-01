@@ -12,6 +12,7 @@ export const DEFAULT_TICKETS_BOARD: TicketsBoard = {
     { id: "in_progress", label: "Processing", tickets: [] },
     { id: "qa", label: "Verify", tickets: [] },
     { id: "completed", label: "Archived", tickets: [] },
+    { id: "failed", label: "Failed", tickets: [] },
   ],
 };
 

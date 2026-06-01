@@ -29,6 +29,7 @@ export const delegationMap: Record<AgentRole, AgentRole[]> = {
     "release-manager",
     "prototyper",
   ],
+  "game-director": ["creative-director", "technical-director", "producer"],
   "game-designer": ["systems-designer", "level-designer", "economy-designer"],
   "lead-programmer": [
     "gameplay-programmer",
@@ -90,6 +91,7 @@ export const delegationMap: Record<AgentRole, AgentRole[]> = {
   "autonomous-producer": [],
   "godot-scaffolder": [],
   "godot-gdscript-specialist": ["code-reviewer"],
+  "godot-csharp-specialist": ["code-reviewer"],
   "godot-shader-specialist": [],
   "godot-gdextension-specialist": ["code-reviewer"],
   "unity-dots-specialist": [],

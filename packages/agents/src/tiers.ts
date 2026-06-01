@@ -10,6 +10,7 @@ export const agentTiers: Record<AgentRole, { tier: 1 | 2 | 3; model: ModelTier }
   "creative-director": { tier: 1, model: "opus" },
   "technical-director": { tier: 1, model: "opus" },
   producer: { tier: 1, model: "opus" },
+  "game-director": { tier: 1, model: "opus" },
   // Tier 2 — Department Leads (Sonnet)
   "game-designer": { tier: 2, model: "sonnet" },
   "lead-programmer": { tier: 2, model: "sonnet" },
@@ -47,6 +48,7 @@ export const agentTiers: Record<AgentRole, { tier: 1 | 2 | 3; model: ModelTier }
   "godot-scaffolder": { tier: 3, model: "sonnet" },
   "godot-specialist": { tier: 3, model: "sonnet" },
   "godot-gdscript-specialist": { tier: 3, model: "sonnet" },
+  "godot-csharp-specialist": { tier: 3, model: "sonnet" },
   "godot-shader-specialist": { tier: 3, model: "sonnet" },
   "godot-gdextension-specialist": { tier: 3, model: "sonnet" },
   "unity-specialist": { tier: 3, model: "sonnet" },

@@ -49,4 +49,16 @@ export const leadershipAgents: Partial<Record<AgentRole, AgentDefinition>> = {
     reportsTo: [],
     delegates: ["creative-director", "technical-director", "game-designer", "lead-programmer", "art-director", "audio-director", "narrative-director", "qa-lead", "release-manager", "prototyper"],
   },
+  "game-director": {
+    name: "game-director",
+    description: "Top-level orchestrator with full studio authority — synthesizes creative, technical, and production perspectives into a single coherent vision. Resolves inter-departmental conflicts and signs off on the overall player experience. Distinct from the more tactical `producer` (board-room message router) and `autonomous-producer` (no-human-in-the-loop driver).",
+    tier: 1,
+    model: "opus",
+    tools: ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Task", "AskUserQuestion"],
+    maxTurns: 50,
+    skills: ["brainstorm", "design-system", "design-review", "gate-check", "milestone-review"],
+    memory: "project",
+    reportsTo: [],
+    delegates: ["creative-director", "technical-director", "producer"],
+  },
 };

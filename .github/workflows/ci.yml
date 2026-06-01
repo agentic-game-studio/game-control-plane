@@ -30,6 +30,12 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
+      - name: Build
+        # Build both apps so CI catches Dockerfile, import-resolution, and
+        # Next.js config issues that typecheck alone would miss. The API build
+        # is fast (~10s); the Next build is the dominant cost.
+        run: pnpm build
+
       - name: Test
         run: pnpm test
 

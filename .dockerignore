@@ -1,0 +1,59 @@
+# Dependencies
+node_modules
+**/node_modules
+
+# Build artifacts (rebuilt inside the image)
+dist
+build
+**/dist
+**/build
+**/.next
+**/.turbo
+
+# TypeScript incremental build cache
+*.tsbuildinfo
+
+# Source maps and dev files
+**/*.map
+coverage
+**/.nyc_output
+
+# Local state and data (mounted as volumes at runtime)
+workspace
+data
+logs
+**/logs
+**/data
+
+# Test outputs and e2e artifacts
+**/playwright-report
+**/test-results
+**/e2e/.auth
+
+# Env files (passed at runtime via -e or secrets)
+.env
+.env.*
+!.env.example
+
+# Editor / OS noise
+.DS_Store
+.vscode
+.idea
+*.swp
+
+# Git metadata
+.git
+.gitignore
+.github
+
+# Documentation and design assets (not needed at runtime)
+README.md
+DEPLOYMENT.md
+RELEASING.md
+docs
+**/docs
+**/*.md
+!packages/types/src/**/*.md
+
+# Web app isn't needed inside the API image
+apps/web

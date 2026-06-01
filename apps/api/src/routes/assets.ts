@@ -398,6 +398,20 @@ assetsRouter.get("/:id/thumbnail", async (req: Request, res: Response) => {
     res.setHeader("Content-Type", "image/png");
     res.setHeader("Cache-Control", "public, max-age=3600");
     const stream = (await import("node:fs")).createReadStream(thumbAbsPath);
+    // Without this handler, a stream that errors mid-read (file deleted
+    // between stat and pipe, EIO on a flaky disk, etc.) would silently drop
+    // the connection. The client would see a truncated image with a 200 OK
+    // and the error-handler middleware can't recover because headers are
+    // already sent.
+    stream.on("error", (err) => {
+      if (!res.headersSent) {
+        res.status(500).send("Error");
+        return;
+      }
+      // Headers already sent — best we can do is end the response so the
+      // client doesn't see a half-loaded image and the socket is freed.
+      try { res.end(); } catch { /* socket already gone */ }
+    });
     stream.pipe(res);
   } catch {
     res.status(500).send("Error");

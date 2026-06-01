@@ -49,11 +49,11 @@ game-control-plane/
 
 ## Architecture
 
-### Agent Hierarchy (50 agents)
+### Agent Hierarchy (53 agents)
 
-- **Tier 1 (Opus → glm-5.1)**: producer (standalone, owns orchestration), creative-director, technical-director
-- **Tier 2 (Sonnet → glm-4.7)**: game-designer, lead-programmer, art-director, audio-director, narrative-director, qa-lead, release-manager, localization-lead
-- **Tier 3 (Sonnet → glm-4.7)**: 38 specialists — systems-designer, gameplay-programmer, godot-specialist, unreal-specialist, unity-specialist, code-reviewer, etc.
+- **Tier 1 (Opus → glm-5.1)**: producer (Board Room orchestrator), autonomous-producer (no-human loop driver), creative-director, technical-director, game-director (top-level vision owner)
+- **Tier 2 (Sonnet → glm-4.7)**: 8 department leads — game-designer, lead-programmer, art-director, audio-director, narrative-director, qa-lead, release-manager, localization-lead
+- **Tier 3 (Sonnet → glm-4.7)**: 40 specialists — systems-designer, gameplay-programmer, godot-specialist, godot-gdscript-specialist, godot-csharp-specialist, unreal-specialist, unity-specialist, code-reviewer, etc.
 
 ### Autonomous Production Mode
 

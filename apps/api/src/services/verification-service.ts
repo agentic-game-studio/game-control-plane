@@ -12,6 +12,14 @@ import { updateTicketsBoard } from "./ticket-board.js";
 import type { Ticket, AgentRole, WSEvent } from "@game-studio/types";
 import { logger } from "../utils/logger.js";
 
+/** Maximum number of consecutive verification errors before a ticket is
+ * dead-lettered. Without this cap, a broken verifier (e.g. missing API key,
+ * LLM outage) would burn credits forever as the autonomous loop re-picks
+ * the same ticket. After 3 errors, the ticket is parked in the `failed`
+ * column with `deadLetter: true` and a `ticket:deadletter` event is broadcast
+ * so the UI can surface it for human review. */
+const MAX_VERIFY_FAILURES = 3;
+
 // ─── Verifier selection map: area keywords → verifier agent role ───
 
 const AREA_VERIFIERS: { keywords: string[]; verifier: AgentRole; fallback?: AgentRole }[] = [
@@ -190,14 +198,83 @@ export async function verifyTicket(
       `Verification failed for ticket ${ticket.id}: ${errorMessage}`,
     );
 
-    // Move ticket back to available so the autonomous loop can re-pick it.
-    // Leaving it in verify would cause it to be stuck forever.
-    await moveQuestTicket(ticket.id, "available", ticket.assignee).catch((moveErr) => {
+    // Bump the per-ticket failure counter. If we haven't hit the cap, leave
+    // the ticket in `available` for the autonomous loop to retry. If we have
+    // hit the cap, dead-letter the ticket so it stops consuming LLM credits.
+    const projectId = ticket.projectId ?? null;
+    let failureCount = 0;
+    if (projectId) {
+      try {
+        await updateTicketsBoard(projectId, (board) => {
+          for (const col of board.columns) {
+            const t = col.tickets.find((x) => x.id === ticket.id);
+            if (t) {
+              t.consecutiveFailures = (t.consecutiveFailures ?? 0) + 1;
+              t.lastError = errorMessage;
+              failureCount = t.consecutiveFailures;
+            }
+          }
+          return board;
+        });
+      } catch (bumpErr) {
+        logger.warn(
+          { event: "verify_bump_failed", ticketId: ticket.id, error: bumpErr instanceof Error ? bumpErr.message : String(bumpErr) },
+          "Failed to record verification failure on the ticket",
+        );
+      }
+    }
+
+    if (failureCount >= MAX_VERIFY_FAILURES) {
+      // Dead-letter: move to the `failed` column with a marker, broadcast a
+      // dedicated event so the UI can show a banner, and log loudly.
       logger.error(
-        { event: "verify_move_failed", ticketId: ticket.id, error: moveErr instanceof Error ? moveErr.message : String(moveErr) },
-        `Failed to move ticket ${ticket.id} back to available after verification error`,
+        { event: "verify_deadletter", ticketId: ticket.id, attempts: failureCount, error: errorMessage },
+        `Ticket ${ticket.id} dead-lettered after ${failureCount} consecutive verification failures`,
       );
-    });
+
+      if (projectId) {
+        try {
+          await updateTicketsBoard(projectId, (board) => {
+            for (const col of board.columns) {
+              if (col.id === "failed") {
+                const t = col.tickets.find((x) => x.id === ticket.id);
+                if (!t) {
+                  const moved = board.columns.flatMap((c) => c.tickets).find((x) => x.id === ticket.id);
+                  if (moved) {
+                    moved.deadLetter = true;
+                    moved.status = "failed";
+                    col.tickets.push(moved);
+                  }
+                }
+              }
+              col.tickets = col.tickets.filter((x) => x.id !== ticket.id || col.id === "failed");
+            }
+            return board;
+          });
+        } catch (dlErr) {
+          logger.error(
+            { event: "verify_deadletter_write_failed", ticketId: ticket.id, error: dlErr instanceof Error ? dlErr.message : String(dlErr) },
+            "Failed to persist dead-letter state",
+          );
+        }
+      }
+
+      broadcastEvent({
+        type: "ticket:deadletter",
+        ticketId: ticket.id,
+        projectId,
+        reason: errorMessage,
+        attempts: failureCount,
+      } as WSEvent);
+    } else {
+      // Under the cap — requeue so the autonomous loop can pick it up again.
+      await moveQuestTicket(ticket.id, "available", ticket.assignee).catch((moveErr) => {
+        logger.error(
+          { event: "verify_move_failed", ticketId: ticket.id, error: moveErr instanceof Error ? moveErr.message : String(moveErr) },
+          `Failed to move ticket ${ticket.id} back to available after verification error`,
+        );
+      });
+    }
 
     return {
       ticketId: ticket.id,

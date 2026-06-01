@@ -15,6 +15,7 @@ export type AgentRole =
   | "creative-director"
   | "technical-director"
   | "producer"
+  | "game-director"
   // Tier 2 — Department Leads
   | "game-designer"
   | "lead-programmer"
@@ -52,6 +53,7 @@ export type AgentRole =
   | "godot-scaffolder"
   | "godot-specialist"
   | "godot-gdscript-specialist"
+  | "godot-csharp-specialist"
   | "godot-shader-specialist"
   | "godot-gdextension-specialist"
   | "unity-specialist"

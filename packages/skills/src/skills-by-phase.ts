@@ -880,6 +880,12 @@ export const skillsByPhase: Record<string, SkillDefinition[]> = {
       userInvocable: true,
     },
     {
+      name: "art-bible",
+      description: "Create or update the project's Art Bible — palette, typography, character style guide, UI conventions. Referenced by art-director agent.",
+      phases: [],
+      userInvocable: true,
+    },
+    {
       name: "content-audit",
       description: "Audit GDD-specified content counts against implemented content",
       phases: [],
@@ -888,6 +894,12 @@ export const skillsByPhase: Record<string, SkillDefinition[]> = {
     {
       name: "scope-check",
       description: "Analyze feature or sprint scope against original plan",
+      phases: [],
+      userInvocable: true,
+    },
+    {
+      name: "security-audit",
+      description: "Audit game code and infrastructure for security vulnerabilities — input validation, auth flows, secret handling, dependency CVEs. Referenced by security-engineer agent.",
       phases: [],
       userInvocable: true,
     },

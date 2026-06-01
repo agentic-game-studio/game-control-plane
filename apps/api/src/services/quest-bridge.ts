@@ -35,6 +35,20 @@ setInterval(() => {
 }, 60 * 60 * 1000).unref(); // run hourly, don't keep process alive
 
 export function startWorkflow(sessionId: string): string {
+  // Guard against concurrent startWorkflow calls for the same session: the
+  // previous version of this function would silently overwrite an in-flight
+  // workflow, losing the ticket map. The Map is a regular Map (not concurrent),
+  // so the check + set must happen in the same synchronous frame — which it
+  // does here because Node is single-threaded.
+  const existing = activeWorkflows.get(sessionId);
+  if (existing) {
+    logger.warn(
+      { sessionId, existingWorkflowId: existing.workflowId, event: "workflow_already_active" },
+      "Refusing to start a new workflow — one is already in flight for this session",
+    );
+    return existing.workflowId;
+  }
+
   const workflowId = `wf-${Date.now()}`;
   activeWorkflows.set(sessionId, {
     workflowId,

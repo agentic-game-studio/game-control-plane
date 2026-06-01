@@ -1,7 +1,6 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
 import fs from "fs";
-import os from "os";
 import { readData, writeData, broadcastEvent, deleteData } from "../services/data-store.js";
 import { logger } from "../utils/logger.js";
 import type {
@@ -10,13 +9,14 @@ import type {
   CreateProjectRequest,
   UpdateProjectRequest,
   ProjectEngine,
+  Ticket,
 } from "@game-studio/types";
 import type { WSEvent } from "@game-studio/types";
 import { orphanProjectSessions } from "./chat.js";
 import { removeGodotMCPService, installGodotMCPPlugin, isGodotMCPPluginInstalled, isGodotMCPPluginEnabled, launchGodotEditor } from "../services/godot-mcp-service.js";
 import { detectEngineFromWorkspace } from "../services/llm-service.js";
 import { resolveProjectWorkspace, validateWorkspacePath } from "../utils/workspace.js";
-import { getTicketsBoardFile } from "../services/ticket-board.js";
+import { getTicketsBoardFile, writeTicketsBoard } from "../services/ticket-board.js";
 import { loadConfig } from "../config.js";
 import path from "node:path";
 
@@ -59,6 +59,222 @@ function normalizeDashboardData(data: DashboardData): DashboardData {
 
 export const dashboardRouter: Router = Router();
 
+async function readDashboardOrDefault(): Promise<DashboardData> {
+  try {
+    return await readData<DashboardData>("dashboard.json");
+  } catch {
+    await writeData("dashboard.json", DEFAULT_DATA);
+    return structuredClone(DEFAULT_DATA);
+  }
+}
+
+function writeDemoGodotProject(projectDir: string): void {
+  fs.mkdirSync(path.join(projectDir, "scenes"), { recursive: true });
+  fs.mkdirSync(path.join(projectDir, "scripts"), { recursive: true });
+  fs.mkdirSync(path.join(projectDir, "design"), { recursive: true });
+
+  fs.writeFileSync(
+    path.join(projectDir, "project.godot"),
+    [
+      "; Engine configuration file.",
+      "config_version=5",
+      "",
+      "[application]",
+      'config/name="Railway Demo Platformer"',
+      'run/main_scene="res://scenes/main.tscn"',
+      'config/features=PackedStringArray("4.3", "Forward Plus")',
+      "",
+      "[display]",
+      "window/size/viewport_width=960",
+      "window/size/viewport_height=540",
+      "",
+    ].join("\n"),
+  );
+
+  fs.writeFileSync(
+    path.join(projectDir, "scenes/main.tscn"),
+    [
+      '[gd_scene load_steps=2 format=3 uid="uid://railway-demo-main"]',
+      "",
+      '[ext_resource type="Script" path="res://scripts/player.gd" id="1_player"]',
+      "",
+      '[node name="Main" type="Node2D"]',
+      "",
+      '[node name="Player" type="CharacterBody2D" parent="."]',
+      'script = ExtResource("1_player")',
+      "",
+      '[node name="Camera2D" type="Camera2D" parent="Player"]',
+      "enabled = true",
+      "",
+    ].join("\n"),
+  );
+
+  fs.writeFileSync(
+    path.join(projectDir, "scripts/player.gd"),
+    [
+      "extends CharacterBody2D",
+      "",
+      "const SPEED := 220.0",
+      "const JUMP_VELOCITY := -360.0",
+      "const GRAVITY := 980.0",
+      "",
+      "func _physics_process(delta: float) -> void:",
+      "\tif not is_on_floor():",
+      "\t\tvelocity.y += GRAVITY * delta",
+      "",
+      '\tvar direction := Input.get_axis("ui_left", "ui_right")',
+      "\tvelocity.x = direction * SPEED",
+      "",
+      '\tif Input.is_action_just_pressed("ui_accept") and is_on_floor():',
+      "\t\tvelocity.y = JUMP_VELOCITY",
+      "",
+      "\tmove_and_slide()",
+      "",
+    ].join("\n"),
+  );
+
+  fs.writeFileSync(
+    path.join(projectDir, "design/gdd.md"),
+    [
+      "# Railway Demo Platformer",
+      "",
+      "A small cloud-hosted Godot workspace seeded for hackathon judging.",
+      "",
+      "## Core Loop",
+      "- Move through a compact level.",
+      "- Collect coins.",
+      "- Avoid patrol enemies.",
+      "- Reach the exit before the timer ends.",
+      "",
+      "## Demo Notes",
+      "This project lives in the Railway persistent workspace, not on a local laptop.",
+      "",
+    ].join("\n"),
+  );
+
+  fs.writeFileSync(
+    path.join(projectDir, "README.md"),
+    [
+      "# Railway Demo Platformer",
+      "",
+      "This cloud workspace was created by the Control Plane demo flow.",
+      "Judges can use it to test dashboard, quests, chat context, assets, and build orchestration screens online.",
+      "",
+    ].join("\n"),
+  );
+}
+
+// POST /api/dashboard/demo-project - Seed a judge-friendly cloud demo project
+dashboardRouter.post("/demo-project", async (_req: Request, res: Response) => {
+  try {
+    const data = await readDashboardOrDefault();
+    const workspacePath = "demo-godot-platformer";
+    const existing = data.projects.find((p) => p.workspacePath === workspacePath);
+    if (existing) {
+      res.json({ success: true, data: existing });
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const projectId = `proj-demo-${Date.now()}`;
+    const projectDir = resolveProjectWorkspace(workspacePath);
+    writeDemoGodotProject(projectDir);
+
+    const demoProject = normalizeProject({
+      id: projectId,
+      name: "Railway Demo Platformer",
+      description: "Cloud-hosted Godot sample for hackathon judges",
+      engine: "godot",
+      progress: 35,
+      status: "active",
+      workspacePath,
+      icon: "sports_esports",
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    data.projects.push(demoProject);
+    data.activityLog.unshift({
+      id: `log-${Date.now()}`,
+      timestamp: now,
+      level: "info",
+      source: "demo",
+      message: "Seeded Railway demo project in cloud workspace",
+    });
+    await writeData("dashboard.json", data);
+
+    const tickets: Ticket[] = [
+      {
+        id: `ticket-demo-${Date.now()}-movement`,
+        projectId,
+        title: "Verify platformer movement feel",
+        description: "Check run, jump, gravity, and camera behavior in the seeded Godot scene.",
+        area: "gameplay",
+        subarea: "player-controller",
+        credits: 2,
+        estimateHours: 1,
+        status: "available",
+        agentRole: "godot-specialist",
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        id: `ticket-demo-${Date.now()}-coins`,
+        projectId,
+        title: "Add coin pickup loop",
+        description: "Create collectible coins, HUD count, and pickup feedback.",
+        area: "gameplay",
+        subarea: "collectibles",
+        credits: 3,
+        estimateHours: 2,
+        status: "in_progress",
+        agentRole: "gameplay-programmer",
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        id: `ticket-demo-${Date.now()}-qa`,
+        projectId,
+        title: "Smoke-test web export readiness",
+        description: "Confirm the project has a main scene and basic boot path for export testing.",
+        area: "qa",
+        subarea: "smoke-test",
+        credits: 2,
+        estimateHours: 1,
+        status: "qa",
+        agentRole: "qa-tester",
+        createdAt: now,
+        updatedAt: now,
+      },
+    ];
+
+    await writeTicketsBoard(
+      {
+        projectId,
+        sprint: "Hackathon Demo Sprint",
+        milestone: "Online Judge Demo",
+        columns: [
+          { id: "available", label: "Available", tickets: tickets.filter((t) => t.status === "available") },
+          { id: "in_progress", label: "Processing", tickets: tickets.filter((t) => t.status === "in_progress") },
+          { id: "qa", label: "Verify", tickets: tickets.filter((t) => t.status === "qa") },
+          { id: "completed", label: "Archived", tickets: [] },
+        ],
+      },
+      projectId,
+    );
+
+    broadcastEvent({
+      type: "project:created",
+      project: demoProject,
+    } as WSEvent);
+
+    res.status(201).json({ success: true, data: demoProject });
+  } catch (err) {
+    logger.error({ error: err instanceof Error ? err.message : String(err) }, "Failed to create demo project");
+    res.status(500).json({ success: false, error: "Failed to create demo project" });
+  }
+});
+
 // POST /api/dashboard/validate-path - Validate a workspace path
 dashboardRouter.post("/validate-path", async (req: Request, res: Response) => {
   const { path: inputPath } = req.body as { path?: string };
@@ -74,14 +290,22 @@ dashboardRouter.post("/validate-path", async (req: Request, res: Response) => {
 dashboardRouter.post("/browse-directory", async (req: Request, res: Response) => {
   try {
     const { path: inputPath } = req.body as { path?: string };
-    const dirPath = inputPath?.trim() || os.homedir();
+    // Default to WORKSPACE_DIR (the trusted boundary) instead of os.homedir(),
+    // which would otherwise expose the entire home filesystem to a UI browser.
+    const workspaceDir = loadConfig().WORKSPACE_DIR;
+    const dirPath = inputPath?.trim() || workspaceDir;
 
-    if (dirPath.includes("..")) {
-      res.status(400).json({ success: false, error: "Path traversal not allowed" });
+    // Resolve FIRST, then validate the result is inside the workspace boundary.
+    // The previous substring `..` check ran on the raw input and could be
+    // bypassed by paths like "/etc/.." that resolve to a parent of the
+    // workspace.
+    const resolved = path.resolve(dirPath);
+    const resolvedWorkspace = path.resolve(workspaceDir);
+    if (!resolved.startsWith(resolvedWorkspace + path.sep) && resolved !== resolvedWorkspace) {
+      res.status(400).json({ success: false, error: "Path outside workspace" });
       return;
     }
 
-    const resolved = path.resolve(dirPath);
     if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
       res.status(400).json({ success: false, error: "Not a valid directory" });
       return;
@@ -94,12 +318,16 @@ dashboardRouter.post("/browse-directory", async (req: Request, res: Response) =>
       .sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
 
     const parentPath = path.dirname(resolved);
+    // Never let the user "parent" out of the workspace.
+    const safeParent = parentPath.startsWith(resolvedWorkspace + path.sep) || parentPath === resolvedWorkspace
+      ? parentPath
+      : null;
 
     res.json({
       success: true,
       data: {
         currentPath: resolved,
-        parentPath: parentPath !== resolved ? parentPath : null,
+        parentPath: safeParent !== resolved ? safeParent : null,
         directories,
       },
     });
