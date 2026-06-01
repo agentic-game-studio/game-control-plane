@@ -23,6 +23,10 @@ const envSchema = z
     BODY_LIMIT_MB: z.coerce.number().default(5),
     WORKFLOW_TTL_MS: z.coerce.number().default(24 * 60 * 60 * 1000),
     ASSET_WATCHER_LIMIT: z.coerce.number().default(32),
+    RATE_LIMIT_REQUESTS: z.coerce.number().default(10),
+    RATE_LIMIT_WINDOW_MS: z.coerce.number().default(60_000),
+    RATE_LIMIT_BUCKET_CAP: z.coerce.number().default(10_000),
+    MAX_SSE_CLIENTS: z.coerce.number().default(50),
     ENABLE_TEST_ENDPOINTS: z
       .union([z.literal("true"), z.literal("false")])
       .default("false")
@@ -63,6 +67,10 @@ export function loadConfig() {
     BODY_LIMIT_MB: process.env.BODY_LIMIT_MB,
     WORKFLOW_TTL_MS: process.env.WORKFLOW_TTL_MS,
     ASSET_WATCHER_LIMIT: process.env.ASSET_WATCHER_LIMIT,
+    RATE_LIMIT_REQUESTS: process.env.RATE_LIMIT_REQUESTS,
+    RATE_LIMIT_WINDOW_MS: process.env.RATE_LIMIT_WINDOW_MS,
+    RATE_LIMIT_BUCKET_CAP: process.env.RATE_LIMIT_BUCKET_CAP,
+    MAX_SSE_CLIENTS: process.env.MAX_SSE_CLIENTS,
     ENABLE_TEST_ENDPOINTS: process.env.ENABLE_TEST_ENDPOINTS,
   };
 

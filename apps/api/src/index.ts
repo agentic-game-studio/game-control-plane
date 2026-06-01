@@ -29,11 +29,10 @@ import { requestLogger } from "./middleware/request-logger.js";
 
 const START_TIME = Date.now();
 
-// Q2: Simple in-memory rate limiter (per-IP, sliding window)
+// Q2: Simple in-memory rate limiter (per-IP, sliding window).
+// Limits come from env config so operators can tune for their workload
+// without redeploying code.
 const rateBuckets = new Map<string, { count: number; resetAt: number }>();
-const RATE_LIMIT = 10; // requests per window
-const RATE_WINDOW_MS = 60_000; // 1 minute
-const RATE_BUCKET_CAP = 10_000; // hard cap on tracked IPs (LRU evict beyond)
 
 // Evict expired rate bucket entries every 5 minutes to prevent unbounded memory growth
 const rateCleanupInterval = setInterval(() => {
@@ -45,6 +44,7 @@ const rateCleanupInterval = setInterval(() => {
 rateCleanupInterval.unref();
 
 function rateLimiter(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const { RATE_LIMIT_REQUESTS, RATE_LIMIT_WINDOW_MS, RATE_LIMIT_BUCKET_CAP } = loadConfig();
   const ip = req.ip ?? req.socket.remoteAddress ?? "unknown";
   const now = Date.now();
   const bucket = rateBuckets.get(ip);
@@ -52,16 +52,16 @@ function rateLimiter(req: express.Request, res: express.Response, next: express.
   if (!bucket || now >= bucket.resetAt) {
     // LRU cap: a botnet rotating IPs can otherwise grow the map forever —
     // periodic cleanup only removes EXPIRED entries, never over-cap ones.
-    if (rateBuckets.size >= RATE_BUCKET_CAP) {
+    if (rateBuckets.size >= RATE_LIMIT_BUCKET_CAP) {
       const oldest = rateBuckets.keys().next().value;
       if (oldest) rateBuckets.delete(oldest);
     }
-    rateBuckets.set(ip, { count: 1, resetAt: now + RATE_WINDOW_MS });
+    rateBuckets.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
     return next();
   }
 
   bucket.count++;
-  if (bucket.count > RATE_LIMIT) {
+  if (bucket.count > RATE_LIMIT_REQUESTS) {
     res.status(429).json({ success: false, error: "Rate limit exceeded — try again in a minute" });
     return;
   }
@@ -175,10 +175,11 @@ app.get("/health", (_req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
-// SSE endpoint for log streaming
-const MAX_SSE_CLIENTS = 50;
+// SSE endpoint for log streaming. The per-instance cap is read from
+// config so a deployment with higher headroom can raise it without a
+// code change.
 app.get("/api/sessions/:sessionId/stream", (req, res) => {
-  if (sseClients.size >= MAX_SSE_CLIENTS) {
+  if (sseClients.size >= loadConfig().MAX_SSE_CLIENTS) {
     res.status(503).json({ success: false, error: "Too many SSE connections — try again later" });
     return;
   }

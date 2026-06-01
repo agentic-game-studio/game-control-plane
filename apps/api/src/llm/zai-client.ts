@@ -450,7 +450,7 @@ function pruneMessages(messages: LLMMessage[], maxTokens: number): LLMMessage[] 
       // If the PREVIOUS kept message has tool_calls, drop it too — orphaned tool calls
       // without results will confuse the LLM
       const prevKept = result[result.length - 1];
-      if (prevKept && prevKept.role === "assistant" && (prevKept as any).tool_calls) {
+      if (prevKept && prevKept.role === "assistant" && prevKept.tool_calls) {
         result.pop();
       }
 
@@ -814,7 +814,7 @@ export async function callLLMWithTools(
           toolName: tc.name,
           iterations: iteration,
           message: loopCheck.message,
-        } as any);
+        });
 
         // Inject enhanced warning into context with continuation reminder
         messages.push({ role: "assistant", content: response.content, tool_calls: response.tool_calls });

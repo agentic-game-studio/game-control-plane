@@ -71,30 +71,34 @@ export async function loadAgentPrompts(): Promise<Map<string, AgentPrompt>> {
     const content = await fs.readFile(filePath, "utf-8");
     const { frontmatter, body } = parseFrontmatter(content);
 
-    const name = frontmatter.name as string ?? file.replace(".md", "");
-    const tools = Array.isArray(frontmatter.tools)
-      ? (frontmatter.tools as string[])
-      : typeof frontmatter.tools === "string"
-      ? (frontmatter.tools as string).split(",").map((s) => s.trim())
-      : [];
+    // Coerce frontmatter values defensively. The previous version used
+    // `as string` everywhere, which let a bad frontmatter like
+    // `name: [foo, bar]` surface in the agent registry as a malformed
+    // joined string. Helpers below reduce that surface area.
+    const fmString = (key: string, fallback = ""): string => {
+      const v = frontmatter[key];
+      if (typeof v === "string") return v;
+      if (Array.isArray(v)) return v.join(", ");
+      return fallback;
+    };
+    const fmList = (key: string): string[] | undefined => {
+      const v = frontmatter[key];
+      if (!v) return undefined;
+      if (Array.isArray(v)) return v;
+      if (typeof v === "string") return v.split(",").map((s) => s.trim()).filter(Boolean);
+      return undefined;
+    };
+    const name = fmString("name") || file.replace(".md", "");
 
     const prompt: AgentPrompt = {
       name,
-      description: (frontmatter.description as string) ?? "",
-      tools: tools as string[],
-      model: (frontmatter.model as string) ?? "sonnet",
-      maxTurns: parseInt((frontmatter.maxTurns as string) ?? "30", 10),
-      memory: (frontmatter.memory as string) ?? "user",
-      disallowedTools: frontmatter.disallowedTools
-        ? typeof frontmatter.disallowedTools === "string"
-          ? (frontmatter.disallowedTools as string).split(",").map((s) => s.trim())
-          : (frontmatter.disallowedTools as string[])
-        : undefined,
-      skills: frontmatter.skills
-        ? Array.isArray(frontmatter.skills)
-          ? (frontmatter.skills as string[])
-          : []
-        : undefined,
+      description: fmString("description"),
+      tools: fmList("tools") ?? [],
+      model: fmString("model", "sonnet"),
+      maxTurns: parseInt(fmString("maxTurns", "30"), 10),
+      memory: fmString("memory", "user"),
+      disallowedTools: fmList("disallowedTools"),
+      skills: fmList("skills"),
       systemPrompt: body.trim(),
     };
 
