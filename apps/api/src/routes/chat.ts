@@ -191,8 +191,12 @@ function pruneConversationHistory(history: LLMMessage[]): LLMMessage[] {
   const recentCount = 50;
   let recent = history.slice(-recentCount);
 
-  // If slice starts with tool result, skip it (incomplete pair)
-  if (recent.length > 0 && recent[0].role === "tool") {
+  // Skip leading tool messages until we find a non-tool message. A single
+  // `slice(1)` was insufficient: parallel tool calls produce a run of
+  // `role: "tool"` messages that all share one preceding assistant message,
+  // so dropping only the first still leaves an orphan tool_result. The LLM
+  // API rejects orphan tool_results with a 400 (tool_use_id not found).
+  while (recent.length > 0 && recent[0].role === "tool") {
     recent = recent.slice(1);
   }
 

@@ -55,6 +55,15 @@ const activeLoopSessions = new Set<string>();
  * so a 20-minute invokeAgent call would keep running for up to 20 minutes
  * after the user pressed Stop, burning LLM credits. */
 const loopAbortControllers = new Map<string, AbortController>();
+
+/** Tracks /start calls that are mid-validation (after the first await
+ * but before the sessionId is added to `activeLoopSessions`). Without
+ * this lock, two concurrent /start requests for the same sessionId can
+ * both pass the duplicate-running check at line 1115 (the
+ * `activeLoopSessions.has` test runs before the set is updated at line
+ * 1175), then both spawn their own IIFEs and double-broadcast
+ * autonomous:* events. */
+const pendingStarts = new Set<string>();
 const STALE_LOOP_HEARTBEAT_MS = 5 * 60 * 1000; // 5 minutes without heartbeat = stale
 
 // 6D-6th: route debug output under the workspace instead of /tmp. On a
@@ -1080,14 +1089,30 @@ autonomousRouter.post("/start", async (req: Request, res: Response) => {
     return;
   }
 
+  // Serialize /start per sessionId BEFORE the first await. Two concurrent
+  // /start calls for the same sessionId can otherwise both pass the
+  // duplicate-running check below (the set membership is updated only
+  // after the awaits complete) and both spawn their own IIFEs.
+  if (pendingStarts.has(sessionId) || activeLoopSessions.has(sessionId)) {
+    res.status(409).json({ success: false, error: "Loop start already in progress" });
+    return;
+  }
+  pendingStarts.add(sessionId);
+  // Track whether the lock was handed off to the IIFE. If the handler
+  // returns or throws before line ~1205, the finally must release
+  // `pendingStarts` or the session is permanently unstartable.
+  let lockHandedOff = false;
+  try {
   const projectContext = await getProjectContext(projectId);
   if (!projectContext) {
+    pendingStarts.delete(sessionId);
     res.status(404).json({ success: false, error: `Project ${projectId} not found` });
     return;
   }
 
   const workspacePath = projectContext.workspacePath;
   if (!workspacePath) {
+    pendingStarts.delete(sessionId);
     res.status(400).json({
       success: false,
       error: `Project ${projectId} has no workspacePath. Configure a workspace before starting autonomous mode.`,
@@ -1097,6 +1122,7 @@ autonomousRouter.post("/start", async (req: Request, res: Response) => {
 
   const workspaceAbsPath = resolveProjectWorkspace(workspacePath);
   if (!existsSync(workspaceAbsPath)) {
+    pendingStarts.delete(sessionId);
     res.status(400).json({
       success: false,
       error: `Project workspace does not exist: ${workspacePath}`,
@@ -1112,7 +1138,8 @@ autonomousRouter.post("/start", async (req: Request, res: Response) => {
   const existing = await loadLoopState(sessionId);
 
   // Allow resume if persisted 'running' but no active in-memory runner (zombie after restart)
-  if (existing && existing.status === "running" && activeLoopSessions.has(sessionId)) {
+  if (existing && existing.status === "running" && (activeLoopSessions.has(sessionId) || pendingStarts.has(sessionId))) {
+    pendingStarts.delete(sessionId);
     res.status(409).json({ success: false, error: "Loop already running", data: existing });
     return;
   }
@@ -1163,6 +1190,7 @@ autonomousRouter.post("/start", async (req: Request, res: Response) => {
   if (postCheck && postCheck.status === "idle" && postCheck.lastHeartbeat !== state.lastHeartbeat) {
     logger.warn({ sessionId, event: "autonomous_start_race_stopped" },
       "Concurrent /stop cancelled /start — abandoning new loop");
+    pendingStarts.delete(sessionId);
     res.status(409).json({
       success: false,
       error: "Loop was stopped while /start was processing",
@@ -1172,7 +1200,13 @@ autonomousRouter.post("/start", async (req: Request, res: Response) => {
   }
 
   // Kick off the loop asynchronously (don't block the HTTP response)
+  // Hand off the per-sessionId lock from `pendingStarts` to
+  // `activeLoopSessions`. The IIFE's `.finally` cleans up
+  // `activeLoopSessions` on completion; `pendingStarts` no longer
+  // holds the entry because the validation phase is done.
+  pendingStarts.delete(sessionId);
   activeLoopSessions.add(sessionId);
+  lockHandedOff = true;
   // Per-session AbortController: /stop signals it to cancel the in-flight
   // invokeAgent (and the LLM fetch) so the loop exits immediately rather
   // than waiting for the current ticket to finish (up to 20 min).
@@ -1318,7 +1352,13 @@ autonomousRouter.post("/start", async (req: Request, res: Response) => {
   });
 
   res.status(202).json({ success: true, data: state });
-
+  } finally {
+    // Release the start-phase lock if the IIFE never took ownership
+    // (validation failed, a /stop raced in, or an unexpected throw).
+    if (!lockHandedOff) {
+      pendingStarts.delete(sessionId);
+    }
+  }
 });
 
 // POST /autonomous/stop — Halt the running loop

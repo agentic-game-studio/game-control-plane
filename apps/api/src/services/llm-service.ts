@@ -267,6 +267,12 @@ function safePath(inputPath: string, baseDir: string): string {
   const workspaceDir = loadConfig().WORKSPACE_DIR;
   const resolvedWorkspaceDir = path.resolve(workspaceDir);
   const base = path.resolve(baseDir);
+  // Project-scoped base differs from the global workspace root — agents
+  // on project A must not be able to read project B's source through a
+  // global fallthrough. The fallthrough below is only meaningful when the
+  // base IS the workspace (no project context) or a subdir of it.
+  const allowWorkspaceFallthrough = base === resolvedWorkspaceDir
+    || base.startsWith(resolvedWorkspaceDir + path.sep);
 
   // If the input path is already absolute and inside the base directory, allow it
   if (path.isAbsolute(inputPath)) {
@@ -274,7 +280,8 @@ function safePath(inputPath: string, baseDir: string): string {
     if (resolved.startsWith(base + path.sep) || resolved === base) {
       return resolved;
     }
-    if (resolved.startsWith(resolvedWorkspaceDir + path.sep) || resolved === resolvedWorkspaceDir) {
+    if (allowWorkspaceFallthrough
+        && (resolved.startsWith(resolvedWorkspaceDir + path.sep) || resolved === resolvedWorkspaceDir)) {
       return resolved;
     }
   }
@@ -322,7 +329,8 @@ function safePath(inputPath: string, baseDir: string): string {
   if (finalResolved.startsWith(base + path.sep) || finalResolved === base) {
     return finalResolved;
   }
-  if (finalResolved.startsWith(resolvedWorkspaceDir + path.sep) || finalResolved === resolvedWorkspaceDir) {
+  if (allowWorkspaceFallthrough
+      && (finalResolved.startsWith(resolvedWorkspaceDir + path.sep) || finalResolved === resolvedWorkspaceDir)) {
     return finalResolved;
   }
 

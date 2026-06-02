@@ -230,9 +230,21 @@ function getFetchTimeoutMs(): number {
 
 async function fetchWithRetry(url: string, options: RequestInit, retries = MAX_RETRIES, externalSignal?: AbortSignal): Promise<Response> {
   let lastError: Error | null = null;
+  // Cap total wall time across all retries. Without this, the per-attempt
+  // 120s timeout + exponential backoff (1s+2s+4s+8s = 15s) + jitter stacks
+  // to 4*120s + 15s = ~495s for 4 attempts — well past any sensible
+  // upstream deadline (LLM chat is typically bounded to 30-90s). If the
+  // caller provided an external signal with a deadline, we honor it;
+  // otherwise default to (per-attempt timeout × retries + backoff budget).
+  const perAttemptTimeoutMs = getFetchTimeoutMs();
+  const maxTotalMs = Math.min(
+    perAttemptTimeoutMs * (retries + 1) + 30_000,
+    300_000, // hard ceiling — 5 min, even with MAX_RETRIES raised later
+  );
+  const startTime = Date.now();
   for (let attempt = 0; attempt <= retries; attempt++) {
     // Combine timeout signal with optional external abort signal
-    const signals: AbortSignal[] = [AbortSignal.timeout(getFetchTimeoutMs())];
+    const signals: AbortSignal[] = [AbortSignal.timeout(perAttemptTimeoutMs)];
     if (externalSignal) signals.push(externalSignal);
     const combinedSignal = signals.length === 1 ? signals[0] : AbortSignal.any(signals);
 
@@ -244,12 +256,14 @@ async function fetchWithRetry(url: string, options: RequestInit, retries = MAX_R
       if (response.status === 429 && attempt < retries) {
         // Rate limit — use longer delay (5s, 10s, 20s) to avoid hammering
         const delay = 5000 * Math.pow(2, attempt) + Math.random() * 2000;
+        if (Date.now() - startTime + delay > maxTotalMs) break;
         logger.warn({ status: 429, attempt, delayMs: Math.round(delay), event: "rate_limit_retry" }, "Rate limited — backing off");
         await new Promise((r) => setTimeout(r, delay));
         continue;
       }
       if (response.status >= 500 && attempt < retries) {
         const delay = RETRY_DELAY_MS * Math.pow(2, attempt) + Math.random() * 1000;
+        if (Date.now() - startTime + delay > maxTotalMs) break;
         await new Promise((r) => setTimeout(r, delay));
         continue;
       }
@@ -259,7 +273,9 @@ async function fetchWithRetry(url: string, options: RequestInit, retries = MAX_R
       // Don't retry if the external abort signal fired — caller intentionally cancelled
       if (externalSignal?.aborted) throw lastError;
       if (attempt < retries) {
-        await new Promise((r) => setTimeout(r, RETRY_DELAY_MS * Math.pow(2, attempt)));
+        const delay = RETRY_DELAY_MS * Math.pow(2, attempt);
+        if (Date.now() - startTime + delay > maxTotalMs) break;
+        await new Promise((r) => setTimeout(r, delay));
       }
     }
   }
