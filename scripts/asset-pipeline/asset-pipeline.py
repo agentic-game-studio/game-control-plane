@@ -121,7 +121,21 @@ def generate_mflux(preset: AssetPreset, output_dir: Path, dry_run: bool = False)
 
     print(f"  [mflux] generating {preset.name} ({preset.width}x{preset.height}, {preset.steps} steps)...")
     t0 = time.time()
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    # 6J-6th: handle subprocess.TimeoutExpired explicitly. Without it, a
+    # hung mflux process would raise a bare exception with no elapsed
+    # time and no cleanup; the surrounding `for preset in presets:` loop
+    # would die on the first hang and the whole batch run would abort
+    # mid-pipeline. Timeout is a known, recoverable failure (mflux is
+    # Apple-Silicon ML and the first generation in a session can run
+    # several minutes past the wall-clock budget on cold cache).
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    except subprocess.TimeoutExpired as exc:
+        elapsed = time.time() - t0
+        raise RuntimeError(
+            f"mflux timed out after {exc.timeout}s (elapsed {elapsed:.1f}s) — "
+            f"command: {' '.join(cmd[:3])}..."
+        ) from exc
     elapsed = time.time() - t0
 
     if result.returncode != 0:
@@ -154,8 +168,12 @@ def remove_background(input_path: Path, output_path: Path, dry_run: bool = False
         return output_path
     except ImportError:
         print("  [rembg] not available, falling back to PIL alpha extraction")
-        # Fallback: convert white/flat backgrounds to transparent
-        img = Image.open(input_path).convert("RGBA")
+        # Fallback: convert white/flat backgrounds to transparent. The
+        # `with` block releases the underlying file handle once we've
+        # finished reading; without it, a long fallback run leaks fds
+        # the same way the main path did.
+        with Image.open(input_path) as _src:
+            img = _src.convert("RGBA").copy()
         datas = img.getdata()
         new_data = []
         for item in datas:
@@ -411,7 +429,14 @@ def post_process(
         print(f"  [DRY-RUN] would write Godot .import -> {final}.import")
         return final, thumb
 
-    img = Image.open(img_path).convert("RGBA")
+    # 6J-6th: Image.open() returns a lazy file handle. Without `with`, the
+    # handle stays open until the image is garbage-collected (Pillow holds
+    # it internally until .load() is called). In a long batch run that
+    # opens 100+ images per preset, file descriptors accumulate until
+    # `OSError: [Errno 24] Too many open files`. The `with` block calls
+    # .close() on exit even if the subsequent crop / paste / save raises.
+    with Image.open(img_path) as _src:
+        img = _src.convert("RGBA").copy()
 
     # 3a. Alpha-trim (crop to content bounding box)
     bbox = img.getbbox()

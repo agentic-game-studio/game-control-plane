@@ -36,16 +36,30 @@ export async function readTicketsBoard(projectId?: string | null): Promise<Ticke
   const filename = getTicketsBoardFile(projectId);
   try {
     const board = await readData<TicketsBoard>(filename);
+    // Q11-6th: route the "annotate projectId" write through updateData
+    // (per-file mutex) so a concurrent updater can't race us. The
+    // previous direct writeData call was outside the lock; a concurrent
+    // updateTicketsBoard could overwrite our projectId annotation with
+    // the un-annotated version, leaving the file in a half-set state
+    // forever. updateData serializes the read-modify-write.
     if (projectId && !board.projectId) {
+      await updateData<TicketsBoard>(filename, (b) => {
+        if (!b.projectId) b.projectId = projectId;
+        return b;
+      });
       board.projectId = projectId;
-      await writeData(filename, board);
     }
     return board;
   } catch {
     // File doesn't exist — create default board.
-    // Write is idempotent so concurrent callers writing the same default is safe.
+    // Use updateData so the create-or-read is atomic. Without the
+    // mutex, two concurrent first-time reads of the same project both
+    // see ENOENT and both writeData() — the second clobbers the
+    // first's projectId annotation (which is the same string in
+    // practice, but the wasted I/O is also visible). updateData's lock
+    // ensures exactly one writer.
     const board = createDefaultBoard(projectId);
-    await writeData(filename, board);
+    await updateData<TicketsBoard>(filename, (existing) => existing ?? board);
     return board;
   }
 }

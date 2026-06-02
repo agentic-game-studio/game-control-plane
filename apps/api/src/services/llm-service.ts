@@ -1130,8 +1130,14 @@ loop_offset=0
         const validatedScript = script ? safePath(script, workspaceDir) : undefined;
         const validatedOutput = output ? safePath(output, workspaceDir) : undefined;
 
-        // Validate godotBin against known safe paths
-        const ALLOWED_GODOT_BINS = [
+        // Validate godotBin against known safe paths. The static list
+        // below is paired with a runtime check (Q1-6th): the GODOT_BIN
+        // env var is only honored when it resolves to a real, executable
+        // file on disk. Without the stat check, an attacker (or a
+        // process) that controls the env could redirect Bash tool calls
+        // at an arbitrary binary. Bare names like "godot" are left to
+        // PATH lookup, which is the OS's job.
+        const ALLOWED_GODOT_BINS: Array<string | undefined> = [
           "godot", "godot4",
           "/usr/local/bin/godot", "/usr/local/bin/godot4",
           "/opt/homebrew/bin/godot",
@@ -1141,8 +1147,14 @@ loop_offset=0
           path.join(os.homedir(), ".local/bin/godot"),
           path.join(os.homedir(), ".local/bin/godot4"),
           path.join(os.homedir(), ".local/bin/godot_bin/Godot"),
-          process.env.GODOT_BIN,
-        ].filter(Boolean);
+        ];
+        const envGodot = process.env.GODOT_BIN;
+        if (envGodot) {
+          try {
+            const st = await fs.stat(envGodot);
+            if (st.isFile()) ALLOWED_GODOT_BINS.push(envGodot);
+          } catch { /* env var points at a missing/unreadable file — drop it */ }
+        }
         const validatedGodotBin = godotBin && ALLOWED_GODOT_BINS.includes(godotBin) ? godotBin : undefined;
 
         const config = loadConfig();

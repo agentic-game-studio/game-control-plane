@@ -7,6 +7,23 @@ import type { WSEvent } from "@game-studio/types";
 
 const VALID_ENGINES = ["Unity", "Unreal", "Godot"];
 
+/** Q6-6th: whitelist of top-level fields PATCH /api/settings will accept.
+ * Anything else in the request body is silently dropped. Without this,
+ * `{...data, ...updates}` would let a client set arbitrary fields
+ * (topUpHistory, usageLog, etc.) directly. topUpHistory and usageLog
+ * are append-only — they must be mutated via /topup and /consume, not
+ * PATCHed wholesale. The field-by-field validator below is still
+ * applied on top of this whitelist. */
+const SETTINGS_PATCH_KEYS = [
+  "targetEngine",
+  "assetModel",
+  "externalApiKey",
+  "webhookUrl",
+  "tier",
+  "autoRenew",
+  "credits",
+] as const;
+
 function getNextResetDate(): string {
   const now = new Date();
   const next = new Date(now);
@@ -59,7 +76,19 @@ settingsRouter.get("/", async (_req: Request, res: Response) => {
 
 // PATCH /api/settings - Update settings
 settingsRouter.patch("/", async (req: Request, res: Response) => {
-  const updates = req.body as Partial<SettingsConfig>;
+  const rawUpdates = req.body as Record<string, unknown>;
+
+  // Q6-6th: strip any field not on the whitelist. Without this filter,
+  // a client could PATCH `{topUpHistory: [...], usageLog: [...],
+  // credits: {subscription: {current: 99999}}}` and the deep-spread on
+  // the line below would persist the tampered arrays. Whitelist first,
+  // then run field-by-field validation.
+  const updates: Partial<SettingsConfig> = {};
+  for (const key of SETTINGS_PATCH_KEYS) {
+    if (key in rawUpdates) {
+      (updates as Record<string, unknown>)[key] = rawUpdates[key];
+    }
+  }
 
   if (updates.targetEngine && !VALID_ENGINES.includes(updates.targetEngine)) {
     res.status(400).json({ success: false, error: "Invalid target engine" });

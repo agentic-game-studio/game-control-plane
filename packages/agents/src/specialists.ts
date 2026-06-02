@@ -242,7 +242,13 @@ export const specialistAgents: Partial<Record<AgentRole, AgentDefinition>> = {
     model: "sonnet",
     tools: ["Read", "Write", "Edit", "Glob", "Grep"],
     maxTurns: 30,
-    skills: [],
+    // 6I-6th: wire the live-ops-designer to the team-live-ops workflow and
+    // the changelog / patch-notes skills. Before this, an autonomous-loop
+    // producer that wanted to spin up a live event had no way to delegate
+    // to live-ops-designer because the agent's `skills` was empty — the
+    // skill registry filters agents by `uses`/`agents` and the agent
+    // itself had no skills to be filtered by.
+    skills: ["team-live-ops", "changelog", "patch-notes", "balance-check"],
     memory: "session",
     reportsTo: ["producer"],
   },

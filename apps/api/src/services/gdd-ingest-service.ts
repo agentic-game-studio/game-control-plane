@@ -4,6 +4,7 @@
  */
 
 import { existsSync, readFileSync, statSync } from "fs";
+import { readFile } from "node:fs/promises";
 import { join } from "path";
 import { loadConfig } from "../config.js";
 import { createQuestTicket } from "./quest-bridge.js";
@@ -221,7 +222,10 @@ export async function ingestGDD(
     };
   }
 
-  const gddContent = readFileSync(gddPath, "utf-8");
+  // Q26-6th: async readFile instead of readFileSync. A 2MB GDD blocks
+  // the event loop for ~50ms, freezing all WS broadcasts and HTTP
+  // requests on the process during /api/gdd/ingest.
+  const gddContent = await readFile(gddPath, "utf-8");
   const sections = parseGDDSections(gddContent);
 
   const MAX_ITEMS = 200;

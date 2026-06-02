@@ -735,6 +735,7 @@ chatRouter.delete("/sessions/:id", async (req: Request, res: Response) => {
 
   delete chatStore.sessions[id];
   sessionsResponding.delete(id);
+  sessionAbortControllers.delete(id);
   cleanupWorkflow(id);
   // Note: Godot MCP service is keyed by projectId, not sessionId.
   // It will be cleaned up when the project is deleted or session ends.
@@ -910,6 +911,17 @@ chatRouter.post("/sessions/:id/clear", async (req: Request, res: Response) => {
     return;
   }
 
+  // Q9-6th: acquire the same per-session lock /messages uses. Without
+  // this, a /messages call in flight can append to the cleared message
+  // list, leaving the session in a half-cleared state that a subsequent
+  // /compact would summarize incorrectly. Reject the clear with 409
+  // rather than queueing — the client can retry once the agent finishes.
+  if (sessionsResponding.has(id)) {
+    res.status(409).json({ success: false, error: "Agent is responding — clear after it finishes" });
+    return;
+  }
+  sessionsResponding.add(id);
+
   session.conversationHistory = [];
   (session as ExtendedChatSession).fileOperations = [];
   (session as ExtendedChatSession).completedPhases = [];
@@ -960,6 +972,7 @@ chatRouter.post("/sessions/:id/clear", async (req: Request, res: Response) => {
   } as WSEvent);
 
   await saveChatState();
+  sessionsResponding.delete(id);
   res.json({ success: true });
 });
 
@@ -1232,7 +1245,13 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
       { type: "text", text: body.content },
     ];
     for (const imgDataUrl of body.images) {
-      const match = imgDataUrl.match(/^data:([^;]+);base64,(.+)$/);
+      // Q19-6th: allowlist image MIME types only. The previous regex
+      // accepted any media_type (text/html, application/javascript, etc.),
+      // which an attacker who controls a tool output could use to inject
+      // HTML/JS as text into the LLM's context. Anthropic's image block
+      // rejects non-image media_types at API time, so we'd get a
+      // confusing 4xx anyway — better to fail at parse with a clear log.
+      const match = imgDataUrl.match(/^data:(image\/(?:png|jpe?g|gif|webp));base64,(.+)$/);
       if (match) {
         contentBlocks.push({
           type: "image",

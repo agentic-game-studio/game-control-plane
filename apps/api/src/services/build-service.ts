@@ -4,7 +4,9 @@
 
 import { existsSync, mkdirSync } from "fs";
 import { join } from "path";
-import { execFileSync } from "child_process";
+import { execFile } from "child_process";
+import { promisify } from "util";
+const execFileAsync = promisify(execFile);
 import { readData, writeData, broadcastEvent } from "./data-store.js";
 import { generateProjectChangelog } from "./changelog-service.js";
 import { resolveProjectWorkspace } from "../utils/workspace.js";
@@ -110,7 +112,12 @@ export async function executeGodotExport(
       "--export-output", artifactAbs,
       "--timeout", "180",
     ];
-    execFileSync(pythonBin, args, { timeout: 240_000 });
+    // Q25-6th: execFile (async) instead of execFileSync. A 4-minute
+    // Godot export blocks the entire event loop with the sync variant,
+    // freezing WS broadcasts and HTTP requests on the process. The
+    // async version yields to the event loop so other clients can
+    // proceed while the export runs.
+    await execFileAsync(pythonBin, args, { timeout: 240_000, maxBuffer: 10 * 1024 * 1024 });
     build.status = "success";
     build.artifactPath = join("builds", artifactName);
     build.smokeTestPassed = existsSync(artifactAbs);

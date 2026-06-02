@@ -192,6 +192,10 @@ app.use("/api/chat/spawn", rateLimiter);
 app.use("/api/autonomous/start", rateLimiter);
 app.use("/api/teams/run", rateLimiter);
 app.use("/api/assets/generate", rateLimiter);
+// Q7-6th: /api/settings/consume burns credits — with a leaked API_SECRET,
+// an attacker could drain subscription+onTop in a tight loop. Same rate
+// bucket as the other LLM-burning endpoints.
+app.use("/api/settings/consume", rateLimiter);
 
 app.use("/api/chat", chatRouter);
 app.use("/api/tickets", ticketsRouter);
@@ -275,10 +279,14 @@ sessionStore.pruneOldSessions(30 * 24 * 60 * 60 * 1000).then((removed) => {
   if (removed > 0) logger.info({ removed, event: "session_prune" }, `Pruned ${removed} old session(s)`);
 }).catch(() => { /* non-critical */ });
 
-const recoveredLoops = recoverStaleLoopStates();
-if (recoveredLoops > 0) {
-  logger.info({ recoveredLoops, event: "autonomous_stale_recovery" }, `Recovered ${recoveredLoops} stale autonomous loop(s)`);
-}
+// Recover stale loop state — now async (the function reads loop-state.json
+// via fs.promises). Fire-and-forget: the recovery is logged when it
+// completes, but startup doesn't block on it.
+void recoverStaleLoopStates().then((recoveredLoops) => {
+  if (recoveredLoops > 0) {
+    logger.info({ recoveredLoops, event: "autonomous_stale_recovery" }, `Recovered ${recoveredLoops} stale autonomous loop(s)`);
+  }
+}).catch(() => { /* non-fatal */ });
 
 // R7: Graceful shutdown
 async function gracefulShutdown(signal: string) {
@@ -290,8 +298,10 @@ async function gracefulShutdown(signal: string) {
     graceful: true,
   });
 
-  // 1. Abort all autonomous loops
-  abortAllLoops();
+  // 1. Abort all autonomous loops. The function persists each loop's
+  // "idle" status via fs.promises.writeFile; awaited so the file is
+  // flushed before we close the process.
+  await abortAllLoops();
 
   // 2. Close all SSE clients
   for (const client of sseClients) {

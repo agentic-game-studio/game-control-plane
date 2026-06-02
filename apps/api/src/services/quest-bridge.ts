@@ -115,8 +115,16 @@ async function triggerWorkflowVerification(sessionId: string, wf: WorkflowState)
       for (const col of board.columns) {
         const ticket = col.tickets.find((t) => t.id === ticketId);
         if (ticket && ticket.status === "qa") {
+          // Q10-6th: deep-clone before passing to verification. The
+          // shallow spread `{ ...ticket, sessionId }` shared the
+          // ticket's nested objects (testEvidence, parentTicketId
+          // chain, etc.) with the live board entry; if the verifier
+          // mutated any of them, the change would persist on the
+          // board. structuredClone is built into Node 17+ and is
+          // cheaper than JSON round-trip because it preserves
+          // Date/Map/Set, but for plain JSON this is fine.
           triggerVerification(
-            { ...ticket, sessionId },
+            structuredClone({ ...ticket, sessionId }),
             ticket.description || ticket.title,
           );
         }

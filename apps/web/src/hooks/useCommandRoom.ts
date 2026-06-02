@@ -247,8 +247,15 @@ function timestamp(): string {
   return new Date().toISOString();
 }
 
+// 6H-6th: use crypto.randomUUID() for optimistic-message ids. The previous
+// Math.random()-based 6-char id collided on the order of 1 in 36^6 = ~2B
+// — fine for sparse traffic, but under a burst (e.g. an autonomous-loop
+// iteration that emits 10+ progress events) the birthday bound kicks in
+// and the message dedup path would treat two distinct messages as one.
+// UUIDs are globally unique by design and are also slightly faster to
+// generate than the previous string-slice dance.
 function uid(): string {
-  return Math.random().toString(36).slice(2, 8);
+  return crypto.randomUUID();
 }
 
 interface WSHandlerResult {
@@ -668,12 +675,17 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, prod
         { stage: "verify", label: "Verifying" },
         { stage: "fix", label: "Fixing" },
       ];
-      const steps = stages.map((s) => ({
+      // 6H-6th: compute the current-stage index once instead of twice per
+      // stage. The previous `stages.findIndex(...) > stages.findIndex(...)`
+      // was O(N²) in the number of stages; with N=5 it's a micro-issue, but
+      // a constant lookup is also clearer about the intent.
+      const currentStageIdx = stages.findIndex((x) => x.stage === stage);
+      const steps = stages.map((s, sIdx) => ({
         stage: s.stage,
         label: s.label,
         ticketId: s.stage === stage ? ticketId : undefined,
         agentRole: s.stage === stage ? agentRole : undefined,
-        status: stages.findIndex((x) => x.stage === stage) > stages.findIndex((x) => x.stage === s.stage)
+        status: currentStageIdx > sIdx
           ? "completed" as const
           : s.stage === stage ? "active" as const : "pending" as const,
       }));
@@ -1620,7 +1632,14 @@ export function useCommandRoom() {
 
       switch (cmd) {
         case "clear": {
-          const targetSession = currentSession;
+          // 6F-6th: read the active session / project from refs, not state.
+          // The useCallback deps for executeCommand don't include
+          // `currentSession` or `currentProjectId`, so a state read here
+          // captures the value at the time of the last callback re-creation.
+          // If the user switches tabs and the closure isn't re-created in
+          // time, /clear hits the wrong session or skips the localStorage
+          // cache wipe.
+          const targetSession = currentSessionRef.current;
           // Clear backend first
           apiFetch(`/api/chat/sessions/${targetSession}/clear`, {
             method: "POST",
@@ -1640,8 +1659,9 @@ export function useCommandRoom() {
             return next;
           });
           // Clear localStorage cache when chat is cleared
-          if (currentProjectId) {
-            clearCache(currentProjectId);
+          const projectId = currentProjectIdRef.current;
+          if (projectId) {
+            clearCache(projectId);
           }
           addSessionMessage(targetSession, { type: "system", sender: "SYSTEM", content: "Chat cleared." });
           return;

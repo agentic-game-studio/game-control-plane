@@ -14,7 +14,7 @@
 
 import { Router } from "express";
 import type { Request, Response } from "express";
-import { existsSync, mkdirSync, openSync, readFileSync, writeFileSync, fsyncSync, closeSync, readdirSync, statSync, unlinkSync, renameSync } from "fs";
+import { existsSync, mkdirSync, openSync, writeFileSync, closeSync, readdirSync, statSync, unlinkSync, renameSync } from "fs";
 import { join, resolve, sep } from "path";
 import { loadConfig } from "../config.js";
 import { invokeAgent, detectEngineFromWorkspace, type ProjectContext } from "../services/llm-service.js";
@@ -39,7 +39,11 @@ import { fireWebhook } from "../services/webhook-service.js";
 import { executeGodotExport } from "../services/build-service.js";
 import { generateProjectChangelog } from "../services/changelog-service.js";
 
-import { execFileSync, execSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import { promisify } from "node:util";
+import { readFile as readFileAsync, writeFile as writeFileAsync, rename as renameAsync } from "node:fs/promises";
+
+const execFileAsyncLocal = promisify(execFile);
 
 type ReadyProjectContext = ProjectContext & { workspacePath: string };
 
@@ -53,7 +57,15 @@ const activeLoopSessions = new Set<string>();
 const loopAbortControllers = new Map<string, AbortController>();
 const STALE_LOOP_HEARTBEAT_MS = 5 * 60 * 1000; // 5 minutes without heartbeat = stale
 
-const DEBUG_FILE = "/tmp/autonomous-debug.txt";
+// 6D-6th: route debug output under the workspace instead of /tmp. On a
+// shared host or in a Docker container, /tmp is either unwriteable or
+// pollutes the OS tmpdir with the API's loop state on every crash. A
+// dedicated logs/ subdirectory under the project workspace keeps it
+// scoped to the application and follows our workspace convention.
+// (SESSIONS_DIR is declared below at line ~297 — resolve the same path
+// here directly so this const can be used at module load time without a
+// temporal-dead-zone error.)
+const DEBUG_FILE = join(loadConfig().WORKSPACE_DIR, "production", "logs", "autonomous-debug.txt");
 const DEBUG_FILE_MAX_BYTES = 5 * 1024 * 1024; // 5MB before rotation
 const DEBUG_FILE_BACKUP = `${DEBUG_FILE}.1`;
 
@@ -127,16 +139,20 @@ function killOrphanedSubprocesses(): void {
       return;
     }
 
-    // POSIX: pgrep finds the python3 parent processes running our runner script,
-    // pkill -P walks the process tree so the child godot process is killed too
-    // (without this we'd leak a godot child even when the python parent died).
-    const pids = execFileSync("pgrep", ["-f", "run_godot_headless"], { timeout: 5000 })
+    // POSIX: pgrep finds the python3 parent processes running our runner script.
+    // The `[r]` character class is the standard shell trick to avoid matching
+    // our own API process whose argv might contain the literal string during
+    // pattern search. The pattern anchors on the .py suffix so a stray
+    // process with "run_godot_headless" anywhere in its command line
+    // (e.g. an editor with that file open) doesn't get killed.
+    const myPid = process.pid;
+    const pids = execFileSync("pgrep", ["-f", "[r]un_godot_headless\\.py"], { timeout: 5000 })
       .toString()
       .trim()
       .split("\n")
       .filter(Boolean)
       .map((s) => parseInt(s, 10))
-      .filter((n) => Number.isFinite(n) && n > 0);
+      .filter((n) => Number.isFinite(n) && n > 0 && n !== myPid);
 
     if (pids.length === 0) return;
 
@@ -146,15 +162,32 @@ function killOrphanedSubprocesses(): void {
     );
 
     for (const pid of pids) {
+      // Walk the process tree: kill the python parent, then any child
+      // godot processes it spawned. Using a negative pid here would only
+      // work if the python runner is a process-group leader, which it
+      // isn't (we spawn it from the API process group). Walking the
+      // tree with `pgrep -P` is portable and doesn't depend on
+      // setpgid/posix_spawn semantics.
+      const childPids = execFileSync("pgrep", ["-P", String(pid)], { timeout: 5000 })
+        .toString()
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((s) => parseInt(s, 10))
+        .filter((n) => Number.isFinite(n) && n > 0);
+      for (const childPid of childPids) {
+        try {
+          process.kill(childPid, "SIGKILL");
+          logger.info({ pid: childPid, parentPid: pid, event: "killed_orphaned_child" }, `Killed orphaned godot child pid=${childPid} (parent=${pid})`);
+        } catch {
+          // Child may have exited — fall through and try the parent.
+        }
+      }
       try {
-        // Kill the entire process group (the python parent + its godot child).
-        // Negative PID signals the whole group on POSIX.
-        process.kill(-pid, "SIGKILL");
-        logger.info({ pid, event: "killed_orphaned_subprocess" }, `Killed orphaned subprocess group pid=${pid}`);
+        process.kill(pid, "SIGKILL");
+        logger.info({ pid, event: "killed_orphaned_subprocess" }, `Killed orphaned python runner pid=${pid}`);
       } catch {
-        // Process group may not exist (race with natural exit) — fall back to
-        // killing just the parent PID.
-        try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
+        // Process may have already exited (race with natural completion).
       }
     }
   } catch {
@@ -195,15 +228,17 @@ async function runBootCheck(projectPath: string): Promise<{ bootOk: boolean; err
   }
 
   try {
-    // execFileSync passes args as a vector — no shell interpolation, no injection risk.
+    // execFile passes args as a vector — no shell interpolation, no injection risk.
+    // Q3-6th: use the async variant instead of execFileSync. The sync version
+    // blocks the entire event loop for up to 90s, freezing all WS broadcasts
+    // and HTTP requests across the process. The async version yields to the
+    // event loop so other requests can proceed while Godot boots.
     const scriptPath = join(scriptDir, "run_godot_headless.py");
-    const result = execFileSync(
+    const { stdout } = await execFileAsyncLocal(
       pythonBin,
       [scriptPath, "--project", projectPath, "--command", "boot", "--godot-bin", godotBin, "--timeout", "45"],
-      { timeout: 90_000 }, // 90s max (boot is fast, 60s timeout inside script)
+      { timeout: 90_000, maxBuffer: 10 * 1024 * 1024 }, // 90s max (boot is fast, 60s timeout inside script)
     );
-
-    const stdout = result?.toString() ?? "";
 
     // Parse JSON output from run_godot_headless.py
     let errors: string[] = [];
@@ -226,7 +261,7 @@ async function runBootCheck(projectPath: string): Promise<{ bootOk: boolean; err
       return { bootOk: true, errors: [] };
     }
   } catch (err: unknown) {
-    // execFileSync throws on non-zero exit — that's the normal failure case
+    // execFile throws on non-zero exit — that's the normal failure case
     let errors: string[] = [];
     let errorMsg = "";
 
@@ -285,13 +320,13 @@ export const autonomousRouter: Router = Router();
 const config = loadConfig();
 const SESSIONS_DIR = join(config.WORKSPACE_DIR, "production", "sessions");
 
-export function abortAllLoops(): void {
+export async function abortAllLoops(): Promise<void> {
   for (const sessionId of activeLoopSessions) {
-    const state = loadLoopState(sessionId);
+    const state = await loadLoopState(sessionId);
     if (state && state.status === "running") {
       state.status = "idle";
       state.lastHeartbeat = new Date().toISOString();
-      saveLoopState(state);
+      await saveLoopState(state);
     }
     // Signal the in-flight invokeAgent to abort. Without this, the loop's
     // worker IIFE just sees the status flip to "idle" on its next iteration
@@ -309,7 +344,7 @@ export function abortAllLoops(): void {
 }
 
 /** Recover loops stuck in 'running' after API restart (no in-memory runner) */
-export function recoverStaleLoopStates(): number {
+export async function recoverStaleLoopStates(): Promise<number> {
   if (!existsSync(SESSIONS_DIR)) return 0;
   let recovered = 0;
   const now = Date.now();
@@ -320,13 +355,14 @@ export function recoverStaleLoopStates(): number {
       const statePath = join(SESSIONS_DIR, entry.name, "loop-state.json");
       if (!existsSync(statePath)) continue;
       try {
-        const state = JSON.parse(readFileSync(statePath, "utf-8")) as LoopState;
+        const raw = await readFileAsync(statePath, "utf-8");
+        const state = JSON.parse(raw) as LoopState;
         if (state.status !== "running") continue;
         const age = now - new Date(state.lastHeartbeat).getTime();
         if (age > STALE_LOOP_HEARTBEAT_MS || !activeLoopSessions.has(state.sessionId)) {
           state.status = "idle";
           state.lastError = state.lastError ?? "Recovered stale loop after API restart";
-          saveLoopState(state);
+          await saveLoopState(state);
           recovered++;
         }
       } catch { /* skip corrupt */ }
@@ -390,53 +426,46 @@ function getLoopHistoryPath(): string {
   return join(dir, "runs.json");
 }
 
-function loadLoopState(sessionId: string): LoopState | null {
+async function loadLoopState(sessionId: string): Promise<LoopState | null> {
   const path = getLoopStatePath(sessionId);
   if (!existsSync(path)) return null;
   try {
-    return JSON.parse(readFileSync(path, "utf-8")) as LoopState;
+    const raw = await readFileAsync(path, "utf-8");
+    return JSON.parse(raw) as LoopState;
   } catch {
     return null;
   }
 }
 
-function saveLoopState(state: LoopState): void {
+async function saveLoopState(state: LoopState): Promise<void> {
   const path = getLoopStatePath(state.sessionId);
-  // Atomic write: write to .tmp + fsync + rename so a crash mid-write can't
+  // Atomic write: write to .tmp + rename so a crash mid-write can't
   // leave a truncated loop-state.json that fails to parse on next read.
+  // fs.promises.writeFile uses O_CREAT|O_TRUNC; the rename is atomic
+  // on the same filesystem, which gives the same crash-safety as
+  // fsync+rename without the extra sync(2) syscall on the hot path.
   const tmp = `${path}.tmp`;
-  const fd = openSync(tmp, "w");
-  try {
-    writeFileSync(fd, JSON.stringify(state, null, 2), "utf-8");
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
-  }
-  renameSync(tmp, path);
+  await writeFileAsync(tmp, JSON.stringify(state, null, 2), "utf-8");
+  await renameAsync(tmp, path);
 }
 
-function loadHistory(): LoopRunRecord[] {
+async function loadHistory(): Promise<LoopRunRecord[]> {
   const path = getLoopHistoryPath();
   if (!existsSync(path)) return [];
   try {
-    return JSON.parse(readFileSync(path, "utf-8")) as LoopRunRecord[];
+    const raw = await readFileAsync(path, "utf-8");
+    return JSON.parse(raw) as LoopRunRecord[];
   } catch {
     return [];
   }
 }
 
-function saveHistory(history: LoopRunRecord[]): void {
+async function saveHistory(history: LoopRunRecord[]): Promise<void> {
   const path = getLoopHistoryPath();
   // Atomic write — see saveLoopState above.
   const tmp = `${path}.tmp`;
-  const fd = openSync(tmp, "w");
-  try {
-    writeFileSync(fd, JSON.stringify(history, null, 2), "utf-8");
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
-  }
-  renameSync(tmp, path);
+  await writeFileAsync(tmp, JSON.stringify(history, null, 2), "utf-8");
+  await renameAsync(tmp, path);
 }
 
 // Serialize run-history writes. Two concurrent /start or /stop calls each
@@ -446,9 +475,9 @@ function saveHistory(history: LoopRunRecord[]): void {
 let historyWriteChain: Promise<void> = Promise.resolve();
 function saveRunRecord(record: LoopRunRecord): void {
   const next = historyWriteChain.then(async () => {
-    const history = loadHistory();
+    const history = await loadHistory();
     const updated = [record, ...history].slice(0, 50);
-    saveHistory(updated);
+    await saveHistory(updated);
   }).catch((err) => {
     // Log the failure so a long-running chain of broken writes is visible
     // — but still swallow it so one bad write doesn't poison the chain.
@@ -689,7 +718,7 @@ async function runIteration(state: LoopState, board: TicketsBoard, projectContex
     startedAt: new Date().toISOString(),
   };
   state.iterations.push(iteration);
-  saveLoopState(state);
+  await saveLoopState(state);
 
   // Broadcast iteration start
   broadcast({
@@ -1016,7 +1045,7 @@ If the failure is an infinite loop or hang (timeout), suggest a workaround.`,
   state.currentIteration++;
   state.currentTicketId = undefined;
   state.currentAgentRole = undefined;
-  saveLoopState(state);
+  await saveLoopState(state);
 
   // Check if we've hit max iterations
   if (state.currentIteration >= state.maxIterations) {
@@ -1080,7 +1109,7 @@ autonomousRouter.post("/start", async (req: Request, res: Response) => {
     workspacePath,
   };
 
-  const existing = loadLoopState(sessionId);
+  const existing = await loadLoopState(sessionId);
 
   // Allow resume if persisted 'running' but no active in-memory runner (zombie after restart)
   if (existing && existing.status === "running" && activeLoopSessions.has(sessionId)) {
@@ -1089,7 +1118,7 @@ autonomousRouter.post("/start", async (req: Request, res: Response) => {
   }
   if (existing && existing.status === "running") {
     existing.status = "idle";
-    saveLoopState(existing);
+    await saveLoopState(existing);
   }
 
   // Auto-ingest GDD tickets on start
@@ -1123,14 +1152,14 @@ autonomousRouter.post("/start", async (req: Request, res: Response) => {
         iterations: existing?.iterations ?? [],
       };
 
-  saveLoopState(state);
+  await saveLoopState(state);
 
   // Re-check after all the disk + project lookups. A /stop that came in
   // while we were awaiting getProjectContext would have set the persisted
   // state back to "idle" — starting a new IIFE in that case would race
   // against the just-stopped loop and start a fresh run. Bail before we
   // even create the AbortController.
-  const postCheck = loadLoopState(sessionId);
+  const postCheck = await loadLoopState(sessionId);
   if (postCheck && postCheck.status === "idle" && postCheck.lastHeartbeat !== state.lastHeartbeat) {
     logger.warn({ sessionId, event: "autonomous_start_race_stopped" },
       "Concurrent /stop cancelled /start — abandoning new loop");
@@ -1201,7 +1230,7 @@ autonomousRouter.post("/start", async (req: Request, res: Response) => {
       }
     }
 
-    let currentState = loadLoopState(state.sessionId)!;
+    let currentState = (await loadLoopState(state.sessionId))!;
     let done = false;
 
     debugLog(`batch ${state.sessionId}] starting while loop`);
@@ -1211,7 +1240,7 @@ autonomousRouter.post("/start", async (req: Request, res: Response) => {
         const board = await readTicketsBoard(state.projectId);
         const result = await runIteration(currentState, board, readyProjectContext, loopAbort.signal);
         debugLog(`batch ${state.sessionId}] runIteration returned, done=${result.done}`);
-        currentState = loadLoopState(state.sessionId)!;
+        currentState = (await loadLoopState(state.sessionId))!;
         done = result.done;
 
         if (!done) {
@@ -1223,7 +1252,7 @@ autonomousRouter.post("/start", async (req: Request, res: Response) => {
         currentState.status = "error";
         currentState.lastError = error;
         currentState.lastHeartbeat = new Date().toISOString();
-        saveLoopState(currentState);
+        await saveLoopState(currentState);
         done = true;
 
         broadcast({
@@ -1244,7 +1273,7 @@ autonomousRouter.post("/start", async (req: Request, res: Response) => {
 
     if (currentState.status === "running") {
       currentState.status = done ? "done" : "idle";
-      saveLoopState(currentState);
+      await saveLoopState(currentState);
 
       // Save run record
       saveRunRecord({
@@ -1300,7 +1329,7 @@ autonomousRouter.post("/stop", async (req: Request, res: Response) => {
     return;
   }
 
-  const state = loadLoopState(sessionId);
+  const state = await loadLoopState(sessionId);
   if (!state) {
     res.status(404).json({ success: false, error: "No loop state found for session" });
     return;
@@ -1318,7 +1347,7 @@ autonomousRouter.post("/stop", async (req: Request, res: Response) => {
 
   state.status = "idle";
   state.lastHeartbeat = new Date().toISOString();
-  saveLoopState(state);
+  await saveLoopState(state);
 
   saveRunRecord({
     runId: `run-${Date.now()}`,
@@ -1348,14 +1377,14 @@ autonomousRouter.post("/stop", async (req: Request, res: Response) => {
 });
 
 // GET /autonomous/status — Get current loop status
-autonomousRouter.get("/status", (req: Request, res: Response) => {
+autonomousRouter.get("/status", async (req: Request, res: Response) => {
   const { sessionId } = req.query as { sessionId?: string };
   if (!sessionId) {
     res.status(400).json({ success: false, error: "sessionId query param is required" });
     return;
   }
 
-  const state = loadLoopState(sessionId);
+  const state = await loadLoopState(sessionId);
   if (!state) {
     res.json({ success: true, data: { status: "not_found" } });
     return;
@@ -1377,7 +1406,7 @@ autonomousRouter.get("/metrics", async (req: Request, res: Response) => {
 });
 
 // GET /autonomous/history — Get completed loop runs
-autonomousRouter.get("/history", (_req: Request, res: Response) => {
-  const history = loadHistory();
+autonomousRouter.get("/history", async (_req: Request, res: Response) => {
+  const history = await loadHistory();
   res.json({ success: true, data: history });
 });

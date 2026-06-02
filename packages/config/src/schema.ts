@@ -25,6 +25,13 @@ export const agentDefinitionSchema = z.object({
   memory: z.enum(["user", "project", "session"]),
   delegates: z.array(z.string()).optional(),
   reportsTo: z.array(z.string()).optional(),
+  // 6I-6th: surface the experimental and systemPrompt fields that already
+  // exist on the AgentDefinition type. Without these, the schema silently
+  // drops the fields when the agent registry is validated, so a new
+  // experimental agent would parse successfully here but get truncated
+  // by anything that goes through this schema.
+  experimental: z.boolean().optional(),
+  systemPrompt: z.string().optional(),
 });
 
 export const skillDefinitionSchema = z.object({
@@ -48,8 +55,17 @@ export const skillDefinitionSchema = z.object({
       z.object({
         name: z.string(),
         description: z.string(),
+        // 6I-6th: validate the `type` field. The previous schema didn't
+        // accept a type at all, so any LLM that emitted `type: "string"`
+        // (a common shape for skill args) would fail Zod parse and the
+        // skill would be silently dropped from the registry. Restrict to
+        // the four shapes the invoke endpoint actually understands.
+        type: z.enum(["string", "number", "boolean", "enum"]).optional(),
         required: z.boolean().optional(),
-        default: z.string().optional(),
+        default: z.union([z.string(), z.number(), z.boolean()]).optional(),
+        // For type=enum, the allowlist of accepted values. Without this
+        // an enum arg with no options would be ambiguous at invoke time.
+        options: z.array(z.string()).optional(),
       })
     )
     .optional(),

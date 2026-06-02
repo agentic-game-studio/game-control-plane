@@ -12,7 +12,7 @@
  *     → Response read from MCP server stdout
  */
 
-import { spawn, execSync, execFileSync, ChildProcess } from "node:child_process";
+import { spawn, execFileSync, ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { accessSync, globSync, rmSync } from "node:fs";
 import type { LLMTool } from "../llm/zai-client.js";
@@ -836,12 +836,14 @@ export function launchGodotEditor(projectDir: string): { success: boolean; pid?:
     try {
       if (platform === "win32") {
         // Windows: use tasklist
-        const output = execSync('tasklist /FI "IMAGENAME eq Godot.exe" /NH', { encoding: "utf-8", stdio: ["pipe", "pipe", "ignore"] });
+        const output = execFileSync("tasklist", ["/FI", "IMAGENAME eq Godot.exe", "/NH"], { encoding: "utf-8", stdio: ["pipe", "pipe", "ignore"] });
         const match = output.match(/Godot\.exe\s+(\d+)/);
         if (match) return parseInt(match[1], 10);
       } else {
-        // macOS / Linux: use pgrep
-        const output = execSync("pgrep -xi Godot 2>/dev/null || true", { encoding: "utf-8", stdio: ["pipe", "pipe", "ignore"] }).trim();
+        // macOS / Linux: use pgrep. -x matches the exact process name
+        // (not a substring), so a system process that happens to contain
+        // "Godot" in its full command line doesn't get matched.
+        const output = execFileSync("pgrep", ["-xi", "Godot"], { encoding: "utf-8", stdio: ["pipe", "pipe", "ignore"] }).trim();
         if (output) return parseInt(output.split("\n")[0], 10);
       }
     } catch {

@@ -124,7 +124,10 @@ export async function verifyTicket(
   );
 
   try {
-    const result = await invokeAgent(verifier, task, ticket.sessionId ?? "verify-fallback", undefined, undefined, undefined, false);
+    const fallbackSession = ticket.projectId
+      ? `verify-fallback-${ticket.projectId}`
+      : `verify-fallback-${ticket.id}`;
+    const result = await invokeAgent(verifier, task, ticket.sessionId ?? fallbackSession, undefined, undefined, undefined, false);
     const { parsed: verdict } = parseVerdict(result.content);
     const passed = verdict === "PASS";
 
@@ -321,7 +324,10 @@ export async function verifyTicket(
       } as WSEvent);
     } else {
       // Under the cap — requeue so the autonomous loop can pick it up again.
-      await moveQuestTicket(ticket.id, "available", ticket.assignee).catch((moveErr) => {
+      // Q18-6th: thread `projectId` so moveQuestTicket doesn't re-run the
+      // N-project resolver. On a workspace with 100+ projects the resolver
+      // is a full-board scan per ticket; passing projectId skips it.
+      await moveQuestTicket(ticket.id, "available", ticket.assignee, projectId).catch((moveErr) => {
         logger.error(
           { event: "verify_move_failed", ticketId: ticket.id, error: moveErr instanceof Error ? moveErr.message : String(moveErr) },
           `Failed to move ticket ${ticket.id} back to available after verification error`,

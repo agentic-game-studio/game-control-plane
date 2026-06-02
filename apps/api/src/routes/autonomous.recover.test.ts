@@ -73,7 +73,7 @@ describe("recoverStaleLoopStates", () => {
     const { recoverStaleLoopStates } = await import(
       "./autonomous.js?recover-test"
     );
-    const recovered = recoverStaleLoopStates();
+    const recovered = await recoverStaleLoopStates();
 
     expect(recovered).toBeGreaterThanOrEqual(1);
 
@@ -91,6 +91,6 @@ describe("recoverStaleLoopStates", () => {
     const { recoverStaleLoopStates } = await import(
       "./autonomous.js?recover-empty-test"
     );
-    expect(recoverStaleLoopStates()).toBe(0);
+    expect(await recoverStaleLoopStates()).toBe(0);
   });
 });

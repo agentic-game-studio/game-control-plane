@@ -1,5 +1,6 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
+import { randomUUID } from "node:crypto";
 import { broadcastEvent } from "../services/data-store.js";
 import { DEFAULT_TICKETS_BOARD, readTicketsBoard, writeTicketsBoard, updateTicketsBoard } from "../services/ticket-board.js";
 import { triggerVerification } from "../services/verification-service.js";
@@ -69,7 +70,12 @@ ticketsRouter.post("/", async (req: Request, res: Response) => {
     const status: TicketStatus = body.status ?? "available";
 
     const newTicket: Ticket = {
-      id: `ticket-${Date.now()}`,
+      // Q4-6th: unguessable ticket IDs. The previous `ticket-${Date.now()}`
+      // was predictable — an attacker who knows roughly when a ticket was
+      // created could enumerate the board by ID. Use crypto.randomUUID()
+      // for 122 bits of entropy. The board is auth-gated so this is not
+      // a direct leak, but it eliminates enumeration as an oracle.
+      id: `ticket-${randomUUID()}`,
       projectId: projectId ?? undefined,
       title: body.title,
       description: body.description ?? "",

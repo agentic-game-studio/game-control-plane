@@ -481,8 +481,14 @@ assetsRouter.post("/", async (req: Request, res: Response) => {
 
   try {
     const now = new Date().toISOString();
+    // Q5-6th: unguessable IDs. The previous `asset-${Date.now()}` was
+    // predictable — combined with the unauthenticated /:id/thumbnail
+    // endpoint (the only auth bypass in middleware/auth.ts), an attacker
+    // could enumerate timestamps to discover existing assets. crypto
+    // .randomUUID() is 122 bits of entropy, unguessable, and the
+    // realpath boundary check already prevents arbitrary file reads.
     const newAsset: GameAsset = {
-      id: `asset-${Date.now()}`,
+      id: `asset-${crypto.randomUUID()}`,
       filename: body.filename,
       type: body.type,
       category: body.category,

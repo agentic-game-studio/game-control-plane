@@ -736,9 +736,22 @@ export async function callLLMWithTools(
       // Special case: AskUserQuestion should stop the loop and return the question
       if (result.startsWith("__ASK_USER_QUESTION__")) {
         const questionJson = result.substring("__ASK_USER_QUESTION__".length);
-        const questionData = JSON.parse(questionJson);
+        // Q2-6th: try/catch around JSON.parse. A malformed payload (a
+        // tool that returned "__ASK_USER_QUESTION__{not json}" used to
+        // throw synchronously, escape the Promise chain, and trip the
+        // unhandledRejection handler at index.ts:356 — process exit 1
+        // with no graceful drain. Log a warning and return an empty
+        // question so the loop continues; the user can re-ask if needed.
+        let questionData: { question?: string };
+        try {
+          questionData = JSON.parse(questionJson);
+        } catch (parseErr) {
+          logger.warn({ err: String(parseErr), event: "ask_user_question_parse_failed" },
+            "Failed to parse __ASK_USER_QUESTION__ payload — returning empty question");
+          questionData = { question: "" };
+        }
         return {
-          content: questionData.question,
+          content: questionData.question ?? "",
           tool_calls: [{
             id: tc.id ?? `call_${crypto.randomUUID().slice(0, 8)}`,
             name: tc.name,
@@ -751,9 +764,18 @@ export async function callLLMWithTools(
       // Special case: ProposePlan should stop the loop and return the plan
       if (result.startsWith("__PROPOSE_PLAN__")) {
         const planJson = result.substring("__PROPOSE_PLAN__".length);
-        const planData = JSON.parse(planJson);
+        // Q2-6th: same parse-error safety as above — a malformed plan
+        // payload shouldn't take down the process.
+        let planData: { title?: string };
+        try {
+          planData = JSON.parse(planJson);
+        } catch (parseErr) {
+          logger.warn({ err: String(parseErr), event: "propose_plan_parse_failed" },
+            "Failed to parse __PROPOSE_PLAN__ payload — returning empty plan");
+          planData = { title: "" };
+        }
         return {
-          content: planData.title,
+          content: planData.title ?? "",
           tool_calls: [{
             id: tc.id ?? `call_${crypto.randomUUID().slice(0, 8)}`,
             name: tc.name,
