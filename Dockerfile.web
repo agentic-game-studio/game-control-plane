@@ -15,8 +15,7 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json tsconfig.base.js
 COPY apps ./apps
 COPY packages ./packages
 
-RUN --mount=type=cache,id=pnpm,target=/root/.local/share/pnpm/store \
-    NODE_ENV=development pnpm install --frozen-lockfile
+RUN NODE_ENV=development pnpm install --frozen-lockfile
 
 # ---------- build stage ----------
 FROM deps AS build
@@ -56,10 +55,9 @@ COPY --from=build --chown=node:node /app/packages ./packages
 COPY --from=build --chown=node:node /app/package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json ./
 
 # Re-install in production mode (drops devDeps) using the cached store.
-RUN --mount=type=cache,id=pnpm,target=/root/.local/share/pnpm/store \
-    corepack enable && \
-    pnpm install --frozen-lockfile --prod && \
-    chown -R node:node /app
+RUN corepack enable \
+    && pnpm install --frozen-lockfile --prod \
+    && chown -R node:node /app
 
 # Next.js standalone needs .next/static and public served from the
 # project root at runtime. We pre-bake them into the image so the

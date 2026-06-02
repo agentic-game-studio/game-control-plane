@@ -57,6 +57,12 @@ COPY --from=builder --chown=node:nodejs /app/package.json /app/pnpm-lock.yaml /a
 COPY --from=builder --chown=node:nodejs /app/apps/api/package.json ./apps/api/package.json
 COPY --from=builder --chown=node:nodejs /app/packages ./packages
 COPY --from=builder --chown=node:nodejs /app/node_modules ./node_modules
+# pnpm 10 isolates each workspace's deps; the api's `tsx` lives in
+# apps/api/node_modules/.bin/tsx. Without this copy, `pnpm --filter
+# @game-studio/api start` (which runs `tsx src/index.ts`) cannot resolve
+# tsx. The api's local node_modules is full of symlinks back to the root
+# .pnpm store which we copied above, so all packages resolve correctly.
+COPY --from=builder --chown=node:nodejs /app/apps/api/node_modules ./apps/api/node_modules
 
 # Prepare writable directories for the file-based state store and the
 # workspace. In Railway these are mounted as volumes, but in a plain Docker
