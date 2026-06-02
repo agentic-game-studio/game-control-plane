@@ -63,6 +63,11 @@ COPY --from=builder --chown=node:nodejs /app/node_modules ./node_modules
 # tsx. The api's local node_modules is full of symlinks back to the root
 # .pnpm store which we copied above, so all packages resolve correctly.
 COPY --from=builder --chown=node:nodejs /app/apps/api/node_modules ./apps/api/node_modules
+# The api runs from source via `tsx src/index.ts` — copy the api source
+# tree (src/, tsconfig.json, etc.) into the runtime image. The api's
+# package.json alone is not enough for tsx to resolve the entry file.
+COPY --from=builder --chown=node:nodejs /app/apps/api/src ./apps/api/src
+COPY --from=builder --chown=node:nodejs /app/apps/api/tsconfig.json ./apps/api/tsconfig.json
 
 # Prepare writable directories for the file-based state store and the
 # workspace. In Railway these are mounted as volumes, but in a plain Docker
