@@ -94,3 +94,14 @@ export function loadConfig() {
 }
 
 export type Config = z.infer<typeof envSchema>;
+
+/**
+ * Resolve the Python interpreter used by the asset / verification /
+ * build pipelines. Centralized here so a future change (e.g. moving to a
+ * venv) only touches one file. The default is the bare `python3` (PATH
+ * lookup) — operators who need a specific interpreter should set
+ * PIPELINE_PYTHON in .env.
+ */
+export function resolvePipelinePython(): string {
+  return process.env.PIPELINE_PYTHON?.trim() || "python3";
+}

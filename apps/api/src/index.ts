@@ -129,6 +129,26 @@ server.on("upgrade", (request, socket, head) => {
 
 wss.on("connection", (socket) => {
   socket.on("error", (err) => logger.error({ error: err.message, event: "ws_error" }, "WebSocket error"));
+  // Echo JSON `{type:"ping"}` from the client with a JSON `{type:"pong"}`
+  // so the client can detect dead connections from its side. The native
+  // ws.ping()/ws.pong() pair on the server side is still the source of
+  // truth for our own 30s heartbeat — this is just a parity shim so the
+  // existing client interval at useWebSocket.ts:40 isn't silently
+  // dropped. Without it, a misconfigured proxy that strips ws.ping
+  // frames (some CDN/Cloudflare setups do) would let the client think
+  // it's connected while the server is about to terminate the socket.
+  socket.on("message", (data) => {
+    try {
+      const text = Buffer.isBuffer(data) ? data.toString("utf-8") : String(data);
+      const parsed = JSON.parse(text) as { type?: string };
+      if (parsed?.type === "ping") {
+        socket.send(JSON.stringify({ type: "pong" }));
+      }
+    } catch {
+      // Non-JSON or malformed message — ignore. Broadcast events from
+      // the client aren't part of the protocol today.
+    }
+  });
 });
 
 // Middleware
@@ -355,27 +375,43 @@ process.on("SIGINT", () => gracefulShutdown("SIGINT"));
 //    a stream error not wrapped in try/catch) takes the process down
 //    with no chance to flush logs or broadcast a `service:error`.
 //
-// Log loud, then exit 1 — k8s / Railway will restart us, and the restart
-// loop in `recoverStaleLoopStates()` will pick up any abandoned loop
-// state. We do NOT call gracefulShutdown from these handlers because
-// they fire in a process state where it might re-enter fatally; SIGTERM
-// from the orchestrator is the only path that runs the full drain.
-process.on("uncaughtException", (err, origin) => {
+// Log loud, then route through gracefulShutdown so the autonomous
+// loops get their `loop-state.json` flushed to "idle", in-flight LLM
+// fetches are aborted, MCP child processes are killed, and SSE clients
+// are closed. Without this, an uncaught error leaves the loop state on
+// disk as "running" — the next API boot then has to "recover" what
+// was actually a clean mid-iteration crash, and that recovery path
+// can't replay the agent's last tool call or its open file handles.
+// gracefulShutdown already has a 10s hard-exit timer, so a stuck
+// shutdown (e.g., the LLM fetch didn't honour its AbortSignal) still
+// terminates the process for the orchestrator to restart.
+let fatalExitInProgress = false;
+function fatalExit(signal: string, err: Error, event: string): void {
+  if (fatalExitInProgress) {
+    // Re-entrant call (gracefulShutdown itself threw and we're back here)
+    // — fall straight through to the hard exit.
+    process.exit(1);
+  }
+  fatalExitInProgress = true;
   logger.fatal(
-    { err: err.message, stack: err.stack, origin, event: "uncaught_exception" },
-    `Uncaught exception — exiting. ${err.message}`,
+    { err: err.message, stack: err.stack, event },
+    `Fatal ${event} — entering graceful shutdown. ${err.message}`,
   );
   // Best-effort: log to stderr so the orchestrator captures it even if
   // the pino file transport fails to flush.
-  process.stderr.write(`[FATAL] uncaughtException: ${err.message}\n${err.stack}\n`);
-  process.exit(1);
+  process.stderr.write(`[FATAL] ${event}: ${err.message}\n${err.stack ?? ""}\n`);
+  void gracefulShutdown(signal).catch((shutdownErr) => {
+    logger.fatal(
+      { err: (shutdownErr as Error).message, event: "fatal_shutdown_failed" },
+      "gracefulShutdown threw during fatal exit — falling through to process.exit",
+    );
+    process.exit(1);
+  });
+}
+process.on("uncaughtException", (err, origin) => {
+  fatalExit("uncaughtException", err, `uncaught_exception (origin=${origin})`);
 });
 process.on("unhandledRejection", (reason) => {
   const err = reason instanceof Error ? reason : new Error(String(reason));
-  logger.fatal(
-    { err: err.message, stack: err.stack, event: "unhandled_rejection" },
-    `Unhandled promise rejection — exiting. ${err.message}`,
-  );
-  process.stderr.write(`[FATAL] unhandledRejection: ${err.message}\n${err.stack ?? ""}\n`);
-  process.exit(1);
+  fatalExit("unhandledRejection", err, "unhandled_rejection");
 });

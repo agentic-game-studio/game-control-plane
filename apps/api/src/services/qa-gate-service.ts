@@ -6,7 +6,7 @@
 import { execFileSync } from "child_process";
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from "fs";
 import { join } from "path";
-import { loadConfig } from "../config.js";
+import { loadConfig, resolvePipelinePython } from "../config.js";
 import { resolveProjectWorkspace } from "../utils/workspace.js";
 import { resolveHomeDir } from "../utils/paths.js";
 import { logger } from "../utils/logger.js";
@@ -35,7 +35,7 @@ function runGodotHeadlessCommand(
 ): { success: boolean; stdout: string; stderr: string; returnCode: number } {
   const config = loadConfig();
   const scriptDir = join(config.WORKSPACE_DIR, "scripts", "godot");
-  const pythonBin = process.env.PIPELINE_PYTHON ?? "python3";
+  const pythonBin = resolvePipelinePython();
   const home = resolveHomeDir();
   const godotBin = process.env.GODOT_BIN ?? (home ? join(home, ".local/bin/godot_bin/Godot") : "");
 

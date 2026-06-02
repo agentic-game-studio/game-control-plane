@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "./useWebSocket";
 import type { TeamConfig } from "@game-studio/types";
@@ -20,18 +20,30 @@ export function useTeams(): UseTeamsReturn {
   const [teams, setTeams] = useState<TeamConfig[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const mountedRef = useRef(true);
 
   const fetchTeams = useCallback(async () => {
     try {
       const result = await apiFetch<TeamConfig[]>("/api/teams");
+      if (!mountedRef.current) return;
       setTeams(result);
       setError(null);
     } catch (err) {
       console.error("Failed to fetch teams:", err);
+      if (!mountedRef.current) return;
       setError(err instanceof Error ? err.message : "Failed to load teams");
     } finally {
-      setLoading(false);
+      if (mountedRef.current) {
+        setLoading(false);
+      }
     }
+  }, []);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
   }, []);
 
   useEffect(() => {

@@ -30,19 +30,24 @@ export function useAssets(projectId?: string) {
   const [error, setError] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const lastProjectId = useRef<string | undefined>(projectId);
+  const mountedRef = useRef(true);
 
   const fetchAssets = useCallback(async () => {
     try {
       const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
       const result = await apiFetch<AssetsData>(`/api/assets${qs}`);
+      if (!mountedRef.current) return;
       setData(result);
       setError(null);
     } catch (err) {
       console.error("Failed to fetch assets:", err);
+      if (!mountedRef.current) return;
       setError(err instanceof Error ? err.message : "Failed to load assets");
       setData(DEFAULT_ASSETS);
     } finally {
-      setLoading(false);
+      if (mountedRef.current) {
+        setLoading(false);
+      }
     }
   }, [projectId]);
 
@@ -79,7 +84,9 @@ export function useAssets(projectId?: string) {
   useWebSocket(onWSEvent);
 
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
+      mountedRef.current = false;
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
   }, []);
@@ -191,12 +198,16 @@ export function useAssets(projectId?: string) {
     const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
     try {
       const result = await apiFetch<AssetsData>(`/api/assets${qs}`);
+      if (!mountedRef.current) return;
       setData(result);
       setError(null);
     } catch (err) {
+      if (!mountedRef.current) return;
       setError(err instanceof Error ? err.message : "Rescan failed");
     } finally {
-      setLoading(false);
+      if (mountedRef.current) {
+        setLoading(false);
+      }
     }
   }, [projectId]);
 

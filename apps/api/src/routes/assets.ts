@@ -19,11 +19,11 @@ import type {
   Project,
 } from "@game-studio/types";
 import type { WSEvent } from "@game-studio/types";
-import { loadConfig } from "../config.js";
+import { loadConfig, resolvePipelinePython } from "../config.js";
 
 const execFileAsync = promisify(execFile);
 
-const PYTHON_BIN = process.env.PIPELINE_PYTHON ?? "/usr/local/bin/python3";
+const PYTHON_BIN = resolvePipelinePython();
 
 /** Known asset file extensions mapped to types */
 const EXT_TO_TYPE: Record<string, GameAsset["type"]> = {
@@ -250,7 +250,16 @@ export function unwatchProjectAssets(projectId: string): void {
 
 /** Start watching a project's assets directory for changes */
 function watchProjectAssets(projectId: string, assetsDir: string): void {
-  if (assetWatchers.has(projectId)) return; // Already watching
+  if (assetWatchers.has(projectId)) {
+    // Touch the entry so the LRU eviction below considers this project
+    // as the most-recently-used. Map.set on an existing key already
+    // updates iteration order, but a delete+set makes the intent
+    // explicit and matches the pattern used by the rate limiter above.
+    const existing = assetWatchers.get(projectId)!;
+    assetWatchers.delete(projectId);
+    assetWatchers.set(projectId, existing);
+    return;
+  }
 
   // LRU: if we're at the cap, evict the oldest entry. Map iteration is
   // insertion order, so the first key is the least-recently-inserted.

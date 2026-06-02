@@ -11,7 +11,7 @@ import fs from "node:fs/promises";
 import { realpathSync as realpathSyncCb, readFileSync as readFileSyncCb } from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { loadConfig } from "../config.js";
+import { loadConfig, resolvePipelinePython } from "../config.js";
 
 // Module-level cache for the Godot MCP Pro instructions file. It is a static
 // file shipped with the godot-mcp-pro package and never changes during a
@@ -298,13 +298,20 @@ function safePath(inputPath: string, baseDir: string): string {
 
   // Handle absolute paths to projects that are mirrored in the workspace.
   // The regex is pre-built at module load (HOME is constant for the
-  // process lifetime), so we just consult the cached one here.
+  // process lifetime), so we just consult the cached one here. The
+  // project name is restricted to a single path segment — a HOME path
+  // like /Users/choguun/.ssh/id_rsa would otherwise smuggle ".ssh" as
+  // a "project name" and Write the file under workspace/.ssh/, which
+  // falls within the workspaceDir fallthrough but isn't a real project.
   if (HOME_PREFIX_REGEX) {
     const godotPathMatch = inputPath.match(HOME_PREFIX_REGEX);
     if (godotPathMatch && godotPathMatch[2]) {
       const projectName = godotPathMatch[1];
-      const relativePath = godotPathMatch[2].substring(1);
-      workingPath = path.join(workspaceDir, projectName, relativePath);
+      if (projectName && !projectName.includes("/") && !projectName.includes("\\")
+          && projectName !== ".." && projectName !== ".") {
+        const relativePath = godotPathMatch[2].substring(1);
+        workingPath = path.join(workspaceDir, projectName, relativePath);
+      }
     }
   }
 
@@ -743,7 +750,7 @@ async function executeTool(
         const execFileAsyncTool = promisifyTool(execFileTool);
 
         // Resolve Python binary with pipeline dependencies (Pillow, rembg, etc.)
-        const PYTHON_BIN = process.env.PIPELINE_PYTHON ?? "/usr/local/bin/python3";
+        const PYTHON_BIN = resolvePipelinePython();
 
         const scriptDir = path.resolve(process.cwd(), "..", "..", "scripts", "asset-pipeline");
         const outputDir = projectContext?.workspacePath
@@ -871,7 +878,7 @@ async function executeTool(
 
         const config = loadConfig();
         const scriptDir = path.join(config.WORKSPACE_DIR, "scripts", "asset-pipeline");
-        const pythonBin = process.env.PIPELINE_PYTHON ?? "python3";
+        const pythonBin = resolvePipelinePython();
 
         const args = [
           pythonBin,
@@ -914,7 +921,7 @@ async function executeTool(
 
         const config = loadConfig();
         const scriptDir = path.join(config.WORKSPACE_DIR, "scripts", "asset-pipeline");
-        const pythonBin = process.env.PIPELINE_PYTHON ?? "python3";
+        const pythonBin = resolvePipelinePython();
 
         const args = [
           pythonBin,
@@ -952,7 +959,7 @@ async function executeTool(
 
         const config = loadConfig();
         const scriptDir = path.join(config.WORKSPACE_DIR, "scripts", "asset-pipeline");
-        const pythonBin = process.env.PIPELINE_PYTHON ?? "python3";
+        const pythonBin = resolvePipelinePython();
 
         const args = [
           pythonBin,
@@ -1134,8 +1141,27 @@ loop_offset=0
         // Resolve project path through safePath to validate and normalize
         const project = safePath(rawProject, workspaceDir);
 
-        // Validate optional paths through safePath
-        const validatedScript = script ? safePath(script, workspaceDir) : undefined;
+        // Validate optional paths through safePath. The script argument
+        // is additionally constrained to a `.gd` extension and a `scripts/`
+        // subdirectory under the workspace. Without this, an LLM prompt
+        // that asks for "run /etc/hosts as a script" would let the python
+        // helper shell out and parse any file (see run_godot_headless.py).
+        // safePath normalizes the path through WORKSPACE_DIR; the .gd check
+        // is a separate, cheap belt to that suspenders.
+        let validatedScript: string | undefined;
+        if (script) {
+          const resolved = safePath(script, workspaceDir);
+          if (!resolved.toLowerCase().endsWith(".gd")) {
+            return `Error: script must have a .gd extension (got: ${resolved})`;
+          }
+          // path.relative is empty when paths are equal — that means the
+          // user passed the workspace root, which is not under scripts/.
+          const rel = path.relative(workspaceDir, resolved);
+          if (rel.startsWith("..") || !rel.split(path.sep).includes("scripts")) {
+            return `Error: script must be under ${path.join(workspaceDir, "scripts")}/ (got: ${resolved})`;
+          }
+          validatedScript = resolved;
+        }
         const validatedOutput = output ? safePath(output, workspaceDir) : undefined;
 
         // Validate godotBin against known safe paths. The static list
@@ -1167,7 +1193,7 @@ loop_offset=0
 
         const config = loadConfig();
         const scriptDir = path.join(config.WORKSPACE_DIR, "scripts", "godot");
-        const pythonBin = process.env.PIPELINE_PYTHON ?? "python3";
+        const pythonBin = resolvePipelinePython();
 
         const args: string[] = [pythonBin, path.join(scriptDir, "run_godot_headless.py"), "--project", project, "--command", command];
         if (validatedScript) args.push("--script", validatedScript);
@@ -1426,8 +1452,20 @@ async function walkDirSimple(dir: string, parts: string[], idx: number, results:
   } else {
     const fullPath = path.join(dir, part);
     try {
-      const stat = await fs.stat(fullPath);
-      if (stat.isDirectory()) {
+      // lstat (not stat) so a symlink in the workspace doesn't get
+      // followed into an out-of-tree directory. Without this, a
+      // workspace/evil symlink → /etc would let walkDirSimple enumerate
+      // /etc/passwd and surface it as a glob match. Symlinks at the
+      // leaf are still followed for the file result — that's the
+      // behavior the LLM expects (e.g. workspace/data → ../shared/data).
+      const lstat = await fs.lstat(fullPath);
+      if (lstat.isSymbolicLink()) {
+        // Reject symlinks for recursive descent, but allow them as the
+        // terminal path so single-file Read tools can still resolve them.
+        if (isLast) results.push(fullPath);
+        return;
+      }
+      if (lstat.isDirectory()) {
         await walkDirSimple(fullPath, parts, idx + 1, results, visited);
       } else if (isLast) {
         results.push(fullPath);
@@ -1469,7 +1507,13 @@ async function grepFiles(
   context = 0
 ): Promise<string[]> {
   const results: string[] = [];
-  const regex = new RegExp(pattern, "gi");
+  // Single-file pattern, no global flag — `String.matchAll` re-creates
+  // the iteration state per call, so we don't have to remember to reset
+  // `regex.lastIndex` after every successful `regex.test()`. The previous
+  // version used /g + a manual `lastIndex = 0` reset inside the line
+  // loop, which silently skipped every other line if the reset was
+  // ever removed during a refactor.
+  const regex = new RegExp(pattern, "i");
 
   const visited = new Set<string>();
 
@@ -1498,7 +1542,6 @@ async function grepFiles(
 
             for (let i = 0; i < lines.length; i++) {
               if (regex.test(lines[i])) {
-                regex.lastIndex = 0;
                 if (context > 0) {
                   const start = Math.max(0, i - context);
                   const end = Math.min(lines.length - 1, i + context);

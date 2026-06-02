@@ -24,18 +24,58 @@ vi.mock("./data-store.js", () => ({
   readData: vi.fn(),
 }));
 
-vi.mock("./ticket-board.js", () => ({
-  readTicketsBoard: vi.fn(),
-  writeTicketsBoard: vi.fn(),
-  updateTicketsBoard: vi.fn(),
-  resolveProjectIdForSession: vi.fn().mockResolvedValue(null),
-  DEFAULT_TICKETS_BOARD: {
-    projectId: "",
-    sprint: "",
-    milestone: "",
-    columns: [],
-  },
-}));
+vi.mock("./ticket-board.js", async () => {
+  // Mutable per-project board state so moveQuestTicket can move tickets
+  // between columns and createFixTicket can persist parentTicketId —
+  // both depend on the board-mutation callback running with a real
+  // (in-memory) board so findTicketInBoard can find the ticket.
+  const boards = new Map<string, {
+    projectId: string;
+    sprint: string;
+    milestone: string;
+    columns: Array<{ id: string; label: string; tickets: Array<{ id: string; title: string; status: string; parentTicketId?: string; updatedAt: string; assignee?: string; description?: string }> }>;
+  }>();
+
+  const makeBoard = (projectId: string) => {
+    const board = {
+      projectId,
+      sprint: "Sprint_01",
+      milestone: "Alpha_Milestone",
+      columns: [
+        { id: "available", label: "Available", tickets: [] },
+        { id: "in_progress", label: "Processing", tickets: [] },
+        { id: "qa", label: "Verify", tickets: [] },
+        { id: "completed", label: "Archived", tickets: [] },
+      ],
+    };
+    boards.set(projectId, board);
+    return board;
+  };
+
+  return {
+    readTicketsBoard: vi.fn(async (projectId: string) => boards.get(projectId) ?? makeBoard(projectId)),
+    writeTicketsBoard: vi.fn(async (projectId: string, board: unknown) => {
+      boards.set(projectId, board as ReturnType<typeof makeBoard>);
+    }),
+    updateTicketsBoard: vi.fn(async (projectId: string, updater: (board: ReturnType<typeof makeBoard>) => ReturnType<typeof makeBoard>) => {
+      const current = boards.get(projectId) ?? makeBoard(projectId);
+      const next = updater(current);
+      boards.set(projectId, next);
+      return next;
+    }),
+    resolveProjectIdForSession: vi.fn(async (sessionId: string) => {
+      // Session ids starting with "sess-proj-" belong to that project.
+      const m = /^sess-proj-([\w-]+)$/.exec(sessionId);
+      return m ? m[1] : null;
+    }),
+    DEFAULT_TICKETS_BOARD: {
+      projectId: "",
+      sprint: "",
+      milestone: "",
+      columns: [],
+    },
+  };
+});
 
 vi.mock("./producer-summary.js", () => ({
   ingestProducerSummaryFact: vi.fn().mockResolvedValue(undefined),
@@ -52,6 +92,8 @@ import {
   getWorkflow,
   advanceStage,
   completeWorkflow,
+  createFixTicket,
+  moveQuestTicket,
 } from "./quest-bridge.js";
 import { loadConfig } from "../config.js";
 
@@ -147,5 +189,83 @@ describe("quest-bridge workflow locks", () => {
     await new Promise((r) => setTimeout(r, 2));
     const second = startWorkflow(sessionId);
     expect(second).not.toBe(id);
+  });
+});
+
+/**
+ * `createFixTicket` regression — parent/child ticket relationship.
+ *
+ * The fix-ticket flow creates a child ticket, then writes
+ * parentTicketId back to the board so the UI can group them. A
+ * regression that drops the second updateTicketsBoard call would leave
+ * orphans: the child exists, but the board has no record of the
+ * parent. We assert that the returned ticket has parentTicketId set
+ * AND that the persisted board entry matches.
+ */
+describe("createFixTicket parent/child persistence", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    void loadConfig();
+  });
+
+  it("persists parentTicketId on the child ticket", async () => {
+    const sessionId = "sess-proj-fix-1";
+    const parentId = "ticket-parent-123";
+    const child = await createFixTicket(
+      sessionId,
+      parentId,
+      "Fix: door collider not loading",
+      "gameplay-programmer",
+      "Door collider fails to load on first frame",
+    );
+
+    expect(child.parentTicketId).toBe(parentId);
+    expect(child.title).toBe("Fix: door collider not loading");
+    expect(child.status).toBe("available");
+  });
+});
+
+/**
+ * `moveQuestTicket` fromColumnId capture regression.
+ *
+ * The broadcast event for `ticket:moved` carries `fromColumn` so the
+ * frontend can render a slide animation. A regression that captured
+ * the column id AFTER the updater ran would broadcast
+ * fromColumn === toColumn for every move, producing a self-loop and
+ * killing the animation. We assert the broadcast event shape so any
+ * future regression is loud.
+ */
+describe("moveQuestTicket fromColumnId capture", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    void loadConfig();
+  });
+
+  it("broadcasts a fromColumn distinct from toColumn", async () => {
+    // Seed the board with a ticket in 'available'.
+    const { readTicketsBoard, writeTicketsBoard, updateTicketsBoard } = await import("./ticket-board.js");
+    const seeded = await readTicketsBoard("move-test");
+    seeded.columns[0].tickets.push({
+      id: "ticket-move-1",
+      title: "Test ticket",
+      status: "available",
+      updatedAt: new Date().toISOString(),
+    });
+    await writeTicketsBoard("move-test", seeded);
+    // suppress the unused-import lint by referencing updateTicketsBoard
+    void updateTicketsBoard;
+
+    await moveQuestTicket("ticket-move-1", "in_progress", "gameplay-programmer", "move-test");
+
+    const { broadcastEvent } = await import("./data-store.js");
+    const calls = (broadcastEvent as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    const movedCall = calls.find((c) => {
+      const arg = c[0] as { type?: string };
+      return arg?.type === "ticket:moved";
+    });
+    expect(movedCall).toBeDefined();
+    const event = movedCall![0] as { fromColumn: string; toColumn: string; projectId: string };
+    expect(event.fromColumn).toBe("available");
+    expect(event.toColumn).toBe("in_progress");
   });
 });

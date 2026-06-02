@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "./useWebSocket";
 import type { GateDefinition } from "@game-studio/types";
@@ -19,18 +19,30 @@ export function useGates(): UseGatesReturn {
   const [gates, setGates] = useState<GateDefinition[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const mountedRef = useRef(true);
 
   const fetchGates = useCallback(async () => {
     try {
       const result = await apiFetch<GateDefinition[]>("/api/gates");
+      if (!mountedRef.current) return;
       setGates(result);
       setError(null);
     } catch (err) {
       console.error("Failed to fetch gates:", err);
+      if (!mountedRef.current) return;
       setError(err instanceof Error ? err.message : "Failed to load gates");
     } finally {
-      setLoading(false);
+      if (mountedRef.current) {
+        setLoading(false);
+      }
     }
+  }, []);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
   }, []);
 
   useEffect(() => {

@@ -12,22 +12,39 @@ const HEARTBEAT_TIMEOUT_MS = 10_000;
 export const heartbeatInterval = setInterval(() => {
   for (const client of wss.clients) {
     if (client.readyState !== WebSocket.OPEN) continue;
-    const ws = client as WebSocket & { isAlive?: boolean };
+    const ws = client as WebSocket & { isAlive?: boolean; firstPingAt?: number };
+    // A new connection that hasn't yet been pinged has isAlive=true and
+    // firstPingAt undefined. We use that to skip the terminate check on
+    // the *next* sweep (when firstPingAt has been set but no pong has
+    // arrived). This avoids a 30s-after-connect race where a slow client
+    // (proxy wakeup, mobile backgrounded tab) loses its connection
+    // before its first pong can land.
     if (ws.isAlive === false) {
-      // Previous ping got no pong — assume the socket is dead and drop it.
+      if (ws.firstPingAt && Date.now() - ws.firstPingAt < HEARTBEAT_TIMEOUT_MS) {
+        // First ping is still within its grace window — give it more
+        // time. Without this, any connect-in-the-last-30s that hasn't
+        // yet ponged gets killed on the very next sweep.
+        continue;
+      }
+      // Previous ping got no pong and grace is exhausted — assume the
+      // socket is dead and drop it.
       try { client.terminate(); } catch { /* already gone */ }
       continue;
     }
     ws.isAlive = false;
+    ws.firstPingAt = Date.now();
     try { client.ping(); } catch { /* race with close — ignore */ }
   }
 }, HEARTBEAT_INTERVAL_MS);
 heartbeatInterval.unref();
 
 wss.on("connection", (socket) => {
-  const ws = socket as WebSocket & { isAlive?: boolean };
+  const ws = socket as WebSocket & { isAlive?: boolean; firstPingAt?: number };
   ws.isAlive = true;
-  ws.on("pong", () => { ws.isAlive = true; });
+  ws.on("pong", () => {
+    ws.isAlive = true;
+    ws.firstPingAt = undefined;
+  });
   // Belt-and-suspenders: also clean up the set on close (the heartbeat
   // interval will eventually catch zombies, but explicit cleanup is faster).
   ws.on("close", () => {

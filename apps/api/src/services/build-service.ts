@@ -11,7 +11,7 @@ import { readData, writeData, broadcastEvent } from "./data-store.js";
 import { generateProjectChangelog } from "./changelog-service.js";
 import { resolveProjectWorkspace } from "../utils/workspace.js";
 import { resolveHomeDir } from "../utils/paths.js";
-import { loadConfig } from "../config.js";
+import { loadConfig, resolvePipelinePython } from "../config.js";
 import { readProjectVersion, bumpProjectVersion } from "./qa-gate-service.js";
 import type { BuildPlatform, BuildsData, CreateBuildRequest, GameBuild, WSEvent } from "@game-studio/types";
 import { logger } from "../utils/logger.js";
@@ -95,7 +95,7 @@ export async function executeGodotExport(
 
   const config = loadConfig();
   const scriptDir = join(config.WORKSPACE_DIR, "scripts", "godot");
-  const pythonBin = process.env.PIPELINE_PYTHON ?? "python3";
+  const pythonBin = resolvePipelinePython();
   const home = resolveHomeDir();
   const godotBin = process.env.GODOT_BIN ?? (home ? join(home, ".local/bin/godot_bin/Godot") : "");
 

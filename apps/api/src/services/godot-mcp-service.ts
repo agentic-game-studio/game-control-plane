@@ -103,8 +103,11 @@ function resolveServerPath(): string {
   return candidates[0];
 }
 
-/** Tool name set for membership checking */
-const GODOT_MCP_TOOL_NAMES = new Set([
+/** Tool name set for membership checking. The set is built once at module
+ * load from a static literal, then frozen so a future tool-author who
+ * accidentally adds a `.add()` or `.delete()` somewhere (e.g. inside a
+ * hot-reload branch) can't silently mutate the registry. */
+const GODOT_MCP_TOOL_NAMES: ReadonlySet<string> = Object.freeze(new Set([
   // Project tools
   "get_project_info", "get_filesystem_tree", "search_files", "get_project_settings",
   "set_project_setting", "uid_to_project_path", "project_path_to_uid",
@@ -178,20 +181,26 @@ const GODOT_MCP_TOOL_NAMES = new Set([
   // Testing tools
   "run_test_scenario", "assert_node_state", "assert_screen_text", "compare_screenshots",
   "run_stress_test", "get_test_report",
-]);
+]));
 
 /** Check if a tool name is a known Godot MCP tool */
 export function isGodotMCPTool(name: string): boolean {
   return GODOT_MCP_TOOL_NAMES.has(name);
 }
 
-/** Get all Godot MCP tool definitions (for LLM injection) */
-export function getGodotMCPToolDefinitions(): LLMTool[] {
-  return Array.from(GODOT_MCP_TOOL_NAMES).map((name) => ({
+/** Get all Godot MCP tool definitions (for LLM injection). Cached at
+ * module load — the registry is frozen, so the array is identical for
+ * the lifetime of the process. */
+const GODOT_MCP_TOOL_DEFINITIONS: ReadonlyArray<LLMTool> = Object.freeze(
+  Array.from(GODOT_MCP_TOOL_NAMES).map((name) => ({
     name,
     description: `[Godot MCP] Tool: ${name} — see Godot MCP Pro documentation for details`,
     input_schema: { type: "object", properties: {}, required: [] },
-  }));
+  })),
+);
+
+export function getGodotMCPToolDefinitions(): LLMTool[] {
+  return GODOT_MCP_TOOL_DEFINITIONS as LLMTool[];
 }
 
 /** Godot MCP Service — manages the MCP server lifecycle */
@@ -392,9 +401,21 @@ export class GodotMCPService {
 
       this.pendingRequests.set(id, { resolve, reject, timeout });
 
-      // Write JSON-RPC request to stdin
+      // Write JSON-RPC request to stdin. If the MCP server's stdin has
+      // been closed (server died, but the `exit` event hasn't fired yet),
+      // Node raises EPIPE synchronously here. Without the try/catch that
+      // bubbles up as an unhandled promise rejection, leaving the
+      // pending request in the Map until the timeout eventually fires.
+      // Rejecting eagerly keeps the error visible at the request site
+      // and frees the id for the next caller.
       const data = JSON.stringify(request) + "\n";
-      this.process!.stdin!.write(data);
+      try {
+        this.process!.stdin!.write(data);
+      } catch (err) {
+        clearTimeout(timeout);
+        this.pendingRequests.delete(id);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
     });
   }
 

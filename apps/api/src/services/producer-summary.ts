@@ -177,6 +177,10 @@ function scheduleEmit(projectId: string, delayMs: number): void {
     pendingEmitTimers.delete(projectId);
     void flushEmitProducerUpdate(projectId);
   }, Math.max(0, delayMs));
+  // unref() so a pending debounced emit can't keep the process alive
+  // during shutdown. The setInterval timers in this codebase (rate
+  // limiter, heartbeat, etc.) all unref for the same reason.
+  t.unref();
   pendingEmitTimers.set(projectId, t);
 }
 

@@ -30,19 +30,31 @@ interface WorkflowState {
   workflowId: string;
   stage: WorkflowStage;
   tickets: Map<string, string>; // ticketId -> agentRole
-  createdAt: number; // epoch ms for TTL cleanup
+  createdAt: number; // epoch ms — workflow start time
+  lastActivityAt: number; // epoch ms — touched on stage advance and ticket add
 }
 
 const activeWorkflows = new Map<string, WorkflowState>();
 
+// Touch a workflow's lastActivityAt to keep it alive across the TTL cleanup
+// sweep. Called from every state-mutating site (stage advance, ticket add).
+function touchWorkflow(wf: WorkflowState): void {
+  wf.lastActivityAt = Date.now();
+}
+
 // Periodic cleanup of stale workflows. Handle is exported so the graceful
 // shutdown path in index.ts can clearInterval it; without that, the interval
 // keeps running on a torn-down module graph until the process exits.
+// The cleanup uses `lastActivityAt` (heartbeat) rather than `createdAt` so
+// a long-running workflow that's actively advancing stages isn't reaped
+// halfway through. WORKFLOW_TTL_MS is therefore "idle TTL" — the time
+// the workflow can sit without any state change before it's considered
+// abandoned.
 export const workflowCleanupInterval = setInterval(() => {
   const now = Date.now();
   const ttl = loadConfig().WORKFLOW_TTL_MS;
   for (const [sessionId, wf] of activeWorkflows) {
-    if (now - wf.createdAt > ttl) {
+    if (now - wf.lastActivityAt > ttl) {
       activeWorkflows.delete(sessionId);
     }
   }
@@ -65,11 +77,13 @@ export function startWorkflow(sessionId: string): string {
   }
 
   const workflowId = `wf-${Date.now()}`;
+  const startedAt = Date.now();
   activeWorkflows.set(sessionId, {
     workflowId,
     stage: "plan",
     tickets: new Map(),
-    createdAt: Date.now(),
+    createdAt: startedAt,
+    lastActivityAt: startedAt,
   });
 
   broadcastEvent({
@@ -90,6 +104,7 @@ export function advanceStage(sessionId: string, stage: WorkflowStage, ticketId?:
   const wf = activeWorkflows.get(sessionId);
   if (!wf) return;
   wf.stage = stage;
+  touchWorkflow(wf);
 
   broadcastEvent({
     type: "workflow:stage",
@@ -258,6 +273,7 @@ export async function createQuestTicket(
   const wf = getWorkflow(sessionId);
   if (wf) {
     wf.tickets.set(ticket.id, agentRole as string);
+    touchWorkflow(wf);
   }
 
   if (resolvedProjectId) {

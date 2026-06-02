@@ -27,6 +27,10 @@ describe("validateWebhookUrl", () => {
       ["192.168 private", "http://192.168.1.1/x"],
       ["AWS metadata", "http://169.254.169.254/latest/meta-data/"],
       ["0.0.0.0", "http://0.0.0.0/x"],
+      ["CGNAT 100.64.0.1", "http://100.64.0.1/x"],
+      ["CGNAT 100.127.255.254", "http://100.127.255.254/x"],
+      ["benchmark 198.18.0.0", "http://198.18.0.0/x"],
+      ["benchmark 198.19.255.255", "http://198.19.255.255/x"],
       ["IPv6 loopback", "http://[::1]/x"],
       ["IPv6 link-local", "http://[fe80::1]/x"],
     ])("rejects %s (%s)", (_label, input) => {
@@ -41,6 +45,9 @@ describe("validateWebhookUrl", () => {
       ["public with port", "https://api.example.com:8443/hook"],
       ["public with query", "https://hooks.slack.com/services/T0/B0/XXXX?token=1"],
       ["8.8.8.8 public DNS", "https://8.8.8.8/hook"],
+      // CGNAT edge cases (just outside the blocked range)
+      ["100.63.x", "http://100.63.255.254/x"],
+      ["100.128.x", "http://100.128.0.1/x"],
     ])("accepts %s (%s)", (_label, input) => {
       const out = validateWebhookUrl(input);
       expect(out).not.toBeNull();

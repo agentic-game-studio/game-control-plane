@@ -16,7 +16,7 @@ import { Router } from "express";
 import type { Request, Response } from "express";
 import { existsSync, mkdirSync, openSync, writeFileSync, closeSync, readdirSync, statSync, unlinkSync, renameSync } from "fs";
 import { join, resolve, sep } from "path";
-import { loadConfig } from "../config.js";
+import { loadConfig, resolvePipelinePython } from "../config.js";
 import { invokeAgent, detectEngineFromWorkspace, type ProjectContext } from "../services/llm-service.js";
 import { readData, writeData, broadcastEvent } from "../services/data-store.js";
 import { generateTickets, addTicketsToBoard } from "../services/ticket-generator.js";
@@ -223,7 +223,7 @@ async function runBootCheck(projectPath: string): Promise<{ bootOk: boolean; err
   const config = loadConfig();
   // scripts/godot lives inside WORKSPACE_DIR (workspace/scripts/godot, via symlink)
   const scriptDir = join(config.WORKSPACE_DIR, "scripts", "godot");
-  const pythonBin = process.env.PIPELINE_PYTHON ?? "python3";
+  const pythonBin = resolvePipelinePython();
   const home = resolveHomeDir();
   const godotBin = process.env.GODOT_BIN ?? (home ? join(home, ".local/bin/godot_bin/Godot") : "");
 

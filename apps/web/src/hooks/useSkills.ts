@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "./useWebSocket";
 import type { SkillName } from "@game-studio/types";
@@ -19,18 +19,30 @@ export function useSkills(): UseSkillsReturn {
   const [skills, setSkills] = useState<SkillName[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const mountedRef = useRef(true);
 
   const fetchSkills = useCallback(async () => {
     try {
       const result = await apiFetch<SkillName[]>("/api/skills");
+      if (!mountedRef.current) return;
       setSkills(result);
       setError(null);
     } catch (err) {
       console.error("Failed to fetch skills:", err);
+      if (!mountedRef.current) return;
       setError(err instanceof Error ? err.message : "Failed to load skills");
     } finally {
-      setLoading(false);
+      if (mountedRef.current) {
+        setLoading(false);
+      }
     }
+  }, []);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
   }, []);
 
   useEffect(() => {

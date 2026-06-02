@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { useWebSocket } from "./useWebSocket";
 import { apiFetch } from "@/lib/api";
 import type { WSEvent, AutonomousRunMetrics } from "@game-studio/types";
@@ -96,6 +96,14 @@ export function useAutonomousLoop() {
   });
   const [metrics, setMetrics] = useState<AutonomousRunMetrics | null>(null);
   const [milestone, setMilestone] = useState<string | null>(null);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const onWSEvent = useCallback((event: WSEvent) => {
     switch (event.type) {
@@ -186,6 +194,7 @@ export function useAutonomousLoop() {
       const res = await apiFetch<LoopState | { status: "not_found" }>(
         `/api/autonomous/status?sessionId=${encodeURIComponent(sessionId)}`
       );
+      if (!mountedRef.current) return;
       setStatus(mapStateToStatus(res));
     } catch {
       /* ignore — loop may not have been started */
@@ -197,6 +206,7 @@ export function useAutonomousLoop() {
       method: "POST",
       body: JSON.stringify({ sessionId, projectId }),
     });
+    if (!mountedRef.current) return result.sessionId;
     const loopSessionId = result.sessionId;
     // Immediately poll to sync UI state with freshly started loop
     await pollStatus(loopSessionId);

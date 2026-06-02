@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "./useWebSocket";
 import {
@@ -14,19 +14,31 @@ export function useSettings() {
   const [data, setData] = useState<SettingsConfig>(DEFAULT_SETTINGS);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const mountedRef = useRef(true);
 
   const fetchSettings = useCallback(async () => {
     try {
       const result = await apiFetch<SettingsConfig>("/api/settings");
+      if (!mountedRef.current) return;
       setData(result);
       setError(null);
     } catch (err) {
       console.error("Failed to fetch settings:", err);
+      if (!mountedRef.current) return;
       setError(err instanceof Error ? err.message : "Failed to load settings");
       setData(DEFAULT_SETTINGS);
     } finally {
-      setLoading(false);
+      if (mountedRef.current) {
+        setLoading(false);
+      }
     }
+  }, []);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
   }, []);
 
   useEffect(() => {

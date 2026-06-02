@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import fsp from "node:fs";
 import path from "node:path";
+import { logger } from "../utils/logger.js";
 import type {
   DocumentCategory,
   CategoryMeta,
@@ -351,16 +352,25 @@ export class DocumentStore {
           }
         }, 500);
       });
-      // Handle watcher errors (ENOSPC, permission issues, etc.)
-      this.watcher.on("error", () => {
-        // Silently stop watching on error (e.g., ENOSPC — no inotify watches available).
-        // Also clear any pending debounce so the callback can't run against a
-        // closed watcher (it would access this.watcher via this.invalidateCache).
+      // Handle watcher errors (ENOSPC, EPERM when a watched dir is moved
+      // or deleted, etc.). Without the broadcast, a frontend that
+      // relied on live updates would silently drift until the next
+      // /api/documents poll. Callers re-arm by calling startWatching
+      // again — typically on the next /api/documents GET.
+      this.watcher.on("error", (err) => {
+        logger.warn({
+          err: (err as NodeJS.ErrnoException).code ?? (err as Error).message,
+          workspaceDir: this.workspaceDir,
+          event: "document_watcher_error",
+        }, "Document store watcher stopped after error — re-arm by calling startWatching()");
         if (this.debounceTimer) {
           clearTimeout(this.debounceTimer);
           this.debounceTimer = null;
         }
         this.watcher = null;
+        if (onChange) {
+          onChange({ documentId: "", category: "design" as DocumentCategory, title: "__watcher_stopped__" });
+        }
       });
     } catch {
       // fs.watch not available or permission denied — non-critical

@@ -24,6 +24,7 @@ import { loadConfig } from "../config.js";
 void loadConfig();
 
 import { callZAI } from "./zai-client.js";
+import { callLLMWithTools } from "./zai-client.js";
 
 interface FetchCall {
   url: string;
@@ -145,4 +146,103 @@ describe("callZAI retry behavior", () => {
     }
     expect(calls.length).toBe(20);
   });
+});
+
+/**
+ * Tool-loop cap regression tests.
+ *
+ * `callLLMWithTools` enforces two caps from config:
+ *  - MAX_TOOL_CALLS: stops the loop once totalTools >= maxTools, sends
+ *    a "you have reached the maximum" user message, and returns the
+ *    final response with tool_calls=undefined.
+ *  - TOOL_CHECKPOINT_INTERVAL: emits a checkpoint log + optional
+ *    summary every N iterations.
+ *
+ * A regression that removes the cap lets a runaway agent burn credits
+ * (Phase 1 fix from the audit). A regression that drops the
+ * checkpoint leaves long sessions without an in-memory breadcrumb to
+ * recover from on a crash.
+ */
+
+function anthropicToolUse(toolName: string, args: Record<string, unknown>): Response {
+  return jsonResponse({
+    id: "msg_test",
+    model: "glm-5.1",
+    content: [
+      { type: "text", text: "calling tool" },
+      {
+        type: "tool_use",
+        id: `toolu_${Math.random().toString(36).slice(2, 10)}`,
+        name: toolName,
+        input: args,
+      },
+    ],
+    usage: { input_tokens: 5, output_tokens: 5 },
+  });
+}
+
+describe("callLLMWithTools caps", () => {
+  let calls: FetchCall[];
+  let originalFetch: typeof fetch;
+
+  beforeEach(() => {
+    calls = [];
+    originalFetch = globalThis.fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.useRealTimers();
+  });
+
+  function mockFetch(impl: (attempt: number) => Response | Promise<Response>) {
+    globalThis.fetch = vi.fn(async (url: string | URL, init?: RequestInit) => {
+      const attempt = calls.length;
+      calls.push({ url: String(url), init: init ?? {} });
+      return impl(attempt);
+    }) as unknown as typeof fetch;
+  }
+
+  it("stops at MAX_TOOL_CALLS and returns the final response with no tool_calls", async () => {
+    // Config defaults: MAX_TOOL_CALLS=100. The mock returns a tool-use
+    // response on every call with VARYING input so the loop-detection
+    // guard (which trips on 4+ consecutive identical tool+args) doesn't
+    // short-circuit before the cap. We use a Write tool (not an
+    // exploration tool) with a unique path per iteration.
+    let counter = 0;
+    // The loop-detection guard trips on MAX_CONSECUTIVE_SAME_TOOL_CALLS=4
+    // same-tool calls (for non-exploration tools) within the last
+    // `recentToolCalls` window. To reach MAX_TOOL_CALLS=100 we cycle
+    // through enough distinct tool names that no single tool name
+    // hits the threshold. The cap test is about the *count* of tool
+    // calls, not what they do — varying names lets the loop hit its
+    // MAX_TOOL_CALLS budget cleanly.
+    const TOOL_NAMES = [
+      "Write", "Edit", "Bash", "GenerateAsset", "StartConsultation",
+      "ProposePlan", "AskUserQuestion", "Read", "Glob", "Grep",
+    ] as const;
+    mockFetch((attempt) => {
+      counter++;
+      if (attempt < 100) {
+        const toolName = TOOL_NAMES[attempt % TOOL_NAMES.length];
+        return anthropicToolUse(toolName, { file_path: `/tmp/cap-test-${attempt}`, content: "x" });
+      }
+      return anthropicOk("done");
+    });
+
+    const res = await callLLMWithTools(
+      {
+        model: "glm-5.1",
+        messages: [{ role: "user", content: "ping" }],
+      },
+      // Tool executor: returns immediately with a stub. The cap test
+      // is about the *count* of tool calls, not what they do.
+      async () => "ok",
+    );
+
+    expect(res.content).toBe("done");
+    expect(res.tool_calls).toBeUndefined();
+    // 100 tool iterations + 1 final cap-exit call.
+    expect(counter).toBe(101);
+  }, 30_000);
 });

@@ -73,6 +73,11 @@ export function DialogProvider({ children }: { children: React.ReactNode }) {
               {current.kind === "confirm" && (
                 <button
                   onClick={() => close(false)}
+                  // For confirms, autoFocus the Cancel button so a stray
+                  // Enter press doesn't accidentally confirm a destructive
+                  // action (delete, stop, reset). For alerts, only OK is
+                  // rendered, so it gets the focus.
+                  autoFocus
                   className="flex-1 border-2 border-black bg-white px-4 py-2 font-[var(--font-label)] text-xs font-bold uppercase hover:bg-surface-container transition-colors"
                 >
                   Cancel
@@ -80,7 +85,7 @@ export function DialogProvider({ children }: { children: React.ReactNode }) {
               )}
               <button
                 onClick={() => close(true)}
-                autoFocus
+                autoFocus={current.kind === "alert"}
                 className="flex-1 border-2 border-black bg-primary text-white px-4 py-2 font-[var(--font-label)] text-xs font-bold uppercase hover:bg-black retro-press transition-colors"
               >
                 OK

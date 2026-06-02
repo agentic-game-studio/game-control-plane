@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "./useWebSocket";
 import type { AgentDefinition } from "@game-studio/types";
@@ -18,18 +18,30 @@ export function useAgents(): UseAgentsReturn {
   const [agents, setAgents] = useState<AgentDefinition[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const mountedRef = useRef(true);
 
   const fetchAgents = useCallback(async () => {
     try {
       const result = await apiFetch<AgentDefinition[]>("/api/agents");
+      if (!mountedRef.current) return;
       setAgents(result);
       setError(null);
     } catch (err) {
       console.error("Failed to fetch agents:", err);
+      if (!mountedRef.current) return;
       setError(err instanceof Error ? err.message : "Failed to load agents");
     } finally {
-      setLoading(false);
+      if (mountedRef.current) {
+        setLoading(false);
+      }
     }
+  }, []);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
   }, []);
 
   useEffect(() => {

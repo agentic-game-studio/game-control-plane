@@ -17,21 +17,26 @@ export function useDashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const mountedRef = useRef(true);
 
   const fetchDashboard = useCallback(async () => {
     try {
       const result = await apiFetch<DashboardData>("/api/dashboard");
+      if (!mountedRef.current) return;
       setData(result);
       setError(null);
     } catch (err) {
       console.error("Failed to fetch dashboard:", err);
+      if (!mountedRef.current) return;
       setError(err instanceof Error ? err.message : "Failed to load dashboard");
       // Preserve the previous data on a transient fetch failure — wiping it
       // to DEFAULT_DATA hides already-loaded projects/activity on every
       // momentary backend hiccup. The initial load (when `data === DEFAULT_DATA`)
       // is the only case where we want to leave an empty state.
     } finally {
-      setLoading(false);
+      if (mountedRef.current) {
+        setLoading(false);
+      }
     }
   }, []);
 
@@ -58,7 +63,9 @@ export function useDashboard() {
   useWebSocket(onWSEvent);
 
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
+      mountedRef.current = false;
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
   }, []);

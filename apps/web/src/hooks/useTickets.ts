@@ -28,19 +28,24 @@ export function useTickets() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const mountedRef = useRef(true);
 
   const fetchTickets = useCallback(async () => {
     try {
       const query = currentProjectId ? `?projectId=${encodeURIComponent(currentProjectId)}` : "";
       const result = await apiFetch<TicketsBoard>(`/api/tickets${query}`);
+      if (!mountedRef.current) return;
       setData(result);
       setError(null);
     } catch (err) {
       console.error("Failed to fetch tickets:", err);
+      if (!mountedRef.current) return;
       setError(err instanceof Error ? err.message : "Failed to load quest board");
       setData(DEFAULT_BOARD);
     } finally {
-      setLoading(false);
+      if (mountedRef.current) {
+        setLoading(false);
+      }
     }
   }, [currentProjectId]);
 
@@ -68,7 +73,9 @@ export function useTickets() {
   useWebSocket(onWSEvent);
 
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
+      mountedRef.current = false;
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
   }, []);

@@ -21,7 +21,9 @@ function isBlockedAddress(hostname: string): boolean {
     return true;
   }
   // Numeric IPv4 check — covers 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12,
-  // 192.168.0.0/16, 169.254.0.0/16, 0.0.0.0/8. We use a coarse prefix match
+  // 192.168.0.0/16, 169.254.0.0/16, 0.0.0.0/8, 100.64.0.0/10, 198.18.0.0/15.
+  // CGNAT (RFC 6598) and benchmarking (RFC 2544) ranges are reserved and
+  // should never be legitimate webhook targets. We use a coarse prefix match
   // rather than `node:net.isIP` + bitwise checks because the goal is to
   // block whole /8 boundaries, not to be a full IP validator.
   const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(lower);
@@ -32,6 +34,8 @@ function isBlockedAddress(hostname: string): boolean {
     if (a === 172 && b >= 16 && b <= 31) return true;          // 172.16.0.0/12
     if (a === 192 && b === 168) return true;                   // 192.168.0.0/16
     if (a === 169 && b === 254) return true;                   // 169.254.0.0/16 (link-local, includes cloud metadata)
+    if (a === 100 && b >= 64 && b <= 127) return true;         // 100.64.0.0/10 (CGNAT, RFC 6598)
+    if (a === 198 && (b === 18 || b === 19)) return true;      // 198.18.0.0/15 (benchmark, RFC 2544)
   }
   // IPv6 loopback / link-local
   if (lower === "::1" || lower === "[::1]") return true;
