@@ -90,15 +90,26 @@ export function useAssets(projectId?: string) {
       if (
         event.type === "asset:created" ||
         event.type === "asset:updated" ||
-        event.type === "asset:deleted"
+        event.type === "asset:deleted" ||
+        event.type === "asset:generated"
       ) {
+        // 10-L5: ignore events for other projects. A multi-project
+        // workspace used to refetch on every asset:* event from any
+        // project — each refetch scans the workspace directory and
+        // can take 200-500ms. With 4 projects open and an active
+        // generation pipeline, this dominated the network tab and
+        // occasionally starved the active project's polling.
+        const eventProjectId = "projectId" in event ? event.projectId : null;
+        if (projectId && eventProjectId && eventProjectId !== projectId) {
+          return;
+        }
         if (debounceRef.current) clearTimeout(debounceRef.current);
         debounceRef.current = setTimeout(() => {
           fetchAssets();
         }, 300);
       }
     },
-    [fetchAssets]
+    [fetchAssets, projectId]
   );
 
   useWebSocket(onWSEvent);

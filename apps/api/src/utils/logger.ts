@@ -7,16 +7,22 @@ import type { Request } from "express";
 
 /**
  * Extract a stable request ID from incoming headers, falling back to a
- * short random UUID when none is supplied. Centralized so the request
+ * fresh random UUID when none is supplied. Centralized so the request
  * logger middleware and any future cross-cutting middleware (error
  * handler, request validator) agree on the same header precedence:
  * x-request-id → x-correlation-id → generated.
+ *
+ * 10-M6: previously this returned `randomUUID().slice(0, 8)` — that's
+ * only 32 bits of entropy. With ~10 RPS sustained traffic, collisions
+ * become statistically likely in roughly 12 hours. Use the full 128-bit
+ * UUID; log lines and correlation IDs aren't user-visible so the extra
+ * characters cost nothing.
  */
 export function getRequestId(req: Request): string {
   const headerVal = req.headers["x-request-id"] ?? req.headers["x-correlation-id"];
   if (typeof headerVal === "string" && headerVal.length > 0) return headerVal;
   if (Array.isArray(headerVal) && headerVal.length > 0 && headerVal[0]) return headerVal[0];
-  return randomUUID().slice(0, 8);
+  return randomUUID();
 }
 
 const __filename = fileURLToPath(import.meta.url);

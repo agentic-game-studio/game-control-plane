@@ -15,6 +15,7 @@
 import { spawn, execFileSync, ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { accessSync, globSync, rmSync } from "node:fs";
+import os from "node:os";
 import type { LLMTool } from "../llm/zai-client.js";
 import { logger } from "../utils/logger.js";
 import { loadConfig } from "../config.js";
@@ -421,22 +422,34 @@ export class GodotMCPService {
 
   /**
    * Rewrite absolute file paths from Godot to workspace-relative paths.
-   * Godot returns absolute paths like /Users/cursor/some-folder/godot-test-1/scene.gd
+   * Godot returns absolute paths like
+   *   /Users/cursor/some-folder/godot-test-1/scene.gd        (macOS)
+   *   /home/ci-runner/some-folder/godot-test-1/scene.gd      (Linux)
+   *   C:\Users\ci-runner\some-folder\godot-test-1\scene.gd   (Windows)
    * We rewrite these to ./workspace/godot-test-1/scene.gd for the LLM.
    */
   private rewritePaths(result: string): string {
-    // Detect the Godot project directory from the result
-    // Godot typically returns paths containing the project directory name
+    // 10-C7: detect the project directory regardless of host platform.
+    // The previous regex was hardcoded to `/Users/...` which only
+    // matched macOS. On Linux (Railway, CI) and Windows the regex
+    // never matched, so `godotProjectDir` was never set, and the
+    // path-rewriter silently no-op'd. Use the home directory from
+    // os.homedir() (works on all platforms) as the prefix anchor.
     if (!this.godotProjectDir && this.workspaceRelativePath) {
-      // Look for the project name in absolute paths like /Users/xxx/.../project-name/
-      // Match up to the project directory and capture the full path prefix
+      const homeDir = os.homedir();
+      const escapedHome = homeDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const escapedProjectName = this.workspaceRelativePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const projectMatch = result.match(new RegExp(`(/Users/[^/]+/[^/]+/${escapedProjectName}/)`));
+      // Match either POSIX or Windows separators inside the captured prefix.
+      // The trailing segment is the project-name; everything before the
+      // project-name is the prefix we want to substitute.
+      const projectMatch = result.match(
+        new RegExp(`(?:${escapedHome}[/\\\\][^/\\\\]+(?:[/\\\\][^/\\\\]+)*[/\\\\]${escapedProjectName})[/\\\\]`),
+      );
       if (projectMatch) {
-        this.godotProjectDir = projectMatch[1].replace(/\/$/, "");
+        this.godotProjectDir = projectMatch[0].replace(/[/\\\\]$/, "");
         logger.info(
           { godotDir: this.godotProjectDir, workspaceRelative: this.workspaceRelativePath },
-          "Detected Godot project directory"
+          "Detected Godot project directory",
         );
       }
     }
@@ -446,7 +459,7 @@ export class GodotMCPService {
     }
 
     // Replace the absolute Godot path prefix with workspace-relative path
-    // e.g., /Users/choguun/Documents/cursor/godot-test-1 → ./workspace/godot-test-1
+    // e.g., /home/ci-runner/.../godot-test-1 → ./workspace/godot-test-1
     const relativeWorkspace = `./workspace/${this.workspaceRelativePath}`;
     return result.split(this.godotProjectDir).join(relativeWorkspace);
   }
@@ -455,6 +468,14 @@ export class GodotMCPService {
   async executeTool(name: string, params: Record<string, unknown>): Promise<string> {
     if (!this.isRunning) {
       return `Error: GodotMCPService is not running. Call start() first.`;
+    }
+    // 10-H9: refuse tool calls until the JSON-RPC handshake has completed.
+    // The previous code accepted requests as soon as the child process was
+    // spawned — but the server may take 1-2s to import modules before it
+    // can answer `tools/call`. Calls arriving in that window would return
+    // "method not found" errors that look like real Godot failures.
+    if (!this.initialized) {
+      return `Error: GodotMCPService is starting up — initialize handshake has not completed. Retry shortly.`;
     }
 
     try {

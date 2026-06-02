@@ -989,8 +989,23 @@ export function useCommandRoom() {
             ? cachedForMerge.currentSession
             : producerSession.id;
         setCurrentSession(restoredTab);
-        setThreadId(`#${Math.floor(Math.random() * 9000 + 1000)}`);
-        setThreadTitle("BOARD_ROOM");
+        // 10-C3: only randomize threadId/threadTitle if the cache didn't
+        // already provide them. The previous code unconditionally overwrote
+        // the cached values on every page load, so the user saw
+        // "ID: #4321" change to "ID: #7891" on every refresh even though
+        // the cache was being read. The cache itself stores the random id
+        // on first-time setup, so restoring it here gives stable identity
+        // across reloads.
+        if (cachedForMerge?.threadId) {
+          setThreadId(cachedForMerge.threadId);
+        } else {
+          setThreadId(`#${Math.floor(Math.random() * 9000 + 1000)}`);
+        }
+        if (cachedForMerge?.threadTitle) {
+          setThreadTitle(cachedForMerge.threadTitle);
+        } else {
+          setThreadTitle("BOARD_ROOM");
+        }
 
         if (cachedForMerge?.subagents?.length) {
           const allowedParents = new Set(sessionMap.keys());
@@ -2289,8 +2304,19 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
   }, []);
 
   const closeSession = useCallback((role: string) => {
+    // 10-M8: refuse to fire a DELETE for an empty role. The previous
+    // behavior built a URL `/api/chat/sessions/` (with the missing id
+    // segment) and issued a DELETE anyway — some Express routers match
+    // that as the "delete all sessions" or just 404. The local Map.delete
+    // is a no-op for "" so the UI didn't visibly break, but the stray
+    // request was visible in the network tab and could 500 on a
+    // misconfigured router. Drop the call entirely if role is empty.
+    if (!role || typeof role !== "string") {
+      console.warn("closeSession called with empty/non-string role — ignoring");
+      return;
+    }
     // Delete from backend so it doesn't reappear on refresh
-    apiFetch(`/api/chat/sessions/${role}`, { method: "DELETE" }).catch((err) => {
+    apiFetch(`/api/chat/sessions/${encodeURIComponent(role)}`, { method: "DELETE" }).catch((err) => {
       // Silently ignore if session already gone — stale cache or already closed
       if (err instanceof Error && err.message.includes("Session not found")) return;
       console.error("Failed to delete session:", err);

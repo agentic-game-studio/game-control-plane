@@ -69,13 +69,24 @@ gatesRouter.post("/:gateId/run", async (req: Request, res: Response) => {
     return;
   }
 
-  // Execute gate with LLM
-  res.json({
+  // 10-H7: respond 202 Accepted so the client understands the gate is
+  // running asynchronously and the actual verdict will arrive via the
+  // `gate:verdict` WebSocket event (or by polling the verdict cache via
+  // GET /gates with sessionId). Previously the route used 200 with
+  // `status: "running"`, which made clients think the gate had already
+  // completed and rendered a misleading status until the verdict arrived.
+  res.status(202).json({
     success: true,
     data: { gateId, status: "running" },
   });
 
-  try {
+  // The gate execution intentionally runs after the response is sent so
+  // the HTTP call doesn't block on a 30s+ LLM round-trip. Errors are
+  // surfaced via the `gate:verdict` broadcast (BLOCKED) and cached so
+  // polling clients can still recover the result. We catch every error
+  // here so an uncaught rejection cannot bubble up to the express
+  // unhandled-rejection handler and crash the process.
+  Promise.resolve().then(async () => {
     // Add context about target phase if provided
     let gateContext = context || "";
     if (targetPhase) {
@@ -105,7 +116,7 @@ gatesRouter.post("/:gateId/run", async (req: Request, res: Response) => {
       },
       sessionId: effectiveSessionId,
     } as WSEvent);
-  } catch (error) {
+  }).catch((error) => {
     const errMsg = error instanceof Error ? error.message : String(error);
     logger.error({ gateId, error: errMsg, event: "gate_error" }, "Gate execution failed");
     const info = getGateInfo(gateId);
@@ -120,7 +131,7 @@ gatesRouter.post("/:gateId/run", async (req: Request, res: Response) => {
       },
       sessionId: effectiveSessionId,
     } as WSEvent);
-  }
+  });
 });
 
 // GET /gates/:gateId — get gate info

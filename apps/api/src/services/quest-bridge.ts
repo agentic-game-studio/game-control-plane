@@ -76,7 +76,15 @@ export function startWorkflow(sessionId: string): string {
     return existing.workflowId;
   }
 
-  const workflowId = `wf-${Date.now()}`;
+  // 10-L2: include 6 random hex chars on the workflow id. Two
+  // concurrent startWorkflow calls in the same millisecond (parallel
+  // `/api/teams` requests, a race after the previous workflow's
+  // session was deleted and recreated) previously produced identical
+  // `wf-1700000000000` ids, which then collided on the activeWorkflows
+  // map's set+get path and on any frontend state keyed by workflowId.
+  // Date.now() is still useful for chronological sort; the random
+  // suffix is the collision resistance.
+  const workflowId = `wf-${Date.now()}-${randomBytes(3).toString("hex")}`;
   const startedAt = Date.now();
   activeWorkflows.set(sessionId, {
     workflowId,

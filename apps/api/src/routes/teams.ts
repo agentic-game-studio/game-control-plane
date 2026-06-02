@@ -149,8 +149,17 @@ async function runTeamWorkflow(
 
   const teamMembers = team.teamMembers || [];
 
-  // Start workflow pipeline for this team
-  startWorkflow(sessionId);
+  // 10-H6: don't call startWorkflow again — the caller at /:team/run
+  // already created the workflow and verified there wasn't an existing
+  // one. A redundant call here would silently no-op (since startWorkflow
+  // refuses to clobber an existing workflow), but it muddies the audit
+  // trail by emitting a spurious "workflow_already_active" warning.
+  // Verify the workflow still exists before advancing — if it was
+  // cleaned up by the TTL sweep, recreate it so the team workflow
+  // can proceed.
+  if (!getWorkflow(sessionId)) {
+    startWorkflow(sessionId);
+  }
   advanceStage(sessionId, "decompose");
 
   // Create Quest tickets for each team member upfront

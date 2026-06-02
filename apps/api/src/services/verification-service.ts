@@ -12,6 +12,33 @@ import { updateTicketsBoard, readTicketsBoard } from "./ticket-board.js";
 import type { Ticket, AgentRole, WSEvent } from "@game-studio/types";
 import { logger } from "../utils/logger.js";
 
+// 10-M1: track in-flight verifications by ticketId so external events
+// (project delete, ticket delete) can abort the underlying LLM call.
+// Without this, a project delete would orphan the verification job: the
+// LLM round-trip would continue burning tokens on a ticket that no
+// longer exists.
+const activeVerifications = new Map<string, AbortController>();
+
+export function cancelVerification(ticketId: string): boolean {
+  const controller = activeVerifications.get(ticketId);
+  if (!controller) return false;
+  try { controller.abort(); } catch { /* already aborted */ }
+  activeVerifications.delete(ticketId);
+  return true;
+}
+
+export function cancelVerificationsForProject(projectId: string): number {
+  let count = 0;
+  for (const [ticketId, controller] of activeVerifications) {
+    if (ticketId.startsWith(`${projectId}-`) || ticketId.includes(`/${projectId}/`)) {
+      try { controller.abort(); } catch { /* already aborted */ }
+      activeVerifications.delete(ticketId);
+      count++;
+    }
+  }
+  return count;
+}
+
 /** Maximum number of consecutive verification errors before a ticket is
  * dead-lettered. Without this cap, a broken verifier (e.g. missing API key,
  * LLM outage) would burn credits forever as the autonomous loop re-picks
@@ -127,7 +154,34 @@ export async function verifyTicket(
     const fallbackSession = ticket.projectId
       ? `verify-fallback-${ticket.projectId}`
       : `verify-fallback-${ticket.id}`;
-    const result = await invokeAgent(verifier, task, ticket.sessionId ?? fallbackSession, undefined, undefined, undefined, false);
+    // 10-M1: thread an AbortController through invokeAgent so the
+    // verification can be cancelled externally (e.g. when the project
+    // is deleted while a verifier is mid-call).
+    const controller = new AbortController();
+    activeVerifications.set(ticket.id, controller);
+    let result: { content: string };
+    try {
+      result = await invokeAgent(
+        verifier,
+        task,
+        ticket.sessionId ?? fallbackSession,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        0,
+        undefined,
+        undefined,
+        undefined,
+        controller.signal,
+      );
+    } finally {
+      // Only clear if this controller is still the active one for the
+      // ticket — a re-entered verification would have replaced it.
+      if (activeVerifications.get(ticket.id) === controller) {
+        activeVerifications.delete(ticket.id);
+      }
+    }
     const { parsed: verdict } = parseVerdict(result.content);
     const passed = verdict === "PASS";
 

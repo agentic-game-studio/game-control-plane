@@ -209,6 +209,23 @@ export class DocumentStore {
     if (!entry) return null;
 
     const filePath = path.join(this.workspaceDir, entry.path);
+    // Cap document body size. Without this, a single 1GB markdown file
+    // under workspace/ would be loaded into memory by the wiki viewer
+    // and the JSON response would balloon the WS event payload. 2MB is
+    // generous for a markdown design doc and well above what the wiki
+    // UI renders — anything larger is almost certainly a binary that
+    // landed in the wrong directory. Reject with a clear error rather
+    // than truncating, so the user knows to move or split the file.
+    const stat = await fs.stat(filePath).catch(() => null);
+    if (stat && stat.size > 2 * 1024 * 1024) {
+      logger.warn({
+        event: "document_too_large",
+        slug,
+        sizeBytes: stat.size,
+        path: entry.path,
+      }, `Refusing to serve document ${slug} (${stat.size} bytes exceeds 2MB cap)`);
+      return null;
+    }
     let content: string;
     try {
       content = await fs.readFile(filePath, "utf-8");
@@ -372,7 +389,21 @@ export class DocumentStore {
           onChange({ documentId: "", category: "design" as DocumentCategory, title: "__watcher_stopped__" });
         }
       });
-    } catch {
+    } catch (err) {
+      // 10-H10: `fs.watch` with `recursive: true` is unsupported on Linux
+      // (throws ENOSYS) and Android. On those platforms there's no
+      // cheap way to watch a deep tree, so the watcher is logged as
+      // unavailable and the UI falls back to its existing poll refresh
+      // on /api/documents.
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code === "ENOSYS" || code === "ERR_FEATURE_UNAVAILABLE_ON_PLATFORM") {
+        logger.warn({
+          workspaceDir: this.workspaceDir,
+          code,
+          event: "document_watcher_unsupported",
+        }, "fs.watch recursive unsupported on this platform — document updates will rely on the UI's poll refresh");
+        return;
+      }
       // fs.watch not available or permission denied — non-critical
     }
   }

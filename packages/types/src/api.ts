@@ -33,10 +33,10 @@ export type WSEvent =
   | { type: "ticket:moved"; ticket: Ticket; fromColumn: string; toColumn: string; projectId?: string | null }
   | { type: "ticket:verified"; ticketId: string; projectId?: string | null; verdict: string; passed: boolean; verifier: AgentRole }
   | { type: "ticket:deadletter"; ticketId: string; projectId?: string | null; reason: string; attempts: number }
-  | { type: "asset:created"; asset: GameAsset }
-  | { type: "asset:updated"; asset: GameAsset }
-  | { type: "asset:deleted"; assetId: string }
-  | { type: "asset:generated"; asset: GameAsset }
+  | { type: "asset:created"; asset: GameAsset; projectId?: string | null }
+  | { type: "asset:updated"; asset: GameAsset; projectId?: string | null }
+  | { type: "asset:deleted"; assetId: string; projectId?: string | null }
+  | { type: "asset:generated"; asset: GameAsset; projectId?: string | null }
   | { type: "settings:updated"; settings: SettingsConfig }
   | { type: "team:started"; teamId: string; sessionId: string }
   | { type: "team:completed"; teamId: string; sessionId: string; output: string }

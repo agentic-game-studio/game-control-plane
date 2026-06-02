@@ -374,20 +374,54 @@ const WelcomeMessage = memo(function WelcomeMessage({ msg }: { msg: ChatMessage 
   );
 });
 
-/* Markdown render cache to avoid re-parsing on every render */
-const mdCache = new Map<string, string>();
-const MAX_CACHE = 200;
+/* Markdown render cache — LRU with project-scoped buckets (10-C2).
+ *
+ * The old module-level Map used FIFO eviction and never cleared on
+ * project switch, so long-running sessions leaked up to MAX_CACHE large
+ * HTML strings per project, with no LRU semantics (FIFO deletes the
+ * oldest-inserted, not the least-recently-used). We split by project
+ * (keyed by the current project's id) and use a true LRU: read
+ * promotes to most-recent, write evicts the least-recently-read entry.
+ *
+ * `currentProjectIdRef` is read at call time so callers don't have to
+ * thread the project through every renderMarkdown site. */
+const MD_CACHE_LIMIT = 200;
+const mdCaches = new Map<string, Map<string, string>>();
 
-function cachedRenderMarkdown(content: string): string {
-  const cached = mdCache.get(content);
-  if (cached) return cached;
-  const html = renderMarkdown(content);
-  if (mdCache.size >= MAX_CACHE) {
-    const firstKey = mdCache.keys().next().value;
-    if (firstKey) mdCache.delete(firstKey);
+function getMdCache(projectId: string | null): Map<string, string> {
+  const key = projectId ?? "__default__";
+  let cache = mdCaches.get(key);
+  if (!cache) {
+    cache = new Map();
+    mdCaches.set(key, cache);
   }
-  mdCache.set(content, html);
+  return cache;
+}
+
+function cachedRenderMarkdown(content: string, projectId?: string | null): string {
+  const cache = getMdCache(projectId ?? null);
+  const cached = cache.get(content);
+  if (cached !== undefined) {
+    // LRU: re-insert to mark as most-recently-used.
+    cache.delete(content);
+    cache.set(content, cached);
+    return cached;
+  }
+  const html = renderMarkdown(content);
+  if (cache.size >= MD_CACHE_LIMIT) {
+    // Delete the oldest-inserted (which is also the least-recently-used
+    // because we re-insert on read).
+    const firstKey = cache.keys().next().value;
+    if (firstKey !== undefined) cache.delete(firstKey);
+  }
+  cache.set(content, html);
   return html;
+}
+
+/** Drop the markdown cache for a specific project. Called on project
+ * switch so a long-lived session doesn't keep prior projects' HTML. */
+export function clearProjectMarkdownCache(projectId: string): void {
+  mdCaches.delete(projectId);
 }
 
 const AgentMessage = memo(function AgentMessage({

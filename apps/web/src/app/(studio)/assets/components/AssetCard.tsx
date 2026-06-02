@@ -89,10 +89,16 @@ export function AssetCard({ asset, onDelete }: AssetCardProps) {
     closeContextMenu();
   }, [closeContextMenu]);
 
-  // Build thumbnail URL: if the asset has a thumbnailPath, serve it via the API
+  // Build thumbnail URL: prefer the server-provided signed URL (10-L1)
+  // which carries an HMAC of the asset id; the unauthenticated
+  // /:id/thumbnail route rejects requests without a valid sig. Fall
+  // back to constructing the URL only if the list endpoint predates
+  // the signed-URL change (older payloads).
   const thumbnailSrc =
     asset.thumbnailPath && !imgError
-      ? `${API_BASE}/api/assets/${asset.id}/thumbnail`
+      ? asset.signedThumbnailUrl
+        ? `${API_BASE}${asset.signedThumbnailUrl}`
+        : `${API_BASE}/api/assets/${asset.id}/thumbnail`
       : null;
 
   // Full-size image for preview (use thumbnail as fallback)

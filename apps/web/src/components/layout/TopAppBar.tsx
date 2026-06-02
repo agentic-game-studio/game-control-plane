@@ -101,12 +101,23 @@ export default function TopAppBar() {
             type="text"
           />
         </div>
-        <button className="border-2 border-black bg-white p-1 hover:bg-black hover:text-white transition-colors retro-press">
-          <span className="material-symbols-outlined">notifications</span>
+        <button
+          // 10-L8: icon-only button — announce the action to assistive
+          // tech. Visible hover/focus styles exist; the title is now
+          // paired with an explicit aria-label for screen readers.
+          aria-label="Notifications"
+          title="Notifications"
+          className="border-2 border-black bg-white p-1 hover:bg-black hover:text-white transition-colors retro-press"
+        >
+          <span className="material-symbols-outlined" aria-hidden="true">notifications</span>
         </button>
-        <Link href="/settings">
-          <button className="border-2 border-black bg-white p-1 hover:bg-black hover:text-white transition-colors retro-press">
-            <span className="material-symbols-outlined">settings</span>
+        <Link href="/settings" aria-label="Open settings">
+          <button
+            aria-label="Open settings"
+            title="Open settings"
+            className="border-2 border-black bg-white p-1 hover:bg-black hover:text-white transition-colors retro-press"
+          >
+            <span className="material-symbols-outlined" aria-hidden="true">settings</span>
           </button>
         </Link>
         <div className="w-8 h-8 border-2 border-black bg-surface-container-high overflow-hidden">

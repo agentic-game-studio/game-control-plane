@@ -479,14 +479,19 @@ async function saveLoopState(state: LoopState): Promise<void> {
     logger.error({ err: (err as Error).message, sessionId: state.sessionId, event: "loop_state_save_failed" },
       "Loop state save failed");
   });
-  // Update the tail to the new promise so subsequent writers wait
-  // for this one to complete. Catch to avoid unhandled rejection
-  // surfacing as a process-level crash.
-  saveChains.set(state.sessionId, next.catch(() => {}));
+  // 10-H1: capture the catch-wrapped tail into a const so the GC
+  // comparison below actually matches. The previous code did
+  // `saveChains.set(state.sessionId, next.catch(() => {}))` and
+  // then later compared against another `next.catch(() => {})` — but
+  // `.catch` returns a *new* promise each call, so the comparison
+  // was always false and the entry was never deleted. Every save
+  // left a stale entry in the map.
+  const tail = next.catch(() => {});
+  saveChains.set(state.sessionId, tail);
   // GC: when the chain is idle (no pending writers), drop the entry
   // so an unbounded set of historical sessionIds doesn't grow.
   next.finally(() => {
-    if (saveChains.get(state.sessionId) === next.catch(() => {})) {
+    if (saveChains.get(state.sessionId) === tail) {
       saveChains.delete(state.sessionId);
     }
   });

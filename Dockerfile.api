@@ -45,11 +45,11 @@ RUN corepack enable \
     && useradd --system --uid 1001 --gid nodejs --create-home --shell /bin/bash node
 
 # Copy only what the runtime needs from the builder.
-COPY --from=builder /app/package.json /app/pnpm-lock.yaml /app/pnpm-workspace.yaml /app/turbo.json ./
-COPY --from=builder /app/apps/api/package.json ./apps/api/package.json
-COPY --from=builder /app/apps/api/dist ./apps/api/dist
-COPY --from=builder /app/packages ./packages
-COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder --chown=node:nodejs /app/package.json /app/pnpm-lock.yaml /app/pnpm-workspace.yaml /app/turbo.json ./
+COPY --from=builder --chown=node:nodejs /app/apps/api/package.json ./apps/api/package.json
+COPY --from=builder --chown=node:nodejs /app/apps/api/dist ./apps/api/dist
+COPY --from=builder --chown=node:nodejs /app/packages ./packages
+COPY --from=builder --chown=node:nodejs /app/node_modules ./node_modules
 
 # Prepare writable directories for the file-based state store and the
 # workspace. In Railway these are mounted as volumes, but in a plain Docker

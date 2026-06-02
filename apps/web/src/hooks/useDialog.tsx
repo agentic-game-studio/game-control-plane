@@ -130,9 +130,32 @@ export function useDialog(): DialogContextValue {
     // Components calling useDialog outside a DialogProvider fall back
     // to the native browser dialogs so the page still works (e.g. in
     // storybook or a route that didn't wire the provider).
+    //
+    // 10-L6: guard window/document before calling the natives. A
+    // server-render that reaches this branch (e.g. a stray useDialog
+    // call from a component used in a server component, or a test
+    // harness without jsdom) would throw `window is not defined`.
+    // Also: in the absence of a real dialog, the user has no way to
+    // recover from a missing-provider — log so the bug surfaces in
+    // dev. Default `confirm` to false (Cancel) so a missing-provider
+    // page is safe-by-default for destructive operations.
+    const nativeConfirm = (msg: string): boolean => {
+      if (typeof window === "undefined") {
+        console.warn("useDialog: no provider in scope; defaulting confirm to false");
+        return false;
+      }
+      return window.confirm(msg);
+    };
+    const nativeAlert = (msg: string): void => {
+      if (typeof window === "undefined") {
+        console.warn("useDialog: no provider in scope; alert suppressed");
+        return;
+      }
+      window.alert(msg);
+    };
     return {
-      confirm: async (message: string) => window.confirm(message),
-      alert: async (message: string) => window.alert(message),
+      confirm: async (message: string) => nativeConfirm(message),
+      alert: async (message: string) => nativeAlert(message),
     };
   }
   return ctx;

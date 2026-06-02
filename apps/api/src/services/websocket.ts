@@ -1,5 +1,6 @@
 import { WebSocketServer, WebSocket } from "ws";
 import type { WSEvent } from "@game-studio/types";
+import { logger } from "../utils/logger.js";
 
 export const wss = new WebSocketServer({ noServer: true });
 
@@ -44,6 +45,18 @@ wss.on("connection", (socket) => {
   ws.on("pong", () => {
     ws.isAlive = true;
     ws.firstPingAt = undefined;
+  });
+  // 10-C5: an `error` event with no listener throws `Unhandled 'error'
+  // event` in Node's EventEmitter and crashes the process. ECONNRESET,
+  // TLS hiccups, and broken pipes all surface here. Clean up the set so
+  // the next broadcast doesn't try to send to a half-dead socket.
+  ws.on("error", (err) => {
+    logger.warn(
+      { err: err instanceof Error ? err.message : String(err), event: "ws_client_error" },
+      "WebSocket client error — terminating",
+    );
+    try { ws.terminate(); } catch { /* already gone */ }
+    wss.clients.delete(ws);
   });
   // Belt-and-suspenders: also clean up the set on close (the heartbeat
   // interval will eventually catch zombies, but explicit cleanup is faster).

@@ -459,8 +459,16 @@ function pruneMessages(messages: LLMMessage[], maxTokens: number): LLMMessage[] 
     recent = recent.slice(safeStart);
   }
 
-  for (let i = 0; i < recent.length; i++) {
-    const msg = recent[i];
+  // 10-M2: iterate the recent slice from the END (most-recent message)
+  // backwards so when the token budget is exhausted we drop the OLDEST
+  // messages in `recent`, not the newest. The previous forward loop
+  // would `break` when budget ran out and silently drop the user's
+  // most recent query plus its tool results — exactly the messages
+  // the LLM needs most to answer the next turn.
+  const reversed = recent.slice().reverse();
+  const kept: LLMMessage[] = [];
+  for (let i = 0; i < reversed.length; i++) {
+    const msg = reversed[i];
     const charCount = typeof msg.content === "string"
       ? msg.content.length
       : msg.content.reduce((s, c) => s + (c.type === "text" ? c.text.length : 1000), 0);
@@ -469,31 +477,34 @@ function pruneMessages(messages: LLMMessage[], maxTokens: number): LLMMessage[] 
     // Don't split assistant+tool pairs: if this message has tool_calls, the next
     // message (tool results) MUST be kept too — otherwise the LLM sees orphaned calls
     if (usedTokens + tokenCount <= maxTokens) {
-      result.push(msg);
+      kept.push(msg);
       usedTokens += tokenCount;
     } else {
-      // If the PREVIOUS kept message has tool_calls, drop it too — orphaned tool calls
-      // without results will confuse the LLM
-      const prevKept = result[result.length - 1];
-      if (prevKept && prevKept.role === "assistant" && prevKept.tool_calls) {
-        result.pop();
-      }
-
       const remainingTokens = maxTokens - usedTokens;
       const remainingChars = remainingTokens * CHARS_PER_TOKEN_ESTIMATE;
       if (remainingChars > 100) {
         if (typeof msg.content === "string") {
-          result.push({ ...msg, content: truncate(msg.content, remainingChars) });
+          kept.push({ ...msg, content: truncate(msg.content, remainingChars) });
         } else {
           const truncated = msg.content.map((c) =>
             c.type === "text" ? { type: "text" as const, text: truncate(c.text, remainingChars) } : c
           );
-          result.push({ ...msg, content: truncated });
+          kept.push({ ...msg, content: truncated });
         }
       }
+      // We've hit the budget — stop pulling in older messages, but
+      // we've already preserved the most-recent ones above.
       break;
     }
   }
+
+  // Re-reverse to put back in chronological order, then drop any
+  // orphaned tool-result-without-preceding-assistant at the start.
+  let chrono = kept.slice().reverse();
+  while (chrono.length > 0 && chrono[0].role === "user" && Array.isArray(chrono[0].content) && (chrono[0].content[0] as unknown as ToolResultContent | undefined)?.type === "tool_result") {
+    chrono = chrono.slice(1);
+  }
+  for (const m of chrono) result.push(m);
 
   return result;
 }
@@ -610,7 +621,13 @@ export async function callZAI(request: LLMRequest): Promise<LLMResponse> {
         content += c.text;
       } else if (c.type === "tool_use" && c.name && c.input) {
         toolCalls.push({
-          id: c.id ?? `tool-${crypto.randomUUID().slice(0, 8)}`,
+          // 10-L7: use the full UUID, not the first 8 hex chars. The
+          // previous slice(0, 8) yielded 32 bits of entropy — at 100
+          // tool calls per turn (max_tools), collisions become
+          // likely within a single long-running session. A colliding
+          // tool_use id is silently dropped by the Anthropic API and
+          // the tool result is orphaned in the conversation history.
+          id: c.id ?? `tool-${crypto.randomUUID()}`,
           name: c.name,
           input: c.input,
         });
@@ -792,7 +809,8 @@ export async function callLLMWithTools(
         return {
           content: questionData.question ?? "",
           tool_calls: [{
-            id: tc.id ?? `call_${crypto.randomUUID().slice(0, 8)}`,
+            // 10-L7: full UUID — see tool_use branch above
+            id: tc.id ?? `call_${crypto.randomUUID()}`,
             name: tc.name,
             input: questionData,
           }],
@@ -816,7 +834,8 @@ export async function callLLMWithTools(
         return {
           content: planData.title ?? "",
           tool_calls: [{
-            id: tc.id ?? `call_${crypto.randomUUID().slice(0, 8)}`,
+            // 10-L7: full UUID — see tool_use branch above
+            id: tc.id ?? `call_${crypto.randomUUID()}`,
             name: tc.name,
             input: planData,
           }],

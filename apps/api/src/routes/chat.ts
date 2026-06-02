@@ -746,6 +746,16 @@ chatRouter.delete("/sessions/:id", async (req: Request, res: Response) => {
 
   delete chatStore.sessions[id];
   sessionsResponding.delete(id);
+  // 10-H2: abort any in-flight LLM/tool loop for this session BEFORE
+  // removing the AbortController. Without this, an in-flight call would
+  // continue to consume Kimi/Z.ai credits and try to write to a session
+  // that no longer exists. The next checkpoint broadcast would silently
+  // drop on the floor (or worse, write to a different session if the id
+  // is later recycled).
+  const controller = sessionAbortControllers.get(id);
+  if (controller) {
+    try { controller.abort(); } catch { /* already aborted */ }
+  }
   sessionAbortControllers.delete(id);
   cleanupWorkflow(id);
   // Note: Godot MCP service is keyed by projectId, not sessionId.
@@ -1352,6 +1362,10 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
 
   // R1: Declare heartbeat outside try so catch block can clear it
   let heartbeat: ReturnType<typeof setInterval> | undefined;
+  // 10-H3: hoist the mid-flight close handler too so the catch path
+  // can detach it. Otherwise the listener (and its captured
+  // AbortController) leaks on every request that errors.
+  let midFlightCloseHandler: (() => void) | undefined;
 
   try {
     // Set up progress callback for tool execution updates
@@ -1384,16 +1398,25 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
     // (project delete, broadcast) can cancel the call without depending on
     // the HTTP request lifetime.
     const clientAbort = new AbortController();
-    // Attach the close listener BEFORE registering in the abort map so
-    // a client disconnect that races with the assignment is still
-    // caught by the listener and not silently dropped.
-    req.on("close", () => {
+    // 10-H3: keep a reference to the mid-flight close handler so we
+    // can detach it in the success/error path. Previously the inline
+    // arrow function was registered with `req.on("close", ...)` and
+    // never `req.off()`'d, so it (and the AbortController closure it
+    // captured) leaked per request. The pre-LLM clientDisconnectHandler
+    // (installed at line ~1318) was correctly off'd, but this second
+    // handler was forgotten.
+    const midFlightCloseHandlerImpl = () => {
       if (!clientAbort.signal.aborted) {
         logger.info({ sessionId: id, event: "chat_client_disconnected" },
           "Client disconnected mid-response — cancelling in-flight LLM call");
         clientAbort.abort();
       }
-    });
+    };
+    midFlightCloseHandler = midFlightCloseHandlerImpl;
+    // Attach the close listener BEFORE registering in the abort map so
+    // a client disconnect that races with the assignment is still
+    // caught by the listener and not silently dropped.
+    req.on("close", midFlightCloseHandlerImpl);
     sessionAbortControllers.set(id, clientAbort);
 
     // Call the LLM with progress callback
@@ -1535,6 +1558,7 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
 
     await saveChatState();
     req.off("close", clientDisconnectHandler);
+    if (midFlightCloseHandler) req.off("close", midFlightCloseHandler);
     releaseLock();
     sessionAbortControllers.delete(id);
     res.status(201).json({ success: true, data: { userMessage, assistantMessage } });
@@ -1544,6 +1568,7 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
     // R1: Clear heartbeat on error to prevent permanent timer leak
     clearInterval(heartbeat);
     req.off("close", clientDisconnectHandler);
+    if (midFlightCloseHandler) req.off("close", midFlightCloseHandler);
     releaseLock();
     sessionAbortControllers.delete(id);
 
@@ -1936,8 +1961,15 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
   });
   spawnResponded = true;
   } finally {
+    // 10-H4: ALWAYS release the spawn lock, including on the success
+    // path. The previous `if (!spawnResponded)` guard meant a successful
+    // spawn left the sessionId in the Set forever — every successful
+    // /spawn permanently leaked one entry. (The error path's delete is
+    // correct, but the success path needs it too.) A duplicate /spawn
+    // for the same id will be caught by the `chatStore.sessions[id]`
+    // check at line 1630 instead.
+    pendingSpawns.delete(sessionId);
     if (!spawnResponded) {
-      pendingSpawns.delete(sessionId);
       // Best-effort 500 — if response was already sent, the socket
       // will close and Express will log the unhandled error.
       if (!res.headersSent) {

@@ -433,22 +433,28 @@ dashboardRouter.post("/projects", async (req: Request, res: Response) => {
   }
 
   try {
-    const data = await readData<DashboardData>("dashboard.json");
-    const now = new Date().toISOString();
-
-    // Validate workspacePath if provided
+    // Validate workspacePath if provided. Validation is async and does not
+    // need the locked dashboard.json contents, so it happens outside the
+    // updateData callback.
     const workspacePath = body.workspacePath ?? null;
     if (workspacePath) {
       const validation = await validateWorkspacePath(workspacePath);
       if (path.isAbsolute(workspacePath)) {
-        // Absolute paths must exist AND be within the workspace directory
         if (!validation.exists) {
           res.status(400).json({ success: false, error: `Directory does not exist: ${workspacePath}` });
           return;
         }
         const config = loadConfig();
         const resolved = path.resolve(workspacePath);
-        if (!resolved.startsWith(path.resolve(config.WORKSPACE_DIR))) {
+        const resolvedWorkspace = path.resolve(config.WORKSPACE_DIR);
+        // 10-C4: require the boundary check to use a trailing separator
+        // so a sibling directory like `/app/workspace-other` does not
+        // satisfy `startsWith("/app/workspace")`. The previous bare
+        // `startsWith` accepted any path sharing the workspace's prefix.
+        if (
+          resolved !== resolvedWorkspace &&
+          !resolved.startsWith(resolvedWorkspace + path.sep)
+        ) {
           res.status(400).json({ success: false, error: "Absolute workspacePath must be within the workspace directory" });
           return;
         }
@@ -468,8 +474,12 @@ dashboardRouter.post("/projects", async (req: Request, res: Response) => {
       }
     }
 
+    const now = new Date().toISOString();
     const newProject = normalizeProject({
-      id: `proj-${Date.now()}`,
+      // 10-H5: use the same id-collision guard as normalizeProject (random
+      // suffix) so two concurrent POST /projects calls landing on the same
+      // millisecond produce distinct ids even before they reach the lock.
+      id: `proj-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       name: body.name,
       description: body.description ?? "",
       engine,
@@ -481,8 +491,15 @@ dashboardRouter.post("/projects", async (req: Request, res: Response) => {
       updatedAt: now,
     });
 
-    data.projects.push(newProject);
-    await writeData("dashboard.json", data);
+    // 10-H5: route the append through updateData so two concurrent POST
+    // /projects calls serialize on the per-file mutex. The previous direct
+    // readData + writeData pair had a lost-update race: both callers would
+    // read the same baseline and the second's writeData would clobber the
+    // first's project.
+    await updateData<DashboardData>("dashboard.json", (data) => {
+      data.projects.push(newProject);
+      return data;
+    });
 
     // Auto-install Godot MCP plugin for Godot projects with workspacePath
     let pluginInstallResult: { success: boolean; pluginCopied: boolean; pluginEnabled: boolean; error?: string } | null = null;
@@ -524,14 +541,6 @@ dashboardRouter.patch("/projects/:id", async (req: Request, res: Response) => {
   const updates = req.body as UpdateProjectRequest;
 
   try {
-    const data = await readData<DashboardData>("dashboard.json");
-    const projectIndex = data.projects.findIndex((p) => p.id === id);
-
-    if (projectIndex === -1) {
-      res.status(404).json({ success: false, error: "Project not found" });
-      return;
-    }
-
     const projectId = String(id);
     // Whitelist allowed update fields to prevent arbitrary field injection
     const allowedFields = ["name", "description", "engine", "progress", "status", "workspacePath", "icon"] as const;
@@ -539,20 +548,38 @@ dashboardRouter.patch("/projects/:id", async (req: Request, res: Response) => {
     for (const key of allowedFields) {
       if (key in updates) safeUpdates[key] = (updates as Record<string, unknown>)[key];
     }
-    const updatedProject = normalizeProject({
-      ...data.projects[projectIndex],
-      ...safeUpdates,
-      id: projectId,
-      updatedAt: new Date().toISOString(),
-    });
 
-    data.projects[projectIndex] = updatedProject;
-    await writeData("dashboard.json", data);
+    // 10-H5: serialize the PATCH through the per-file mutex so a concurrent
+    // PATCH or DELETE cannot lose this update. The 404 path raises a
+    // sentinel error inside the callback so the writeData step is skipped.
+    let updatedProject: Project | null = null;
+    try {
+      await updateData<DashboardData>("dashboard.json", (data) => {
+        const projectIndex = data.projects.findIndex((p) => p.id === id);
+        if (projectIndex === -1) {
+          throw new Error("__PROJECT_NOT_FOUND__");
+        }
+        updatedProject = normalizeProject({
+          ...data.projects[projectIndex],
+          ...safeUpdates,
+          id: projectId,
+          updatedAt: new Date().toISOString(),
+        });
+        data.projects[projectIndex] = updatedProject;
+        return data;
+      });
+    } catch (e) {
+      if (e instanceof Error && e.message === "__PROJECT_NOT_FOUND__") {
+        res.status(404).json({ success: false, error: "Project not found" });
+        return;
+      }
+      throw e;
+    }
 
     // Broadcast event
     broadcastEvent({
       type: "project:updated",
-      project: updatedProject,
+      project: updatedProject!,
     } as WSEvent);
 
     res.json({ success: true, data: updatedProject });
@@ -566,16 +593,23 @@ dashboardRouter.delete("/projects/:id", async (req: Request, res: Response) => {
   const { id } = req.params;
 
   try {
-    const data = await readData<DashboardData>("dashboard.json");
-    const projectIndex = data.projects.findIndex((p) => p.id === id);
-
-    if (projectIndex === -1) {
-      res.status(404).json({ success: false, error: "Project not found" });
-      return;
+    // 10-H5: serialize the delete through the per-file mutex.
+    try {
+      await updateData<DashboardData>("dashboard.json", (data) => {
+        const projectIndex = data.projects.findIndex((p) => p.id === id);
+        if (projectIndex === -1) {
+          throw new Error("__PROJECT_NOT_FOUND__");
+        }
+        data.projects.splice(projectIndex, 1);
+        return data;
+      });
+    } catch (e) {
+      if (e instanceof Error && e.message === "__PROJECT_NOT_FOUND__") {
+        res.status(404).json({ success: false, error: "Project not found" });
+        return;
+      }
+      throw e;
     }
-
-    data.projects.splice(projectIndex, 1);
-    await writeData("dashboard.json", data);
 
     // Cancel any in-flight LLM calls for sessions of this project BEFORE
     // orphaning them. Without this, a running LLM call would continue to

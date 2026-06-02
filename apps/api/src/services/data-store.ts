@@ -107,6 +107,27 @@ export async function updateData<T>(
  * that need that behavior (ticket boards, asset inventories) must reach
  * for this helper rather than try { readData } catch { writeData }, which
  * has a TOCTOU window where two callers both write the default.
+ *
+ * @typeParam T - A JSON-serializable object (no Date, no Map, no
+ *   functions). The type is informational; this helper does not validate
+ *   the on-disk shape. Callers that load a saved value should validate
+ *   it with a Zod schema or hand-rolled guard.
+ *
+ * @param filename - The data file under DATA_DIR. Must include the
+ *   extension; this helper does not append one.
+ * @param defaultValue - **A factory**, not a value. The factory is only
+ *   invoked on the create path. Always pass `() => ({ ... })` rather
+ *   than a pre-built object so a default with internal arrays/maps is
+ *   not shared by reference across calls — two concurrent calls would
+ *   otherwise see each other's mutations.
+ * @returns The freshly-read value, or the just-written default if the
+ *   file did not exist.
+ *
+ * @throws Propagates non-ENOENT errors from `readData` (corrupted JSON,
+ *   EACCES, EISDIR) so the caller can decide whether to recover.
+ *   Callers wanting "always return something" semantics should
+ *   `.catch(() => defaultValue())` at the call site — but be aware
+ *   that swallows corrupt-file signals.
  */
 export async function getOrCreateData<T>(
   filename: string,

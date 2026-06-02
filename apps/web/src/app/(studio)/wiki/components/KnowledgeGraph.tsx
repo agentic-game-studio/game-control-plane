@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, useRef, useCallback } from "react";
+import { useEffect, useMemo, useState, useRef, useCallback } from "react";
 import type { GraphData, CategoryMeta, GraphNode } from "@game-studio/types";
 
 interface KnowledgeGraphProps {
@@ -10,12 +10,47 @@ interface KnowledgeGraphProps {
   categories: CategoryMeta[];
 }
 
+/**
+ * Run `fn` synchronously in chunks, yielding to the browser between
+ * chunks so the main thread stays responsive. `chunkSize` is the number
+ * of "iterations" to run before yielding — bigger is faster but more
+ * likely to jank.
+ *
+ * Used by KnowledgeGraph's force-directed simulation: the old version
+ * ran all 200 iterations in a single useMemo, which froze the page for
+ * any graph with 50+ nodes.
+ */
+function runChunked(iterations: number, chunkSize: number, fn: (i: number) => void): Promise<void> {
+  return new Promise((resolve) => {
+    let i = 0;
+    const step = () => {
+      const end = Math.min(i + chunkSize, iterations);
+      for (; i < end; i++) fn(i);
+      if (i < iterations) {
+        // Yield: rIC when available, else setTimeout(0). rIC defers
+        // until the browser is idle, so a busy page doesn't jank.
+        if (typeof (globalThis as { requestIdleCallback?: (cb: () => void) => void }).requestIdleCallback === "function") {
+          (globalThis as { requestIdleCallback: (cb: () => void) => void }).requestIdleCallback(step);
+        } else {
+          setTimeout(step, 0);
+        }
+      } else {
+        resolve();
+      }
+    };
+    step();
+  });
+}
+
 export default function KnowledgeGraph({ graphData, selectedId, onSelect, categories }: KnowledgeGraphProps) {
   const [hoveredNode, setHoveredNode] = useState<string | null>(null);
   const [localNodes, setLocalNodes] = useState<GraphNode[]>([]);
   const [initialized, setInitialized] = useState(false);
   const dragRef = useRef<{ nodeId: string; offsetX: number; offsetY: number } | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
+  // Track the graphData reference that produced the current layout so
+  // we can detect "graph data swapped to a new shape" and re-layout.
+  const layoutForRef = useRef<GraphData | null>(null);
 
   const colorMap = useMemo(() => {
     const map: Record<string, string> = {};
@@ -36,16 +71,35 @@ export default function KnowledgeGraph({ graphData, selectedId, onSelect, catego
     return categories.filter((c) => seen.has(c.id));
   }, [graphData, categories]);
 
-  // Initialize local nodes from graphData with more spacing
-  useMemo(() => {
-    if (!graphData || graphData.nodes.length === 0 || initialized) return;
+  // 10-C1: layout in a useEffect, not a useMemo. The old code called
+  // setLocalNodes from inside a useMemo body, which is a side effect
+  // during the render phase and also runs the O(n²) simulation
+  // synchronously on every re-render. Doing the layout in an effect
+  // means it only runs when graphData / initialized actually change,
+  // and the chunked yield keeps the main thread responsive on large
+  // graphs.
+  useEffect(() => {
+    if (!graphData || graphData.nodes.length === 0) {
+      if (initialized) setInitialized(false);
+      return;
+    }
+
+    // Detect "graph shape changed" — same logic the old useMemo had —
+    // and re-layout. Otherwise keep the current positions so a refetch
+    // that returns the same graph doesn't jank the user's drag.
+    if (initialized) {
+      const ids = new Set(graphData.nodes.map((n) => n.id));
+      const localIds = new Set(localNodes.map((n) => n.id));
+      const sameShape = ids.size === localIds.size && [...ids].every((id) => localIds.has(id));
+      if (sameShape) return;
+    }
 
     const count = graphData.nodes.length;
     const cx = 150;
     const cy = 150;
-    const radius = Math.min(cx, cy) - 50; // more margin
+    const radius = Math.min(cx, cy) - 50;
 
-    const spaced = graphData.nodes.map((node, i) => {
+    const spaced: GraphNode[] = graphData.nodes.map((node, i) => {
       const angle = (2 * Math.PI * i) / count - Math.PI / 2;
       return {
         ...node,
@@ -54,9 +108,12 @@ export default function KnowledgeGraph({ graphData, selectedId, onSelect, catego
       };
     });
 
-    // Force-directed: more iterations + stronger repulsion for spacing
     const iterations = 200;
-    for (let iter = 0; iter < iterations; iter++) {
+    const chunkSize = 5; // 40 yields across 200 iterations — small enough to stay smooth
+    let cancelled = false;
+
+    runChunked(iterations, chunkSize, (iter) => {
+      if (cancelled) return;
       const temp = 15 * (1 - iter / iterations);
 
       for (let i = 0; i < spaced.length; i++) {
@@ -64,7 +121,7 @@ export default function KnowledgeGraph({ graphData, selectedId, onSelect, catego
           const dx = spaced[i].x - spaced[j].x;
           const dy = spaced[i].y - spaced[j].y;
           const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-          const force = 2000 / (dist * dist); // stronger repulsion
+          const force = 2000 / (dist * dist);
           const fx = (dx / dist) * force * temp;
           const fy = (dy / dist) * force * temp;
           spaced[i].x += fx;
@@ -94,22 +151,17 @@ export default function KnowledgeGraph({ graphData, selectedId, onSelect, catego
         node.x = Math.max(25, Math.min(275, node.x));
         node.y = Math.max(25, Math.min(275, node.y));
       }
-    }
+    }).then(() => {
+      if (cancelled) return;
+      setLocalNodes([...spaced]);
+      setInitialized(true);
+      layoutForRef.current = graphData;
+    });
 
-    setLocalNodes(spaced);
-    setInitialized(true);
-  }, [graphData, initialized]);
-
-  // Reset when graphData changes
-  useMemo(() => {
-    if (graphData && initialized) {
-      const ids = new Set(graphData.nodes.map((n) => n.id));
-      const localIds = new Set(localNodes.map((n) => n.id));
-      if (ids.size !== localIds.size || [...ids].some((id) => !localIds.has(id))) {
-        setInitialized(false);
-      }
-    }
-  }, [graphData, localNodes, initialized]);
+    return () => {
+      cancelled = true;
+    };
+  }, [graphData, initialized, localNodes]);
 
   // SVG coordinate from mouse event
   const getSVGCoords = useCallback((e: React.MouseEvent): { x: number; y: number } | null => {
