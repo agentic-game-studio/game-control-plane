@@ -3,6 +3,9 @@
  * Ensures all skills have required fields and that subSkills references
  * resolve to a real, registered skill (no dangling pointers, no cycles).
  */
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { skills, allSkillNames } from "../src/index.js";
 
 const issues: string[] = [];
@@ -60,6 +63,35 @@ for (const name of allSkillNames) {
         }
       }
     }
+  }
+}
+
+// 12-H20: catch orphan skill files. Same rationale as the agent
+// check — without scanning the filesystem we can't tell whether a
+// new skill file was added but not imported in src/index.ts.
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const srcDir = path.join(__dirname, "..", "src");
+const indexPath = path.join(srcDir, "index.ts");
+let indexContents: string;
+try {
+  indexContents = fs.readFileSync(indexPath, "utf-8");
+} catch (err) {
+  console.error("Failed to read src/index.ts:", err);
+  process.exit(1);
+}
+
+const skillFiles = fs
+  .readdirSync(srcDir)
+  .filter((f) => f.endsWith(".ts") && f !== "index.ts");
+
+for (const file of skillFiles) {
+  const base = path.basename(file, ".ts");
+  if (!indexContents.includes(`./${base}.js`) && !indexContents.includes(`./${base}`)) {
+    issues.push(
+      `Orphan skill file: src/${file} is not imported by index.ts. ` +
+      `Add \`import { ... } from "./${base}.js";\` and spread it into \`skills\`.`,
+    );
   }
 }
 

@@ -190,6 +190,7 @@ ${godotInstructions}`;
   return base;
 }
 import { getWorkflow, createQuestTicket, moveQuestTicket } from "./quest-bridge.js";
+import { readTicketsBoard } from "./ticket-board.js";
 import { ingestProducerSummaryFromSession } from "./producer-summary.js";
 
 /** Helper to broadcast log entries with timestamp */
@@ -491,6 +492,18 @@ async function executeTool(
         const content = input.content as string;
         if (!rawPath || content === undefined) return "Error: file_path and content are required";
         const filePath = safePath(rawPath, workspaceDir);
+        // 12-H19: mark this as a self-write before fs.writeFile so
+        // the document-store watcher's debounced callback can skip
+        // re-broadcasting a change we just made. Without this, every
+        // agent Write tool lands a markdown file, the watcher fires,
+        // every connected client refetches the doc, and the wiki UI
+        // re-renders for no visible delta.
+        if (filePath.endsWith(".md")) {
+          try {
+            const { markDocumentSelfWrite } = await import("./document-store.js");
+            markDocumentSelfWrite(filePath);
+          } catch { /* document store not initialized — best effort */ }
+        }
         await fs.mkdir(path.dirname(filePath), { recursive: true });
         await fs.writeFile(filePath, content, "utf-8");
         logEntry(sessionId, "info", `[${agentRole}] Wrote: ${filePath}`, agentRole);
@@ -671,6 +684,33 @@ async function executeTool(
 
         // R4: Limit subagent recursion depth
         if (_depth >= 3) return "Error: Maximum subagent recursion depth (3) exceeded. Simplify the task hierarchy.";
+
+        // 12-H14: per-project concurrent subagent cap. Without this,
+        // a runaway producer (or a prompt-injection that asks for
+        // 100 parallel Tasks) could fan out dozens of LLM calls at
+        // once, hitting the ZAI API rate limit and getting 429s that
+        // cascade into retried calls that compound the overload. The
+        // ticket board is the source of truth for "in-flight" — every
+        // subagent creates a ticket in `in_progress` (line below) and
+        // moves it to verify/completed when done. Count those, and
+        // reject the spawn with a clear error if over the cap.
+        const MAX_CONCURRENT_SUBAGENTS_PER_PROJECT = 8;
+        const projectIdForCap = projectContext?.projectId;
+        if (projectIdForCap) {
+          try {
+            const board = await readTicketsBoard(projectIdForCap);
+            const inProgressCount = board.columns
+              .filter((c) => c.id === "in_progress")
+              .reduce((sum, c) => sum + c.tickets.length, 0);
+            if (inProgressCount >= MAX_CONCURRENT_SUBAGENTS_PER_PROJECT) {
+              return `Error: Project has ${inProgressCount} subagents in flight (max ${MAX_CONCURRENT_SUBAGENTS_PER_PROJECT}). Wait for existing tasks to complete before spawning more.`;
+            }
+          } catch {
+            // If the board read fails, fall through and let the
+            // spawn proceed — better to risk a few extra subagents
+            // than to refuse all work on a transient disk error.
+          }
+        }
 
         logEntry(sessionId, "info", `[${agentRole}] Spawning subagent: ${agent}`, agentRole);
 

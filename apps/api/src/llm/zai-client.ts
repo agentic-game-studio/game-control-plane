@@ -886,7 +886,29 @@ export async function callLLMWithTools(
     const toolResults: string[] = [];
     for (const tc of response.tool_calls) {
       onProgress?.({ iteration, totalTools, currentTool: tc.name, phase: "executing" });
-      const result = await toolExecutor(tc.name, tc.input);
+      let result: string;
+      try {
+        result = await toolExecutor(tc.name, tc.input);
+      } catch (toolErr) {
+        // 12-H15: a single tool throwing should not kill the entire
+        // iteration. The previous behavior was to let the exception
+        // propagate up to callLLMWithTools's caller (continueConversation
+        // / spawn handler), which surfaced as a generic "agent failed"
+        // toast and abandoned any subsequent tool calls in the same
+        // iteration. The LLM often includes several tools in one
+        // response (e.g., Read + Write + Bash for "look at the file,
+        // edit it, run the test"). If the Read throws on a missing
+        // file, the Write and Bash never run, and the LLM is left
+        // with no feedback to retry from. Convert the throw to a
+        // tool result so the LLM sees the error and the rest of the
+        // iteration continues.
+        const errMsg = toolErr instanceof Error ? toolErr.message : String(toolErr);
+        logger.warn(
+          { tool: tc.name, err: errMsg, event: "tool_execution_threw" },
+          `Tool ${tc.name} threw — converting to error result so the LLM can recover`,
+        );
+        result = `[Tool execution failed: ${tc.name}] ${errMsg}`;
+      }
       // Track file operations for long-running task context. Coerce the
       // tool input to a string defensively rather than `as string` — a
       // bad payload with `file_path: 42` would otherwise surface as the

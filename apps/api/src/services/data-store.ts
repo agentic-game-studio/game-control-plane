@@ -20,7 +20,21 @@ export async function readData<T>(filename: string): Promise<T> {
   const filePath = path.join(DATA_DIR, filename);
   let content: string;
   try {
-    content = await fs.readFile(filePath, "utf-8");
+    // 12-H16: read with a small retry on partial reads. fs.readFile
+    // is supposed to be atomic, but a `writeData` happening on the
+    // same file via tmp+rename can race on platforms with a slow
+    // page cache flush. The window is tiny (microseconds) but
+    // reproducible under concurrent load — a reader can see the
+    // main file mid-rename and get an empty string. Retry up to
+    // twice with a 5ms delay to absorb the race without making
+    // the read path noticeably slower.
+    let attempts = 0;
+    while (true) {
+      content = await fs.readFile(filePath, "utf-8");
+      if (content.length > 0 || attempts >= 2) break;
+      attempts++;
+      await new Promise((r) => setTimeout(r, 5));
+    }
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") {
       throw new Error(`Data file not found: ${filename} (expected at ${filePath})`);
@@ -44,6 +58,24 @@ export async function writeData<T>(filename: string, data: T): Promise<void> {
   } catch (writeErr) {
     // Clean up tmp file on failure to avoid stale .tmp files
     await fs.unlink(tmpPath).catch(() => {});
+    // 12-H5: surface EROFS specifically with a clearer error. A
+    // read-only filesystem (mounted data volume in CI, container
+    // with the data dir bind-mounted read-only, accidental chmod)
+    // produces an EROFS error from rename(). The default message
+    // is "EROFS: read-only filesystem, rename '...tmp' -> '...'"
+    // which is informative, but the caller has no way to
+    // distinguish "disk full" from "permission denied" from
+    // "read-only mount". Wrap with a tagged error so route
+    // handlers can decide whether to retry (transient) or surface
+    // 503 (read-only is a config problem, not a request problem).
+    if (writeErr instanceof Error && /EROFS/.test(writeErr.message)) {
+      const err = new Error(
+        `Cannot write ${filename}: data directory is on a read-only filesystem. ` +
+        `Check that ${DATA_DIR} is mounted with read-write permissions.`,
+      );
+      (err as Error & { code: string }).code = "DATA_DIR_READONLY";
+      throw err;
+    }
     throw writeErr;
   }
 }

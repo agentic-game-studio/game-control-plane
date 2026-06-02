@@ -86,6 +86,35 @@ function slugify(text: string): string {
   return text.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
 }
 
+// 12-H19: module-level registry of files THIS process is about to
+// write. Document stores are instantiated per-workspace in routes/
+// documents.ts (global store + per-project store), so a single
+// instance variable would only cover one of them. The LLM Write
+// tool lives in a different module that doesn't (and shouldn't)
+// know which store is currently active. A module-level map is the
+// simplest cross-instance handoff: any store's watcher consults
+// the same registry, and any writer (LLM tool, route handler)
+// registers the path it intends to write.
+const recentSelfWrites = new Map<string, number>();
+const SELF_WRITE_TTL_MS = 3_000;
+
+/**
+ * 12-H19: register that the current process is about to write
+ * `filePath`. Any active DocumentStore's watcher will ignore events
+ * for this path for the next SELF_WRITE_TTL_MS (covering the
+ * write+rename+close cycle plus a small grace window for fs.watch
+ * delivery latency). Path is normalised to its basename so the
+ * registry survives different working-directory invocations.
+ */
+export function markDocumentSelfWrite(filePath: string): void {
+  recentSelfWrites.set(path.basename(filePath), Date.now());
+}
+
+/** 12-H19: test/cleanup hook for the self-write registry. */
+export function _clearDocumentSelfWrites(): void {
+  recentSelfWrites.clear();
+}
+
 export class DocumentStore {
   private workspaceDir: string;
   private cache: Map<string, DocumentEntry> | null = null;
@@ -344,6 +373,20 @@ export class DocumentStore {
     try {
       this.watcher = fsp.watch(this.workspaceDir, { recursive: true }, (eventType, filename) => {
         if (!filename || !filename.endsWith(".md")) return;
+
+        // 12-H19: skip self-writes. fs.watch on the workspace fires
+        // for the very file we just wrote via markDocumentSelfWrite()
+        // — re-broadcasting that change costs every connected client
+        // a wasted /api/documents refetch and triggers a re-render
+        // storm in the wiki UI. Drop the event if the basename was
+        // registered within the last SELF_WRITE_TTL_MS.
+        const selfWriteAt = recentSelfWrites.get(path.basename(filename));
+        if (selfWriteAt !== undefined) {
+          if (Date.now() - selfWriteAt < SELF_WRITE_TTL_MS) {
+            return;
+          }
+          recentSelfWrites.delete(path.basename(filename));
+        }
 
         // Check if file is in a tracked directory (direct or docs/ prefixed)
         const isTracked = Object.keys(CATEGORY_DIRS).some(

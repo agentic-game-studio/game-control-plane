@@ -1060,9 +1060,21 @@ If the failure is an infinite loop or hang (timeout), suggest a workaround.`,
       ticketId: activeTicket.id,
       agentRole: activeTicket.agentRole ?? "godot-specialist",
       iteration: state.currentIteration,
-      error: combinedError,
+      // 12-H3: truncate the broadcast error. The full error stays in
+      // `iteration.error` (persisted in LoopState), but the WS event
+      // sent to every connected client is bounded. Without this, a
+      // misconfigured project that times out 200 iterations in a row
+      // floods every connected UI with the same multi-KB error string
+      // each tick — visible as 200 toast popups and a chat-thread
+      // scroll-storm. Truncation to 500 chars keeps the message
+      // diagnosable from the UI while cutting payload size by ~10x
+      // for typical boot-failure + agent-hang chains.
+      error: combinedError.slice(0, 500),
       bootOk,
-      bootErrors,
+      // Boot errors are already capped to 5 in the source string, but
+      // each one can itself be a multi-line stack trace. Slice each
+      // entry so the broadcast doesn't carry the full crash dump.
+      bootErrors: bootErrors.slice(0, 5).map((e) => e.slice(0, 200)),
     } as WSEvent);
 
     void ingestProducerSummaryFact(state.projectId, {

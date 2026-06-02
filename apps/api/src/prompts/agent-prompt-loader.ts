@@ -54,6 +54,21 @@ function parseFrontmatter(content: string): { frontmatter: Record<string, string
 }
 
 let agentPrompts: Map<string, AgentPrompt> | null = null;
+// 12-H23: cap the per-file size for agent prompt markdown. The
+// `.claude/agents/` directory is a workspace path that can be
+// modified by anyone with write access to the workspace, including
+// a compromised sub-agent that an LLM tool wrote a 500MB log to
+// under that path thinking it was a scratch directory. Without a
+// cap, fs.readFile allocates the whole file into memory and the
+// concatenated `systemPrompt` then gets injected into every LLM
+// call — a single 500MB file would OOM the API process AND, if
+// it survived, burn the entire context window on first use.
+//
+// 256 KiB is generous: even the longest existing agent prompt
+// (the autonomous-producer) is ~12 KiB. The cap is per-file, so
+// a workspace with 50 prompts could still load 12.5 MiB total
+// — well under any reasonable memory budget.
+const MAX_AGENT_PROMPT_BYTES = 256 * 1024;
 
 export async function loadAgentPrompts(): Promise<Map<string, AgentPrompt>> {
   if (agentPrompts) return agentPrompts;
@@ -68,6 +83,31 @@ export async function loadAgentPrompts(): Promise<Map<string, AgentPrompt>> {
     if (!file.endsWith(".md")) continue;
 
     const filePath = path.join(agentsDir, file);
+    // 12-H23: pre-flight stat the file. fs.readFile would still
+    // work for a multi-GB file, but a stat-based cap is O(1) and
+    // skips the malloc+read for any oversized file. Skip-and-warn
+    // rather than throw: one oversized file shouldn't disable the
+    // whole agent registry.
+    let stat;
+    try {
+      stat = await fs.stat(filePath);
+    } catch (err) {
+      // Race with deletion, permission flip, etc. — skip this
+      // entry but keep loading the rest.
+      continue;
+    }
+    if (stat.size > MAX_AGENT_PROMPT_BYTES) {
+      // Surface the size in the log so an operator can see WHICH
+      // file is over budget, not just that "an agent failed to
+      // load". The file is left on disk untouched — a user can
+      // fix the file (trim it) and the next API restart will
+      // pick it up.
+      console.warn(
+        `[agent-prompt-loader] Skipping ${file}: size ${stat.size} bytes exceeds cap of ${MAX_AGENT_PROMPT_BYTES}. ` +
+        `Trim the file or raise MAX_AGENT_PROMPT_BYTES if the prompt is intentionally large.`,
+      );
+      continue;
+    }
     const content = await fs.readFile(filePath, "utf-8");
     const { frontmatter, body } = parseFrontmatter(content);
 

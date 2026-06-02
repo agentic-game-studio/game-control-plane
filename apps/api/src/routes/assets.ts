@@ -566,6 +566,16 @@ assetsRouter.get("/:id/thumbnail", async (req: Request, res: Response) => {
     // and the error-handler middleware can't recover because headers are
     // already sent.
     stream.on("error", (err) => {
+      // 12-H11: log the error before deciding how to respond. The
+      // previous implementation dropped the error on the floor after
+      // ending the response, which made mid-stream failures invisible
+      // in production. Without the log, a flaky disk that drops 1% of
+      // thumbnail requests would show up as "images not loading" with
+      // no server-side trace.
+      logger.warn(
+        { assetId: id, thumbPath: thumbAbsPath, err: err instanceof Error ? err.message : String(err), event: "asset_thumbnail_stream_error" },
+        "Thumbnail stream errored mid-read",
+      );
       if (!res.headersSent) {
         res.status(500).send("Error");
         return;
@@ -573,6 +583,22 @@ assetsRouter.get("/:id/thumbnail", async (req: Request, res: Response) => {
       // Headers already sent — best we can do is end the response so the
       // client doesn't see a half-loaded image and the socket is freed.
       try { res.end(); } catch { /* socket already gone */ }
+    });
+    // 12-H11: also handle client abort (browser cancel, network drop).
+    // Without an 'aborted' listener, Node logs "Request aborted" but
+    // the stream keeps running and the file descriptor stays open
+    // until the stream naturally ends. On a slow disk with many
+    // cancellations, this leaks FDs. Wire up abort detection.
+    req.on("aborted", () => {
+      stream.destroy();
+    });
+    res.on("close", () => {
+      // 12-H11: client disconnected before stream completed. Destroy
+      // the stream so the underlying FD is released immediately
+      // rather than at the next read.
+      if (!res.writableEnded) {
+        stream.destroy();
+      }
     });
     stream.pipe(res);
   } catch {

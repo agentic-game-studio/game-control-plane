@@ -12,6 +12,13 @@ export interface DiffBlock {
   hunks: { lines: string[]; type: "add" | "remove" | "context"; lineNum?: number }[];
 }
 
+// 12-H9: TTL for the API-message dedup window. Must be module-scope
+// (not declared inside the hook) because a hoisted function in the
+// same file (the dedup check) references it at module-evaluation
+// time — declaring it inside the hook puts it in the temporal dead
+// zone for any function that runs before the hook's body executes.
+const RECENT_API_TTL_MS = 2 * 60 * 1000; // 2 minutes
+
 export interface ToolCall {
   name: string;
   args: Record<string, unknown>;
@@ -370,7 +377,7 @@ function mergeCachedMessagesIntoBackendSession(
   return dedupeSemanticDuplicateMessages(sorted, backendIds);
 }
 
-function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, producerSessionId: string, recentApiMessages?: Set<string>): WSHandlerResult {
+function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, producerSessionId: string, recentApiMessages?: Map<string, number>): WSHandlerResult {
   const messages: WSHandlerResult["messages"] = [];
   switch (event.type) {
     case "agent:spawned": {
@@ -493,6 +500,20 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, prod
       if (recentApiMessages?.has(msgSig)) {
         recentApiMessages.delete(msgSig);
         return { sessions: null, messages };
+      }
+      // 12-H9: lazily drop TTL-expired signatures from the dedup
+      // map. Doing this on the read path (rather than on a timer)
+      // means we never have stale entries; the cost is a single
+      // Map iteration per WS event, which is bounded by the
+      // entries added in the last RECENT_API_TTL_MS (a few hundred
+      // at most for an active session).
+      if (recentApiMessages) {
+        const now = Date.now();
+        for (const [sig, at] of recentApiMessages) {
+          if (now - at > RECENT_API_TTL_MS) {
+            recentApiMessages.delete(sig);
+          }
+        }
       }
       // Deduplicate: skip if last message in session already matches (catches WS-before-API race)
       const lastMsg = session.messages[session.messages.length - 1];
@@ -848,7 +869,16 @@ export function useCommandRoom() {
   // the session.
   const pendingMessagesBySessionRef = useRef<Map<string, Array<Omit<ChatMessage, "id" | "timestamp">>>>(new Map());
   const MAX_PENDING_MESSAGES = 50;
-  const recentApiMessagesRef = useRef<Set<string>>(new Set());
+  // 12-H9: signature-based dedup with a TTL. The previous version
+  // capped at 100 signatures and trimmed to 50 when full, which is
+  // fine for short sessions but loses dedup state for long ones
+  // (a 200-message session evicts its early signatures, and an
+  // out-of-order WS event for an early message then gets
+  // re-applied as a duplicate). Track each signature's last-seen
+  // timestamp and drop entries older than 2 minutes — well past
+  // the WS round-trip + reconnection window, but bounded so the
+  // map doesn't grow forever on a session that runs for hours.
+  const recentApiMessagesRef = useRef<Map<string, number>>(new Map());
   // Ref for latest sessions to flush cache on unmount / navigation
   const latestSessionsRef = useRef<Map<string, AgentSession>>(new Map());
   const latestSubagentsRef = useRef<Map<string, SubagentInfo>>(new Map());
@@ -866,6 +896,16 @@ export function useCommandRoom() {
   // request kept running until completion. Wire signal through
   // apiFetch and call abort() on /stop.
   const chatAbortControllerRef = useRef<AbortController | null>(null);
+  // 12-H4: guard against rapid tab-switch thrash. Without this,
+  // double-clicking two tabs within ~50ms (mouse jitter, trackpad
+  // gesture) fires two setCurrentSession calls and triggers two
+  // re-renders. Effects keyed on `currentSession` then re-run for the
+  // intermediate value (the first tab), so the user briefly sees
+  // tab-A's messages while the URL/state points to tab-B. The state
+  // eventually settles to B, but the visual flicker on slow renders
+  // (loading a large session, scrolling) is confusing. Coalesce rapid
+  // changes with a microtask + last-write-wins check.
+  const lastSelectAtRef = useRef<{ id: string; at: number }>({ id: "", at: 0 });
   // F2: Ref for currentSession to avoid stale closures in async callbacks
   const currentSessionRef = useRef(currentSession);
   currentSessionRef.current = currentSession;
@@ -2385,13 +2425,14 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
           const msgType = result.assistantMessage.type as ChatMessage["type"];
           const msgSender = result.assistantMessage.sender;
           const msgContent = result.assistantMessage.content;
-          // Track signature for WebSocket deduplication
-          recentApiMessagesRef.current.add(`${msgType}:${msgSender}:${msgContent.trim()}`);
-          // F3: Cap at 100 entries, trim to 50 when exceeded
-          if (recentApiMessagesRef.current.size > 100) {
-            const entries = [...recentApiMessagesRef.current];
-            recentApiMessagesRef.current = new Set(entries.slice(-50));
-          }
+          // 12-H9: track signature with timestamp. The dedup map is
+          // a Map<sig, lastSeenAt>; WS handler drops signatures older
+          // than RECENT_API_TTL_MS on the read path, so the map
+          // self-bounds without an explicit cap.
+          recentApiMessagesRef.current.set(
+            `${msgType}:${msgSender}:${msgContent.trim()}`,
+            Date.now(),
+          );
           addSessionMessage(session, {
             type: msgType,
             sender: msgSender,
@@ -2667,7 +2708,25 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
     totalProgress,
     executeCommand,
     requestProducerAction,
-    selectSession: setCurrentSession,
+    // 12-H4: wrap the raw setter with a coalescing guard. See
+    // lastSelectAtRef above for the rationale. We don't *block* the
+    // call — the latest click still wins — but we suppress the
+    // intermediate setCurrentSession when two clicks land within
+    // 50ms. React's automatic batching would already coalesce
+    // synchronous calls, but click events that straddle an
+    // async boundary (e.g., a fetch resolving between the two clicks)
+    // can produce two distinct render cycles.
+    selectSession: (id: string) => {
+      const now = Date.now();
+      const last = lastSelectAtRef.current;
+      if (last.id === id && now - last.at < 50) {
+        // Same tab clicked twice in <50ms — likely a double-click
+        // misfire. Ignore the second call entirely.
+        return;
+      }
+      lastSelectAtRef.current = { id, at: now };
+      setCurrentSession(id);
+    },
     approveAgent,
     closeSession,
     closeConsultation,

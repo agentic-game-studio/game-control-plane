@@ -296,6 +296,41 @@ export { chatStoreReady };
 
 /** Per-session lock to prevent concurrent agent responses for the same session */
 const sessionsResponding = new Set<string>();
+// 12-H21: per-session token-usage mutex. The
+// `updateSessionTokenUsage` callback mutates `session.contextUsage`
+// and `session.cumulativeInput/OutputTokens` and broadcasts a
+// `chat:context` event. Without serialization, two concurrent
+// onTokenUsage callbacks (e.g., a producer session and a sub-agent
+// the producer spawned) can read-modify-write the same session
+// object — the read of `cumulativeInputTokens` happens before the
+// other callback's +=, and the broadcast carries a stale value
+// that the UI then renders as a "context dropped" jump. Chain
+// promises per sessionId to serialize.
+const tokenUsageLocks = new Map<string, Promise<void>>();
+function withTokenUsageLock<T>(sessionId: string, fn: () => T | Promise<T>): Promise<T> {
+  const prev = tokenUsageLocks.get(sessionId) ?? Promise.resolve();
+  const next = prev.then(fn, fn);
+  // Swallow rejections in the chain so one failed update doesn't
+  // poison the next call's `prev`. The caller still sees the
+  // rejection because `next` re-uses the same fn return.
+  tokenUsageLocks.set(
+    sessionId,
+    next.then(
+      () => undefined,
+      () => undefined,
+    ),
+  );
+  // Bounded cleanup: if the map grows beyond a generous cap
+  // (matching SESSIONS_RESPONDING_CAP), drop the oldest entries.
+  // In practice this map mirrors the active-session count, so the
+  // cap should never bite — but a leak path that forgets to
+  // release would otherwise grow the map indefinitely.
+  if (tokenUsageLocks.size > SESSIONS_RESPONDING_CAP) {
+    const firstKey = tokenUsageLocks.keys().next().value;
+    if (firstKey !== undefined) tokenUsageLocks.delete(firstKey);
+  }
+  return next;
+}
 /** Tracks /spawn calls in progress for a given sessionId. The duplicate
  * check at the start of /spawn reads `chatStore.sessions[sessionId]` and
  * is not atomic with the assignment of the new session object — two
@@ -430,41 +465,49 @@ export async function appendMessage(sessionId: string, msg: ChatMessage): Promis
   } as WSEvent);
 }
 
-/** Update token usage on a session and broadcast to frontend */
+/** Update token usage on a session and broadcast to frontend.
+ * 12-H21: serialised through `withTokenUsageLock` so two concurrent
+ * onTokenUsage callbacks on the same session can't interleave their
+ * read-modify-write of `cumulativeInputTokens` / `contextUsage`.
+ * The previous fire-and-forget version assumed the callback was
+ * reentrant-safe, which it isn't when a producer session and a
+ * sub-agent both stream token usage into the same session object. */
 function updateSessionTokenUsage(
   session: ExtendedChatSession,
   usage: { input_tokens: number; output_tokens: number },
   model: string,
-): void {
-  session.cumulativeInputTokens += usage.input_tokens;
-  session.cumulativeOutputTokens += usage.output_tokens;
+): Promise<void> {
+  return withTokenUsageLock(session.id, () => {
+    session.cumulativeInputTokens += usage.input_tokens;
+    session.cumulativeOutputTokens += usage.output_tokens;
 
-  const contextUsage: ContextUsage = {
-    lastInputTokens: usage.input_tokens,
-    lastOutputTokens: usage.output_tokens,
-    cumulativeInputTokens: session.cumulativeInputTokens,
-    cumulativeOutputTokens: session.cumulativeOutputTokens,
-    contextWindowTokens: getModelContextWindow(model),
-    lastUpdated: new Date().toISOString(),
-  };
-  session.contextUsage = contextUsage;
+    const contextUsage: ContextUsage = {
+      lastInputTokens: usage.input_tokens,
+      lastOutputTokens: usage.output_tokens,
+      cumulativeInputTokens: session.cumulativeInputTokens,
+      cumulativeOutputTokens: session.cumulativeOutputTokens,
+      contextWindowTokens: getModelContextWindow(model),
+      lastUpdated: new Date().toISOString(),
+    };
+    session.contextUsage = contextUsage;
 
-  broadcast({
-    type: "chat:context",
-    sessionId: session.id,
-    contextUsage,
-  } as WSEvent);
-
-  // Context pressure detection — use current turn's input tokens (actual context window usage),
-  // not cumulative (which never resets after compaction)
-  const fillPercent = Math.round((usage.input_tokens / contextUsage.contextWindowTokens) * 100);
-  if (fillPercent >= 80) {
     broadcast({
-      type: "chat:context-pressure",
+      type: "chat:context",
       sessionId: session.id,
-      fillPercent,
+      contextUsage,
     } as WSEvent);
-  }
+
+    // Context pressure detection — use current turn's input tokens (actual context window usage),
+    // not cumulative (which never resets after compaction)
+    const fillPercent = Math.round((usage.input_tokens / contextUsage.contextWindowTokens) * 100);
+    if (fillPercent >= 80) {
+      broadcast({
+        type: "chat:context-pressure",
+        sessionId: session.id,
+        fillPercent,
+      } as WSEvent);
+    }
+  });
 }
 
 /**
@@ -1404,8 +1447,17 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
     // Set up progress callback for tool execution updates
     const onProgress = makeProgressCallback(id, progressMsgId);
 
-    // Heartbeat: broadcast periodic progress updates during long API waits
+    // 12-H2: track the wall-clock start so the FINAL chat:progress
+    // event (sent after the LLM resolves) reports the true elapsed,
+    // not the last 2-second tick boundary. Without this, an LLM that
+    // completes 1.5s after the last tick reports a 0-2s drift in the
+    // final event content, which the frontend renders as a jump from
+    // "(44s)" to "complete" with no acknowledgement of the actual
+    // 45.5s of work. Capturing startTime here makes the success
+    // path's final event accurate.
+    const heartbeatStart = Date.now();
     let heartbeatCount = 0;
+    // Heartbeat: broadcast periodic progress updates during long API waits
     heartbeat = setInterval(() => {
       heartbeatCount++;
       const elapsed = heartbeatCount * 2;
@@ -1474,7 +1526,13 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
     // Track token usage from API responses
     const model = getModelForTier(agentRole);
     const onTokenUsage = (usage: { input_tokens: number; output_tokens: number }) => {
-      updateSessionTokenUsage(session as ExtendedChatSession, usage, model);
+      // 12-H21: updateSessionTokenUsage now returns a Promise<void>
+      // (lock serialisation). Swallow rejection here — token usage
+      // updates are best-effort; a lock failure should not crash
+      // the LLM streaming loop or surface a misleading error to
+      // the user (the call is still in flight and the response is
+      // being constructed independently).
+      updateSessionTokenUsage(session as ExtendedChatSession, usage, model).catch(() => {});
     };
 
     const result = await continueConversation(
@@ -1493,13 +1551,19 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
     // Stop heartbeat
     clearInterval(heartbeat);
 
-    // Broadcast final progress before removing (so frontend can clean up)
+    // 12-H2: report the real elapsed in the final progress event.
+    // The tick-based `heartbeatCount * 2` is only accurate at tick
+    // boundaries; the LLM can complete mid-tick. Use the wall-clock
+    // delta from heartbeatStart so the final message reflects the
+    // true wait time (rounded to seconds, the precision the UI
+    // already shows).
+    const finalElapsed = Math.round((Date.now() - heartbeatStart) / 1000);
     broadcast({
       type: "chat:progress",
       sessionId: id,
       progressMsgId,
       progress: 100,
-      content: `${agentRole} complete`,
+      content: `${agentRole} complete (${finalElapsed}s)`,
     } as WSEvent);
 
     // Remove the progress placeholder before adding the real response
@@ -1848,7 +1912,12 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
           }
         },
         (usage) => {
-          updateSessionTokenUsage(newSession as ExtendedChatSession, usage, spawnModel);
+          // 12-H21: see producer-session call site — the lock returns
+          // a Promise. Swallow rejection since the spawn is already
+          // past its `await continueConversation(...)` and the LLM
+          // result is the caller-visible success criterion, not the
+          // usage accounting.
+          updateSessionTokenUsage(newSession as ExtendedChatSession, usage, spawnModel).catch(() => {});
         },
       );
 

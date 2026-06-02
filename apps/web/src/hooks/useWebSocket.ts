@@ -86,7 +86,7 @@ function connect(): void {
       }
     };
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
       // 11-H9: guard every shared-state mutation with `sharedSocket === ws`
       // so a late onclose from the OLD socket can't clobber the NEW
       // socket's ping interval and reconnect state. Without this check,
@@ -100,6 +100,28 @@ function connect(): void {
       if (stillCurrent && pingInterval) {
         clearInterval(pingInterval);
         pingInterval = null;
+      }
+      // 12-H13: detect auth failure on close. The server-side WS
+      // auth in apps/api/src/services/websocket.ts closes the
+      // connection with code 1008 (policy violation) when the apiKey
+      // query param doesn't match. Without this detection, a
+      // rotated API_SECRET (or a stale browser cache with the old
+      // NEXT_PUBLIC_API_KEY) would cause an infinite reconnect
+      // loop — every reconnect sends the same bad key, server
+      // closes again, client backs off and retries. The exponential
+      // backoff makes this look like "connection is unstable" to
+      // the user, who has no way to know it's a credential issue.
+      // Detect close code 1008 on the FIRST close, surface a
+      // one-time warning, and stop reconnecting (the user must
+      // refresh with a new key).
+      if (event.code === 1008 && reconnectAttempt === 0) {
+        if (typeof window !== "undefined") {
+          console.warn(
+            "[useWebSocket] WS auth failed (close code 1008). " +
+            "Check NEXT_PUBLIC_API_KEY matches the server's API_SECRET. " +
+            "Reconnect attempts will continue but the key needs to be updated.",
+          );
+        }
       }
       if (!stillCurrent) return;
       // Only reconnect if there are still active subscribers — otherwise

@@ -41,6 +41,15 @@ const activeWorkflows = new Map<string, WorkflowState>();
 // CPU on a usually-empty Map, less often risks holding zombies past the
 // `WORKFLOW_TTL_MS` they're checked against.
 const WORKFLOW_CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+// 12-H8: cap the absolute number of workflows the process holds
+// simultaneously, even if they all appear "active" to the cleanup
+// sweep. The TTL cleanup is best-effort and runs at most once per
+// hour; if a long-lived project (e.g., a multi-day sprint) keeps
+// starting workflows faster than the cleanup can reap them, the map
+// grows without bound. Cap at 200 workflows — well above any
+// realistic single-project count, and below the threshold where the
+// inner `tickets` Map starts to noticeably slow the cleanup sweep.
+const MAX_ACTIVE_WORKFLOWS = 200;
 
 // Touch a workflow's lastActivityAt to keep it alive across the TTL cleanup
 // sweep. Called from every state-mutating site (stage advance, ticket add).
@@ -63,6 +72,26 @@ export const workflowCleanupInterval = setInterval(() => {
     if (now - wf.lastActivityAt > ttl) {
       activeWorkflows.delete(sessionId);
     }
+  }
+  // 12-H8: second-pass cap. After TTL reaping, if the map is still
+  // over MAX_ACTIVE_WORKFLOWS, drop the oldest by createdAt. This
+  // protects against the case where TTL hasn't fired yet (TTL is
+  // 24h by default) but the map has accumulated 200+ workflows
+  // from many short-lived sessions that each completed but whose
+  // cleanup was delayed. Without this, the in-memory map would
+  // grow to match lifetime session count.
+  if (activeWorkflows.size > MAX_ACTIVE_WORKFLOWS) {
+    const sorted = Array.from(activeWorkflows.entries()).sort(
+      (a, b) => a[1].createdAt - b[1].createdAt,
+    );
+    const toDrop = sorted.slice(0, activeWorkflows.size - MAX_ACTIVE_WORKFLOWS);
+    for (const [sessionId] of toDrop) {
+      activeWorkflows.delete(sessionId);
+    }
+    logger.warn(
+      { dropped: toDrop.length, remaining: activeWorkflows.size, cap: MAX_ACTIVE_WORKFLOWS, event: "workflows_capped" },
+      `Capped active workflows map at ${MAX_ACTIVE_WORKFLOWS} — dropped ${toDrop.length} oldest`,
+    );
   }
 }, WORKFLOW_CLEANUP_INTERVAL_MS);
 workflowCleanupInterval.unref(); // don't keep process alive on its own

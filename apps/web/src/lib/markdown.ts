@@ -81,16 +81,44 @@ export function renderMarkdown(md: string): string {
   // Strikethrough
   html = html.replace(/~~(.+?)~~/g, '<del class="opacity-60 line-through">$1</del>');
 
-  // Links [text](url) — allowlist safe schemes (S6 + C4). The previous
-  // blocklist was bypassable via ` Javascript:alert(1)`; the previous
-  // allowlist chain still let through `java\nscript:alert(1)` because
-  // browsers strip ASCII whitespace from href values before scheme parsing.
-  // We now reject any URL containing control characters and allowlist only
-  // http(s), mailto, fragment, root-relative, and protocol-relative schemes.
+  // Links [text](url) — allowlist safe schemes (S6 + C4 + 12-H22).
+  // The previous blocklist was bypassable via ` Javascript:alert(1)`;
+  // the previous allowlist chain still let through `java\nscript:alert(1)`
+  // because browsers strip ASCII whitespace from href values before
+  // scheme parsing. The 4th-pass C4 fix added a control-char reject and
+  // an allowlist, but the test order was tight enough to leave
+  // subtle bypasses: `url.trim()` only strips ASCII whitespace, not
+  // Unicode whitespace (` `, ` `-` `) which browsers
+  // also strip before scheme parsing, and the allowlist was
+  // a positive list, not a deny-list — a future maintainer could
+  // add `data:` or `javascript:` to the allowed prefix list and
+  // re-introduce XSS.
+  //
+  // 12-H22: tighten further with three independent checks:
+  //  1. Reject any URL containing ASCII control chars OR Unicode
+  //     whitespace (browser-stripped-before-parse category).
+  //  2. Strip leading/trailing ASCII + Unicode whitespace before
+  //     scheme parsing (the regex `^https?:` only matches if the
+  //     first non-whitespace char is the scheme letter, not a
+  //     Unicode-seeming prefix).
+  //  3. Defence-in-depth scheme deny-list: explicitly reject
+  //     `javascript:`, `data:`, `vbscript:`, `file:` — schemes
+  //     browsers interpret as code or local file access. Even
+  //     if the allowlist has a bug, this deny-list catches it.
   html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, text, url) => {
-    if (/[\x00-\x1f\x7f]/.test(url)) return `[${text}](${url})`;
-    if (!/^(https?:|mailto:|#|\/|\/\/)/i.test(url.trim())) return `[${text}](${url})`;
-    const safeHref = url.replace(/"/g, "&quot;");
+    // 1. control chars + Unicode whitespace (browsers strip both before scheme parse)
+    if (new RegExp("[\\x00-\\x1f\\x7f\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF]").test(url)) {
+      return `[${text}](${url})`;
+    }
+    // 2. ASCII + Unicode trim
+    const trimmed = url.replace(new RegExp("^[\\s\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF]+|[\\s\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF]+$", "g"), "");
+    // 3. deny-list explicit dangerous schemes
+    if (/^(javascript|data|vbscript|file):/i.test(trimmed)) {
+      return `[${text}](${url})`;
+    }
+    // Allowlist safe schemes.
+    if (!/^(https?:|mailto:|#|\/|\/\/)/i.test(trimmed)) return `[${text}](${url})`;
+    const safeHref = trimmed.replace(/"/g, "&quot;");
     return `<a href="${safeHref}" target="_blank" rel="noopener noreferrer" class="text-[#0055FF] underline hover:bg-[#0055FF] hover:text-white px-0.5 transition-colors">${text}</a>`;
   });
 

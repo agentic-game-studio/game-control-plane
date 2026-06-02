@@ -74,20 +74,44 @@ wss.on("connection", (socket) => {
   });
 });
 
+// 12-H7: max queued bytes per client before we treat them as a slow
+// consumer. The `ws` library buffers send() calls in the OS socket
+// write buffer. If a client is slow (bad network, paused devtools,
+// mobile backgrounded tab), the buffer grows unbounded and the process
+// RSS climbs. Track buffered bytes and terminate the client if it
+// exceeds the cap — better to drop one slow client than to OOM the
+// process for everyone. 1MB is well above any single event payload
+// (the largest is the assistant message at ~64KB) and below the
+// default `ws` library's `maxPayload` of 100MB.
+const MAX_BUFFERED_BYTES_PER_CLIENT = 1_000_000;
+
 export function broadcast(event: WSEvent) {
   const message = JSON.stringify(event);
   for (const client of wss.clients) {
-    if (client.readyState === WebSocket.OPEN) {
-      try {
-        client.send(message);
-      } catch {
-        // Client disconnected during broadcast — terminate and remove so we
-        // don't keep retrying a dead socket on every subsequent broadcast.
-        try { client.terminate(); } catch { /* already gone */ }
-        wss.clients.delete(client);
-      }
-    } else {
+    if (client.readyState !== WebSocket.OPEN) {
       // Non-OPEN sockets shouldn't be in the set at all, but be defensive.
+      wss.clients.delete(client);
+      continue;
+    }
+    // Slow-consumer guard. `client.bufferedAmount` is the number of
+    // bytes queued in the OS socket write buffer. If it exceeds the
+    // cap, terminate — the client can't keep up, and queuing more
+    // events would only delay the inevitable.
+    if (client.bufferedAmount > MAX_BUFFERED_BYTES_PER_CLIENT) {
+      logger.warn(
+        { buffered: client.bufferedAmount, cap: MAX_BUFFERED_BYTES_PER_CLIENT, event: "ws_slow_consumer_terminated" },
+        "WebSocket client exceeded max buffered bytes — terminating to protect process memory",
+      );
+      try { client.terminate(); } catch { /* already gone */ }
+      wss.clients.delete(client);
+      continue;
+    }
+    try {
+      client.send(message);
+    } catch {
+      // Client disconnected during broadcast — terminate and remove so we
+      // don't keep retrying a dead socket on every subsequent broadcast.
+      try { client.terminate(); } catch { /* already gone */ }
       wss.clients.delete(client);
     }
   }
@@ -109,6 +133,15 @@ interface SSEClient {
   sessionId: string;
   id: string;
   send: (data: string) => void;
+  // 12-H18: per-client close hook invoked during graceful shutdown
+  // so the heartbeat interval is cleared and the underlying
+  // response is ended. Without this, the shutdown path calls
+  // `client.send("")` and clears the set, but leaves the heartbeat
+  // timer running and the response un-ended — the timer keeps
+  // Node alive past the force-exit deadline in some cases, and the
+  // leaked timer can fire a write on a socket that the process has
+  // already declared closed.
+  close?: () => void;
 }
 
 export const sseClients = new Set<SSEClient>();

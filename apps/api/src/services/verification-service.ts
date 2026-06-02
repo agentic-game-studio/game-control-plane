@@ -46,6 +46,16 @@ export function cancelVerificationsForProject(projectId: string): number {
  * column with `deadLetter: true` and a `ticket:deadletter` event is broadcast
  * so the UI can surface it for human review. */
 const MAX_VERIFY_FAILURES = 3;
+// 12-H6: cap the number of dead-lettered tickets per project. Without
+// this, a broken verifier (missing API key, schema mismatch, etc.) can
+// accumulate hundreds of dead-lettered tickets in the `failed` column.
+// They never get retried, they never get archived, and the JSON file
+// grows unbounded — a 1000-ticket failed column is ~500KB on disk and
+// gets loaded into memory on every board read. Prune the oldest
+// dead-lettered entries once the cap is exceeded. The cap is generous
+// (50) so legitimate "human review queue" behavior isn't disturbed;
+// it only kicks in for runaway-failure scenarios.
+const MAX_DEAD_LETTERED_PER_PROJECT = 50;
 
 // ─── Verifier selection map: area keywords → verifier agent role ───
 
@@ -175,37 +185,79 @@ export async function verifyTicket(
     `Verifying ticket ${ticket.id} with ${verifier}`,
   );
 
+  // 12-H17: declare result as | undefined so the fallback chain can
+  // assign it across iterations. After the chain either resolves
+  // (lastError === undefined and result is set) or throws, the
+  // narrowed type `result` is non-undefined below.
+  let result: { content: string } | undefined;
+  // 10-M1: thread an AbortController through invokeAgent so the
+  // verification can be cancelled externally (e.g. when the project
+  // is deleted while a verifier is mid-call).
+  const controller = new AbortController();
   try {
     const fallbackSession = ticket.projectId
       ? `verify-fallback-${ticket.projectId}`
       : `verify-fallback-${ticket.id}`;
-    // 10-M1: thread an AbortController through invokeAgent so the
-    // verification can be cancelled externally (e.g. when the project
-    // is deleted while a verifier is mid-call).
-    const controller = new AbortController();
     activeVerifications.set(ticket.id, controller);
-    let result: { content: string };
-    try {
-      result = await invokeAgent(
-        verifier,
-        task,
-        ticket.sessionId ?? fallbackSession,
-        undefined,
-        undefined,
-        undefined,
-        false,
-        0,
-        undefined,
-        undefined,
-        undefined,
-        controller.signal,
-      );
-    } finally {
-      // Only clear if this controller is still the active one for the
-      // ticket — a re-entered verification would have replaced it.
-      if (activeVerifications.get(ticket.id) === controller) {
-        activeVerifications.delete(ticket.id);
+    // 12-H17: walk the verifier fallback chain on error. The static
+    // AREA_VERIFIERS table declares a `fallback` per area, but the
+    // previous code only used the primary — if the primary verifier
+    // threw (missing API key, model timeout, schema mismatch), the
+    // whole verification failed and the ticket was routed through
+    // the dead-letter counter for "verifier broken". Walking the
+    // chain — primary → declared fallback → qa-tester (universal
+    // last resort) — means a broken specialist verifier doesn't
+    // halt the entire project; the qa-tester always succeeds.
+    const chain: AgentRole[] = (() => {
+      const declared = AREA_VERIFIERS.find((m) => m.verifier === verifier)?.fallback;
+      const ordered = [verifier];
+      if (declared && declared !== verifier) ordered.push(declared);
+      if (!ordered.includes("qa-tester")) ordered.push("qa-tester");
+      return ordered;
+    })();
+    let lastError: unknown;
+    for (const candidate of chain) {
+      try {
+        const candidateResult = await invokeAgent(
+          candidate,
+          task,
+          ticket.sessionId ?? fallbackSession,
+          undefined,
+          undefined,
+          undefined,
+          false,
+          0,
+          undefined,
+          undefined,
+          undefined,
+          controller.signal,
+        );
+        result = candidateResult;
+        if (candidate !== verifier) {
+          logger.info(
+            { event: "verify_fallback_used", ticketId: ticket.id, primary: verifier, used: candidate },
+            `Primary verifier ${verifier} was skipped — using ${candidate} instead`,
+          );
+        }
+        lastError = undefined;
+        break;
+      } catch (chainErr) {
+        lastError = chainErr;
+        logger.warn(
+          { event: "verify_chain_member_failed", ticketId: ticket.id, verifier: candidate, err: chainErr instanceof Error ? chainErr.message : String(chainErr) },
+          `Verifier ${candidate} failed — trying next in chain`,
+        );
+        // continue to next candidate
       }
+    }
+    if (lastError !== undefined) {
+      throw lastError;
+    }
+    // After a successful (non-throw) exit from the chain, `result`
+    // is guaranteed assigned — the only way out of the loop without
+    // throwing is via `break`, which sets `result` first.
+    if (result === undefined) {
+      throw new Error(`Verifier chain exhausted for ticket ${ticket.id} without assigning a result`);
     }
     const { parsed: verdict } = parseVerdict(result.content);
     const passed = verdict === "PASS";
@@ -448,6 +500,50 @@ export async function verifyTicket(
         reason: errorMessage,
         attempts: failureCount,
       } as WSEvent);
+
+      // 12-H6: prune the dead-letter column to a bounded size. Runs
+      // after the broadcast so the new ticket's dead-letter event
+      // always fires even if pruning throws. Sort by dead-lettered
+      // timestamp (oldest first) and drop the excess.
+      if (projectId) {
+        try {
+          let prunedCount = 0;
+          await updateTicketsBoard(projectId, (board) => {
+            const failedCol = board.columns.find((c) => c.id === "failed");
+            if (!failedCol) return board;
+            const deadLettered = failedCol.tickets.filter((t) => t.deadLetter);
+            if (deadLettered.length <= MAX_DEAD_LETTERED_PER_PROJECT) return board;
+            // Sort by lastError timestamp if present, else by id
+            // (stable, deterministic). Keep the most recent N.
+            deadLettered.sort((a, b) => {
+              const aTime = a.lastError ? Date.parse(a.lastError) || 0 : 0;
+              const bTime = b.lastError ? Date.parse(b.lastError) || 0 : 0;
+              return aTime - bTime;
+            });
+            const toDrop = new Set(
+              deadLettered
+                .slice(0, deadLettered.length - MAX_DEAD_LETTERED_PER_PROJECT)
+                .map((t) => t.id),
+            );
+            const nextTickets = failedCol.tickets.filter((t) => !toDrop.has(t.id));
+            prunedCount = failedCol.tickets.length - nextTickets.length;
+            failedCol.tickets = nextTickets;
+            return board;
+          });
+          if (prunedCount > 0) {
+            logger.warn(
+              { event: "deadletter_pruned", projectId, prunedCount, cap: MAX_DEAD_LETTERED_PER_PROJECT },
+              `Pruned ${prunedCount} oldest dead-lettered tickets to cap the failed column at ${MAX_DEAD_LETTERED_PER_PROJECT}`,
+            );
+          }
+        } catch (pruneErr) {
+          // Non-fatal — the dead-letter move already succeeded.
+          logger.warn(
+            { event: "deadletter_prune_failed", projectId, error: pruneErr instanceof Error ? pruneErr.message : String(pruneErr) },
+            "Failed to prune dead-lettered tickets — column may grow unbounded",
+          );
+        }
+      }
     } else {
       // Under the cap — requeue so the autonomous loop can pick it up again.
       // Q18-6th: thread `projectId` so moveQuestTicket doesn't re-run the
@@ -468,6 +564,13 @@ export async function verifyTicket(
       verifier,
       passed: false,
     };
+  } finally {
+    // Always release the controller slot. We only clear if this
+    // controller is still the active one for the ticket — a
+    // re-entered verification would have replaced it.
+    if (activeVerifications.get(ticket.id) === controller) {
+      activeVerifications.delete(ticket.id);
+    }
   }
 }
 

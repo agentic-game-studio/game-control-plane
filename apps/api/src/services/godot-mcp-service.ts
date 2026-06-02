@@ -204,6 +204,35 @@ export function getGodotMCPToolDefinitions(): LLMTool[] {
   return GODOT_MCP_TOOL_DEFINITIONS as LLMTool[];
 }
 
+// 12-H10: tools/list cache. The static GODOT_MCP_TOOL_NAMES set is
+// good enough for membership checks (isGodotMCPTool), but the
+// authoritative tool list lives on the MCP server. If a future
+// refactor switches to dynamic discovery (sending `tools/list` to
+// the server instead of using the static set), this cache is where
+// the result should land so each service.start() doesn't refetch.
+// The shape is: projectId -> { tools, fetchedAt }. Stale entries
+// (older than TOOLS_CACHE_TTL_MS) are dropped on read.
+const TOOLS_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const toolsCache = new Map<string, { tools: LLMTool[]; fetchedAt: number }>();
+
+export function getCachedToolsForProject(projectId: string): LLMTool[] | null {
+  const entry = toolsCache.get(projectId);
+  if (!entry) return null;
+  if (Date.now() - entry.fetchedAt > TOOLS_CACHE_TTL_MS) {
+    toolsCache.delete(projectId);
+    return null;
+  }
+  return entry.tools;
+}
+
+export function setCachedToolsForProject(projectId: string, tools: LLMTool[]): void {
+  toolsCache.set(projectId, { tools, fetchedAt: Date.now() });
+}
+
+export function clearCachedToolsForProject(projectId: string): void {
+  toolsCache.delete(projectId);
+}
+
 /** Godot MCP Service — manages the MCP server lifecycle */
 export class GodotMCPService {
   private process: ChildProcess | null = null;
@@ -668,6 +697,19 @@ export class GodotMCPService {
       pending.reject(new Error("MCP server process exited"));
     }
     this.pendingRequests.clear();
+    // 12-H1: clear the stdout buffer. Without this, a tail of
+    // partial-JSON data from a previous run sits in the buffer until
+    // the next start() appends to it. processStdout() then sees a
+    // mix of stale tail + new chunks and tries to parse the
+    // concatenation — JSON.parse fails on most lines, but a lucky
+    // concatenation could parse as a malformed response and either
+    // get dropped (best case) or be misinterpreted as a legitimate
+    // response with a new id (worst case, but pendingRequests is
+    // empty post-cleanup so the new id wouldn't match anything).
+    // Either way, parsing stale input burns CPU on every event and
+    // pollutes the logs with `godot_mcp_stdout` noise. Reset to a
+    // known-empty state.
+    this.stdoutBuffer = "";
   }
 }
 
@@ -711,6 +753,12 @@ export async function removeGodotMCPService(projectId: string): Promise<void> {
     await service.stop();
     activeServices.delete(projectId);
   }
+  // 12-H12: also clear the tools cache. Without this, a project
+  // that was deleted and re-created with the same id would inherit
+  // a stale tools list from the previous instance. The cache TTL
+  // (5 minutes) would eventually clear it, but the user would see
+  // "tool not found" errors until then. Eager cleanup is cheap.
+  clearCachedToolsForProject(projectId);
 }
 
 /** Stop all active MCP services (for graceful shutdown) */

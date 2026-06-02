@@ -279,7 +279,15 @@ app.get("/api/sessions/:sessionId/stream", (req, res) => {
   const sessionId = req.params.sessionId;
   const clientId = randomUUID();
 
-  const client = { id: clientId, sessionId, send: (data: string) => { res.write(`data: ${data}\n\n`); } };
+  const client: { id: string; sessionId: string; send: (data: string) => void; close: () => void } = {
+    id: clientId,
+    sessionId,
+    send: (data: string) => { res.write(`data: ${data}\n\n`); },
+    // 12-H18: expose the cleanup closure so graceful shutdown can
+    // tear down the heartbeat + end the response, not just remove
+    // the client from the set. See sseClients type for rationale.
+    close: () => { /* replaced below once `cleanup` is defined */ },
+  };
   sseClients.add(client);
 
   // Defensive re-check: if we somehow ended up over the cap (would only
@@ -304,7 +312,20 @@ app.get("/api/sessions/:sessionId/stream", (req, res) => {
     destroyed = true;
     if (heartbeat) clearInterval(heartbeat);
     sseClients.delete(client);
+    // 12-H18: end the response on cleanup so the client gets a
+    // proper close and any in-flight chunked-encoding writes
+    // resolve. Without this, a graceful shutdown that just calls
+    // `sseClients.clear()` leaves the response open and the OS
+    // closes the socket with a RST on process exit — clients see
+    // a half-read stream. `res.end()` is a no-op if the response
+    // is already ended; the destroyed flag prevents re-entry.
+    try { if (!res.writableEnded) res.end(); } catch { /* already closed */ }
   };
+  // 12-H18: wire cleanup into the client's close hook so
+  // gracefulShutdown can tear down each SSE client (clear heartbeat,
+  // end response) without having to know about the per-client
+  // closure that owns those resources.
+  client.close = cleanup;
 
   // R8: Send heartbeat comment every 15 seconds to keep connection alive.
   // 11-M3: guard the write — a heartbeat that fires in the small window
@@ -382,10 +403,16 @@ async function gracefulShutdown(signal: string) {
   await abortAllLoops();
 
   // 2. Close all SSE clients
-  for (const client of sseClients) {
-    try { client.send(""); } catch { /* already closed */ }
+  // 12-H18: invoke each client's `close` hook (set up by the SSE
+  // handler) so the heartbeat interval is cleared and the response
+  // is ended. The previous code only sent a final empty event and
+  // cleared the set, leaving heartbeats running and the response
+  // un-ended. Snapshot the set before iteration because `close()`
+  // mutates the set (sseClients.delete) under us.
+  const clientsToClose = Array.from(sseClients);
+  for (const client of clientsToClose) {
+    try { client.close?.(); } catch { /* already closed */ }
   }
-  sseClients.clear();
 
   // 3. Kill MCP child processes
   try { await shutdownAllMCPServices(); } catch { /* best effort */ }
