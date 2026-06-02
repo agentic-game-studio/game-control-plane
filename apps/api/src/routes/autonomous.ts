@@ -293,7 +293,18 @@ export function abortAllLoops(): void {
       state.lastHeartbeat = new Date().toISOString();
       saveLoopState(state);
     }
+    // Signal the in-flight invokeAgent to abort. Without this, the loop's
+    // worker IIFE just sees the status flip to "idle" on its next iteration
+    // boundary, but the LLM fetch inside runIteration would keep running
+    // until the per-attempt 20-minute timeout. That burns credits during
+    // graceful shutdown — the whole point of `abortAllLoops` is to stop
+    // work quickly.
+    const loopAbort = loopAbortControllers.get(sessionId);
+    if (loopAbort) {
+      loopAbort.abort();
+    }
   }
+  loopAbortControllers.clear();
   activeLoopSessions.clear();
 }
 
@@ -556,20 +567,27 @@ async function producerSprintReplan(
 }
 
 async function moveTicket(projectId: string, ticketId: string, status: string): Promise<void> {
-  const data = await readTicketsBoard(projectId);
-  for (const column of data.columns) {
-    const idx = column.tickets.findIndex((t) => t.id === ticketId);
-    if (idx !== -1) {
-      const ticket = column.tickets[idx];
-      column.tickets.splice(idx, 1);
-      const destCol = data.columns.find((c) => c.id === status);
-      if (destCol) {
-        destCol.tickets.push({ ...ticket, status: status as Ticket["status"], updatedAt: new Date().toISOString() });
+  // Route the read-modify-write through updateTicketsBoard so the per-board
+  // mutex serializes concurrent moves (the autonomous loop + quest-bridge +
+  // a manual drag in the UI can all hit the same board at the same time).
+  // Without the lock, two concurrent moves can both read the same board,
+  // each splice the ticket out of its own copy, and the second write
+  // silently re-inserts a stale copy of the ticket.
+  await updateTicketsBoard(projectId, (data) => {
+    for (const column of data.columns) {
+      const idx = column.tickets.findIndex((t) => t.id === ticketId);
+      if (idx !== -1) {
+        const ticket = column.tickets[idx];
+        column.tickets.splice(idx, 1);
+        const destCol = data.columns.find((c) => c.id === status);
+        if (destCol) {
+          destCol.tickets.push({ ...ticket, status: status as Ticket["status"], updatedAt: new Date().toISOString() });
+        }
+        return data;
       }
-      await writeTicketsBoard(data, projectId);
-      return;
     }
-  }
+    return data;
+  });
 }
 
 async function getProjectContext(projectId: string): Promise<ProjectContext | undefined> {

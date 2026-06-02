@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { apiFetch } from "@/lib/api";
+import { useDialog } from "@/hooks/useDialog";
 
 interface SkillPhase {
   order: number;
@@ -79,9 +80,11 @@ export default function TeamsPage() {
     initSession();
   }, []);
 
+  const { alert: showAlert } = useDialog();
+
   const handleRunTeam = async (team: TeamSkill) => {
     if (!sessionId) {
-      alert("No session available. Please refresh the page.");
+      await showAlert("No session available. Please refresh the page.");
       return;
     }
     setRunning(true);
@@ -92,10 +95,10 @@ export default function TeamsPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sessionId, reviewMode: "lean" }),
       });
-      alert(`${team.name} workflow started!`);
+      await showAlert(`${team.name} workflow started!`);
     } catch (error) {
       console.error("Failed to run team:", error);
-      alert(`Failed to run team: ${error}`);
+      await showAlert(`Failed to run team: ${error}`);
     } finally {
       setRunning(false);
     }

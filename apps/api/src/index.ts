@@ -144,6 +144,23 @@ if (corsOrigins.length === 0) {
   throw new Error("CORS_ORIGIN must be set to at least one origin");
 }
 app.use(cors({ origin: corsOrigins.length === 1 ? corsOrigins[0] : corsOrigins }));
+// Security response headers. The platform serves an authenticated dashboard
+// that handles arbitrary user-provided content (chat messages, GDD markdown,
+// generated assets). The headers below defend against the obvious classes
+// of attack (XSS, MIME sniffing, clickjacking) without breaking the
+// legitimate flows (cross-origin fetch from the configured frontends, inline
+// styles for the chat UI, frame embedding for OAuth-style login if added).
+// CSP is intentionally left out — Next.js owns that for the frontend, and
+// the API serves only JSON. A stale/proxy-stripped `X-Content-Type-Options`
+// would let a JSON endpoint be interpreted as HTML; `nosniff` is the
+// minimum baseline.
+app.use((_req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+  next();
+});
 // 5MB default JSON body limit. The previous 50MB limit applied to every
 // route, which let a single buggy or malicious client OOM the process via
 // /api/chat/sessions/.../messages. Individual upload routes (e.g. asset
@@ -165,6 +182,16 @@ app.use("/api/dashboard", dashboardRouter);
 // Q2: Rate limit LLM-heavy endpoints (must be before route handlers)
 app.use("/api/chat/sessions/:sessionId/messages", rateLimiter);
 app.use("/api/chat/spawn", rateLimiter);
+// H7: Rate limit the other expensive endpoints. autonomous/start and
+// teams/run kick off long-running agent loops that burn credits. assets/
+// generate shells out to a Python pipeline that holds the event loop for
+// up to 10 minutes. The /api/chat/messages limiter above is per-IP with
+// the same window; mounting these on top of it would be additive. The
+// limits below are higher than chat/messages because legitimate clients
+// (dashboards, batch UIs) hit them less often per minute.
+app.use("/api/autonomous/start", rateLimiter);
+app.use("/api/teams/run", rateLimiter);
+app.use("/api/assets/generate", rateLimiter);
 
 app.use("/api/chat", chatRouter);
 app.use("/api/tickets", ticketsRouter);
@@ -301,3 +328,37 @@ async function gracefulShutdown(signal: string) {
 
 process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
 process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+
+// Catch-all for errors that escape the promise chain. Without these:
+//  - An unhandled promise rejection (e.g. a fire-and-forget fetch whose
+//    .catch is missing) crashes the process without going through
+//    gracefulShutdown, losing in-flight LLM requests and leaving SSE
+//    clients with truncated streams.
+//  - A synchronous throw from a setImmediate / setTimeout callback (e.g.
+//    a stream error not wrapped in try/catch) takes the process down
+//    with no chance to flush logs or broadcast a `service:error`.
+//
+// Log loud, then exit 1 — k8s / Railway will restart us, and the restart
+// loop in `recoverStaleLoopStates()` will pick up any abandoned loop
+// state. We do NOT call gracefulShutdown from these handlers because
+// they fire in a process state where it might re-enter fatally; SIGTERM
+// from the orchestrator is the only path that runs the full drain.
+process.on("uncaughtException", (err, origin) => {
+  logger.fatal(
+    { err: err.message, stack: err.stack, origin, event: "uncaught_exception" },
+    `Uncaught exception — exiting. ${err.message}`,
+  );
+  // Best-effort: log to stderr so the orchestrator captures it even if
+  // the pino file transport fails to flush.
+  process.stderr.write(`[FATAL] uncaughtException: ${err.message}\n${err.stack}\n`);
+  process.exit(1);
+});
+process.on("unhandledRejection", (reason) => {
+  const err = reason instanceof Error ? reason : new Error(String(reason));
+  logger.fatal(
+    { err: err.message, stack: err.stack, event: "unhandled_rejection" },
+    `Unhandled promise rejection — exiting. ${err.message}`,
+  );
+  process.stderr.write(`[FATAL] unhandledRejection: ${err.message}\n${err.stack ?? ""}\n`);
+  process.exit(1);
+});

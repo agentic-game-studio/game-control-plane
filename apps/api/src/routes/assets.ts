@@ -404,20 +404,43 @@ assetsRouter.get("/:id/thumbnail", async (req: Request, res: Response) => {
     const workspaceDir = path.resolve(config.WORKSPACE_DIR);
     const thumbAbsPath = path.resolve(workspaceDir, asset.thumbnailPath);
 
-    const workspacePrefix = workspaceDir.endsWith("/") ? workspaceDir : workspaceDir + "/";
-    if (!thumbAbsPath.startsWith(workspacePrefix) && thumbAbsPath !== workspaceDir) {
-      res.status(403).send("Forbidden");
-      return;
-    }
-
+    // Lstat first to reject symlinks outright. A thumbnail path that points
+    // at a symlink can be used to read arbitrary files on disk: the
+    // previous version did a `startsWith` check on the unresolved path,
+    // which a symlink in workspaceDir pointing at /etc would defeat. We
+    // also enforce the workspace boundary on the realpath (defense in
+    // depth) so a symlink target outside the workspace is rejected even
+    // if the symlink itself is inside.
     try {
-      const stat = await fs.stat(thumbAbsPath);
-      if (!stat.isFile()) {
+      const lst = await fs.lstat(thumbAbsPath);
+      if (lst.isSymbolicLink()) {
+        res.status(403).send("Forbidden");
+        return;
+      }
+      if (!lst.isFile()) {
         res.status(404).send("Not found");
         return;
       }
     } catch {
       res.status(404).send("Not found");
+      return;
+    }
+
+    // Defense-in-depth: realpath the resolved path and confirm it stays
+    // inside WORKSPACE_DIR. Should never trigger given the lstat check
+    // above, but a future regression that re-enables symlinks would still
+    // be caught here.
+    let realThumb: string;
+    try {
+      realThumb = await fs.realpath(thumbAbsPath);
+    } catch {
+      res.status(404).send("Not found");
+      return;
+    }
+    const realWorkspace = await fs.realpath(workspaceDir).catch(() => workspaceDir);
+    const realWorkspacePrefix = realWorkspace.endsWith(path.sep) ? realWorkspace : realWorkspace + path.sep;
+    if (!realThumb.startsWith(realWorkspacePrefix) && realThumb !== realWorkspace) {
+      res.status(403).send("Forbidden");
       return;
     }
 

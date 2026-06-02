@@ -8,7 +8,7 @@
 import { invokeAgent } from "./llm-service.js";
 import { moveQuestTicket, createFixTicket } from "./quest-bridge.js";
 import { broadcastEvent } from "./data-store.js";
-import { updateTicketsBoard } from "./ticket-board.js";
+import { updateTicketsBoard, readTicketsBoard } from "./ticket-board.js";
 import type { Ticket, AgentRole, WSEvent } from "@game-studio/types";
 import { logger } from "../utils/logger.js";
 
@@ -241,37 +241,73 @@ export async function verifyTicket(
       );
 
       if (projectId) {
+        // Idempotency check: if the ticket is ALREADY in the `failed`
+        // column with `deadLetter: true`, skip the move and re-broadcast.
+        // Without this, a redelivered webhook or a retry from the producer
+        // re-applies the move, broadcasts another `ticket:deadletter`,
+        // and bumps the `lastError` text again — the UI then loses track
+        // of which attempt caused the dead-letter.
+        let alreadyDeadLettered = false;
         try {
-          await updateTicketsBoard(projectId, (board) => {
-            // Older boards (created before the `failed` column was added to
-            // DEFAULT_TICKETS_BOARD) may not have it. Without this guard,
-            // the dead-letter move silently no-ops: the ticket stays in its
-            // current column with `deadLetter: true` set, but the UI never
-            // surfaces it in the Failed column. Lazily create the column
-            // here so dead-letter always lands somewhere visible.
-            if (!board.columns.some((c) => c.id === "failed")) {
-              board.columns.push({ id: "failed", label: "Failed", tickets: [] });
-            }
-            for (const col of board.columns) {
-              if (col.id === "failed") {
-                const t = col.tickets.find((x) => x.id === ticket.id);
-                if (!t) {
-                  const moved = board.columns.flatMap((c) => c.tickets).find((x) => x.id === ticket.id);
-                  if (moved) {
-                    moved.deadLetter = true;
-                    moved.status = "failed";
-                    col.tickets.push(moved);
-                  }
-                }
+          const board = await readTicketsBoard(projectId);
+          const failedCol = board.columns.find((c) => c.id === "failed");
+          if (failedCol?.tickets.some((t) => t.id === ticket.id && t.deadLetter)) {
+            alreadyDeadLettered = true;
+          }
+        } catch {
+          // If the read fails, fall through and try to dead-letter — better
+          // to apply it twice than to never apply it at all.
+        }
+
+        if (!alreadyDeadLettered) {
+          try {
+            await updateTicketsBoard(projectId, (board) => {
+              // Older boards (created before the `failed` column was added to
+              // DEFAULT_TICKETS_BOARD) may not have it. Without this guard,
+              // the dead-letter move silently no-ops: the ticket stays in its
+              // current column with `deadLetter: true` set, but the UI never
+              // surfaces it in the Failed column. Lazily create the column
+              // here so dead-letter always lands somewhere visible.
+              if (!board.columns.some((c) => c.id === "failed")) {
+                board.columns.push({ id: "failed", label: "Failed", tickets: [] });
               }
-              col.tickets = col.tickets.filter((x) => x.id !== ticket.id || col.id === "failed");
-            }
-            return board;
-          });
-        } catch (dlErr) {
-          logger.error(
-            { event: "verify_deadletter_write_failed", ticketId: ticket.id, error: dlErr instanceof Error ? dlErr.message : String(dlErr) },
-            "Failed to persist dead-letter state",
+              // Refuse to dead-letter the same ticket twice in the same
+              // board. The first dead-letter places it in `failed`; the
+              // outer board read above already short-circuited, but a race
+              // between two concurrent verify failures on the same ticket
+              // could arrive here simultaneously. Skip the splice/insert
+              // and just refresh the lastError to the most recent message.
+              const failedCol = board.columns.find((c) => c.id === "failed")!;
+              const existingDead = failedCol.tickets.find((t) => t.id === ticket.id);
+              if (existingDead) {
+                existingDead.lastError = errorMessage;
+                existingDead.deadLetter = true;
+                existingDead.status = "failed";
+                return board;
+              }
+              const moved = board.columns.flatMap((c) => c.tickets).find((x) => x.id === ticket.id);
+              if (moved) {
+                moved.deadLetter = true;
+                moved.status = "failed";
+                moved.lastError = errorMessage;
+                failedCol.tickets.push(moved);
+              }
+              for (const col of board.columns) {
+                if (col.id === "failed") continue;
+                col.tickets = col.tickets.filter((x) => x.id !== ticket.id);
+              }
+              return board;
+            });
+          } catch (dlErr) {
+            logger.error(
+              { event: "verify_deadletter_write_failed", ticketId: ticket.id, error: dlErr instanceof Error ? dlErr.message : String(dlErr) },
+              "Failed to persist dead-letter state",
+            );
+          }
+        } else {
+          logger.info(
+            { event: "verify_deadletter_dedup", ticketId: ticket.id, attempts: failureCount },
+            `Ticket ${ticket.id} already dead-lettered — skipping duplicate move`,
           );
         }
       }

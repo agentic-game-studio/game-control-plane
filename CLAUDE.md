@@ -30,7 +30,7 @@ game-control-plane/
 │   └── web/              # Frontend: Next.js 15 (App Router)
 ├── packages/
 │   ├── types/            # Shared TypeScript interfaces (source of truth)
-│   ├── agents/           # 50 agent definitions (3-tier hierarchy)
+│   ├── agents/           # 54 agent definitions (3-tier hierarchy)
 │   ├── skills/           # 92 skill definitions (12 team skills)
 │   ├── config/           # Zod schemas + GDD/ADR templates
 │   └── state/            # File-based session store
@@ -51,7 +51,7 @@ game-control-plane/
 
 ### Agent Hierarchy (53 agents)
 
-- **Tier 1 (Opus → glm-5.1)**: producer (Board Room orchestrator), autonomous-producer (no-human loop driver), creative-director, technical-director, game-director (top-level vision owner)
+- **Tier 1 (Opus → glm-5.1)**: 5 directors — producer (Board Room orchestrator), autonomous-producer (no-human loop driver), creative-director, technical-director, game-director (top-level vision owner)
 - **Tier 2 (Sonnet → glm-4.7)**: 8 department leads — game-designer, lead-programmer, art-director, audio-director, narrative-director, qa-lead, release-manager, localization-lead
 - **Tier 3 (Sonnet → glm-4.7)**: 40 specialists — systems-designer, gameplay-programmer, godot-specialist, godot-gdscript-specialist, godot-csharp-specialist, unreal-specialist, unity-specialist, code-reviewer, etc.
 
@@ -447,8 +447,8 @@ GDD files use 8-section format: Overview, Player Fantasy, Detailed Rules, Formul
 ```bash
 pnpm typecheck         # TypeScript across all packages
 pnpm build             # Turbo build pipeline
-pnpm generate:agents    # Validate 49 agent definitions
-pnpm generate:skills   # Validate 67 skill definitions
+pnpm generate:agents    # Validate 54 agent definitions
+pnpm generate:skills   # Validate 92 skill definitions
 pnpm generate          # Both validations
 pnpm test:e2e          # Playwright E2E test suite (apps/web/e2e/)
 ```

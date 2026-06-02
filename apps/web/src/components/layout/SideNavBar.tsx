@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import type { Route } from "next";
 import { usePathname } from "next/navigation";
 import { useState, useEffect } from "react";
 import { apiFetch } from "@/lib/api";
@@ -15,7 +16,9 @@ const SIDEBAR_HIDDEN_HREFS = new Set([
   "/sessions",
 ]);
 
-const navItems = [
+type NavItem = { href: Route; icon: string; label: string; fill: boolean };
+
+const navItems: NavItem[] = [
   { href: "/dashboard", icon: "dashboard", label: "Dashboard", fill: false },
   { href: "/chat", icon: "chat", label: "Comms", fill: false },
   { href: "/agents", icon: "smart_toy", label: "Agents", fill: false },

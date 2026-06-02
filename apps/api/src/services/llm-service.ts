@@ -161,6 +161,98 @@ function escapeRegExp(literal: string): string {
   return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/** Tokenize a sandboxed shell command into argv. Supports:
+ *  - whitespace splitting (space, tab)
+ *  - single-quoted strings (no escapes inside)
+ *  - double-quoted strings (with `\"`, `\\`, `\$`, `\``, `\\n` escapes)
+ *  - backslash escapes outside quotes
+ *  Rejects unterminated quotes. Does NOT support:
+ *  - variable expansion ($FOO, ${FOO})
+ *  - command substitution ($(...), `...`)
+ *  - glob expansion (*, ?, [...])
+ *  - redirections (>, <, |, &)
+ * Those are already blocked by the Bash-tool sandbox regex above, so a
+ * full POSIX parser would be overkill. */
+function tokenizeShellCommand(input: string): string[] {
+  const argv: string[] = [];
+  let current = "";
+  let i = 0;
+  let inToken = false;
+  let quote: "'" | '"' | null = null;
+
+  while (i < input.length) {
+    const c = input[i];
+
+    if (quote === "'") {
+      if (c === "'") {
+        quote = null;
+        i++;
+        continue;
+      }
+      current += c;
+      i++;
+      continue;
+    }
+
+    if (quote === '"') {
+      if (c === "\\" && i + 1 < input.length) {
+        // Inside double quotes, backslash only escapes a fixed set: \", \\,
+        // \$, \`, and a literal newline. Any other backslash is kept
+        // literal (matches POSIX sh behavior).
+        const next = input[i + 1];
+        if (next === '"' || next === "\\" || next === "$" || next === "`" || next === "\n") {
+          current += next;
+          i += 2;
+          continue;
+        }
+        current += c;
+        i++;
+        continue;
+      }
+      if (c === '"') {
+        quote = null;
+        i++;
+        continue;
+      }
+      current += c;
+      i++;
+      continue;
+    }
+
+    // Unquoted
+    if (c === "'" || c === '"') {
+      quote = c;
+      inToken = true;
+      i++;
+      continue;
+    }
+    if (c === "\\" && i + 1 < input.length) {
+      current += input[i + 1];
+      inToken = true;
+      i += 2;
+      continue;
+    }
+    if (c === " " || c === "\t") {
+      if (inToken) {
+        argv.push(current);
+        current = "";
+        inToken = false;
+      }
+      i++;
+      continue;
+    }
+    current += c;
+    inToken = true;
+    i++;
+  }
+
+  if (quote !== null) {
+    throw new Error(`Unterminated ${quote} quote in command`);
+  }
+  if (inToken) argv.push(current);
+  return argv;
+}
+
 // Hoist the home-prefix matcher to module load. `process.env.HOME` is
 // constant for the lifetime of the process, so building a RegExp inside
 // `safePath` (which is called once per Read/Write/Edit tool invocation)
@@ -427,15 +519,44 @@ async function executeTool(
         // Cap timeout at server-side maximum (120s)
         const timeout = Math.min((input.timeout as number) ?? 60000, 120_000);
 
-        const { exec } = await import("node:child_process");
-        const { promisify } = await import("node:util");
-        const execAsync = promisify(exec);
+        // Tokenize the command into argv ourselves instead of letting
+        // `child_process.exec` route through a shell. The sandbox above
+        // already blocks pipes, redirects, subshells, and variable
+        // expansion — a simple POSIX-ish tokenizer (whitespace + single
+        // quotes + double quotes + backslash escapes) is sufficient and
+        // removes the shell as an attack surface. Reject unterminated
+        // quotes rather than trying to recover.
+        let argv: string[];
+        try {
+          argv = tokenizeShellCommand(command);
+        } catch (tokenizeErr) {
+          return `Error: ${tokenizeErr instanceof Error ? tokenizeErr.message : "Invalid command"}`;
+        }
+        if (argv.length === 0) return "Error: command is required";
+
+        // Reject argv[0] that contains path separators or is otherwise
+        // not a plain command name. We rely on PATH lookup for resolution
+        // — the workspace's PATH may not be the same as the API's, so
+        // we let execFile use the inherited PATH (which `spawn`/`execFile`
+        // do by default). Disallow `..` to keep traversal out of argv[0]
+        // even though execFile won't go through a shell.
+        if (!/^[A-Za-z0-9._+-]+$/.test(argv[0])) {
+          return `Error: command name contains invalid characters: ${argv[0]}`;
+        }
+
+        const { execFile } = await import("node:child_process");
+        const { promisify: promisifyCb } = await import("node:util");
+        const execFileAsync = promisifyCb(execFile);
 
         try {
-          const { stdout, stderr } = await execAsync(command, {
+          const { stdout, stderr } = await execFileAsync(argv[0], argv.slice(1), {
             cwd: workspaceDir,
             timeout,
             maxBuffer: 10 * 1024 * 1024,
+            // Don't go through a shell — this is the point. execFile uses
+            // direct execve(2) with argv; the OS is responsible for finding
+            // the binary on PATH.
+            shell: false,
           });
           logEntry(sessionId, "info", `[${agentRole}] Bash: ${command}`, agentRole);
           return stderr ? `STDOUT:\n${stdout}\nSTDERR:\n${stderr}` : stdout || "Command completed (no output)";

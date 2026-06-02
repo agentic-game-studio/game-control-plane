@@ -21,6 +21,10 @@ interface ProjectContextValue {
   currentProject: Project | null;
   currentProjectId: string | null;
   selectProject: (projectId: string | null) => void;
+  /** Clear the current project selection. Equivalent to
+   * `selectProject(null)` but named for logout-style call sites so
+   * intent is obvious at the call site. */
+  clearProject: () => void;
   loading: boolean;
   error: string | null;
   refresh: () => Promise<void>;
@@ -135,6 +139,7 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
       currentProject,
       currentProjectId,
       selectProject,
+      clearProject: () => selectProject(null),
       loading,
       error,
       refresh: fetchProjects,

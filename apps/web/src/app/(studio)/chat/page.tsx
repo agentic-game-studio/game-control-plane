@@ -15,6 +15,7 @@ import NotificationToasts from "./components/NotificationToasts";
 import { useCommandRoom } from "@/hooks/useCommandRoom";
 import { ProjectGuard } from "@/components/ProjectGuard";
 import { useProject } from "@/contexts/ProjectContext";
+import { useDialog } from "@/hooks/useDialog";
 import { apiFetch } from "@/lib/api";
 
 interface MCPStatus {
@@ -115,6 +116,8 @@ function ChatPageInner() {
   const handleNavigate = (targetSession: string) => {
     selectSession(targetSession);
   };
+
+  const { confirm: showConfirm } = useDialog();
 
   const handleCloseSession = (sessionId: string) => {
     if (sessionId.startsWith("consultation-")) {
@@ -303,8 +306,8 @@ function ChatPageInner() {
                 </span>
               </div>
               <button
-                onClick={() => {
-                  if (confirm(`Close ${roleLabel} consultation and send summary back to Producer?`)) {
+                onClick={async () => {
+                  if (await showConfirm(`Close ${roleLabel} consultation and send summary back to Producer?`)) {
                     closeConsultation(currentSession);
                   }
                 }}

@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "@/hooks/useWebSocket";
+import { useDialog } from "@/hooks/useDialog";
 import type { WSEvent } from "@game-studio/types";
 
 interface Session {
@@ -71,8 +72,10 @@ export default function SessionsPage() {
     }
   };
 
+  const { confirm: showConfirm } = useDialog();
+
   const handleDelete = async (id: string) => {
-    if (!confirm("Delete this session?")) return;
+    if (!(await showConfirm("Delete this session?"))) return;
     try {
       await apiFetch(`/api/sessions/${id}`, { method: "DELETE" });
       setSessions((prev) => prev.filter((s) => s.id !== id));

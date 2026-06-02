@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { apiFetch } from "@/lib/api";
+import { useDialog } from "@/hooks/useDialog";
 
 interface SkillPhase {
   order: number;
@@ -121,9 +122,11 @@ export default function SkillsPage() {
     return matchesSearch && matchesCategory && matchesTab;
   });
 
+  const { alert: showAlert } = useDialog();
+
   const handleInvoke = async (skill: Skill) => {
     if (!sessionId) {
-      alert("No session available. Please refresh the page.");
+      await showAlert("No session available. Please refresh the page.");
       return;
     }
     setInvoking(true);
@@ -138,7 +141,7 @@ export default function SkillsPage() {
       setTimeout(() => setInvokeSuccess(false), 3000);
     } catch (error) {
       console.error("Failed to invoke skill:", error);
-      alert(`Failed to invoke skill: ${error}`);
+      await showAlert(`Failed to invoke skill: ${error}`);
     } finally {
       setInvoking(false);
     }

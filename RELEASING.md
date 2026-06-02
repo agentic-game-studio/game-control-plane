@@ -83,7 +83,7 @@ regex, and a timing-attackable WebSocket auth were publicly reachable.
 | 5.7 | `.github/workflows/ci.yml` | Added `pnpm build` step (catches Dockerfile, Next.js, and import-resolution issues). |
 | 5.8 | `apps/api/src/index.ts` | CORS now accepts comma-separated origins. |
 
-**Agent & skill registry state:** `53 agents OK` / `94 skills OK` (was 51 / 92).
+**Agent & skill registry state:** `53 agents OK` / `94 skills OK` (was 50 / 92).
 
 **Deferred:** 5.4 — audit 15 unreferenced agents. These are registered but not in any skill's `agents` list. Either wire them into skills or mark `experimental: true`.
 
@@ -286,4 +286,70 @@ Selected wins (full list in commit messages 22d6a99, f946012, 04281db, 26176bf):
 - `pnpm generate` — `Agent registry validated: 53 agents OK` / `Skill registry validated: 94 skills OK`.
 - `pnpm --filter @game-studio/web build` — clean Next.js build, all 17 routes generated.
 - `pnpm --filter @game-studio/api build` — clean `tsc` (no output = no errors).
+- `pnpm --filter @game-studio/api test` — 61 tests pass across 9 files (mutex, SSRF, traversal, timing-safe auth, dead-letter dedup, stale-loop recovery, ZAI client retry, quest-bridge workflow locks, plus the pre-existing producer-summary test).
 - `git status` — `tsconfig.tsbuildinfo` no longer tracked.
+
+---
+
+## Phase 10 — Fifth-Pass Hardening + Test Suite
+
+The fifth audit covered **~100 findings** (5 CRITICAL, 10 HIGH, ~30 MEDIUM,
+~30 LOW). The CRITICAL and HIGH tiers were landed in the previous session;
+this phase adds the missing test coverage, finishes the MEDIUM batch, and
+ships the final LOW polish.
+
+### Phase 10.1 — Test suite (8 new files, 61 tests)
+
+The API now has a vitest setup with `pool: "forks"` and a 15s timeout
+so the security and reliability changes are pinned at the test level.
+Without these, the 5th-pass CRITICAL fixes were a code reviewer's word
+against future regressions.
+
+| File | What it pins |
+|---|---|
+| `apps/api/vitest.config.ts` | `pool: "forks"` for module-state isolation, `LOG_TO_FILE=false` in test env (pino file transport throws a config error otherwise), placeholder `ZAI_API_KEY` so `loadConfig` doesn't refuse to parse. |
+| `apps/api/src/services/data-store.test.ts` | 50 concurrent `updateData` calls preserve every increment; lock release happens on throw. |
+| `apps/api/src/services/webhook-service.test.ts` | Parameterized SSRF blocklist: private IPs, loopback, IPv6, `localhost`, file/data/javascript/gopher schemes; accepts public http(s) including ports and query strings. |
+| `apps/api/src/utils/workspace.test.ts` | Path-traversal regression: rejects `..`, absolute-outside, NUL bytes, symlink escape; accepts normal + absolute-inside + non-existent (write paths); accepts literal `..foo` (a valid directory name, not a traversal). |
+| `apps/api/src/middleware/auth.test.ts` | Timing-safe auth: rejects missing/wrong/length-mismatched keys, accepts the right key, handles array-valued `x-api-key` headers, skips `/health`. |
+| `apps/api/src/services/verification-service.test.ts` | Dead-letter idempotency: counter increments per error, dead-letters exactly once on the 3rd consecutive error with one `ticket:deadletter` broadcast. |
+| `apps/api/src/routes/autonomous.recover.test.ts` | Stale-loop recovery: a `running` state with an old `lastHeartbeat` is flipped to `idle` on boot. |
+| `apps/api/src/llm/zai-client.test.ts` | Retry behavior: 5xx is retried then succeeds; 200 returns first try; persistent 5xx gives up after `MAX_RETRIES+1` attempts; abort signal propagates; semaphore survives 20 sequential calls. |
+| `apps/api/src/services/quest-bridge.test.ts` | Workflow-lock regression: second `startWorkflow` for the same session returns the existing id (no overwrite), independent sessions get independent workflows, `cleanupWorkflow` and `completeWorkflow` both allow a fresh start. |
+
+### Phase 10.2 — MEDIUM finishing touches
+
+- **`apps/web/src/hooks/useDialog.tsx`** (new) — Promise-based `confirm()` and `alert()` hook backed by a context provider. Replaces every native `window.alert/confirm` in the studio pages (`gates`, `chat`, `sessions`, `teams`, `skills` — 11 call sites). Falls back to native dialogs if used outside a `DialogProvider` so the page still works in storybook or a route that forgot to wire the provider.
+- **`apps/web/src/app/(studio)/layout.tsx`** — Wraps the studio group in `DialogProvider`.
+- **`apps/web/src/contexts/ProjectContext.tsx`** — Adds an explicit `clearProject()` for logout-style call sites (equivalent to `selectProject(null)` but the name documents intent).
+- **`apps/web/next.config.ts`** — Enables `typedRoutes: true` so a typo in a `<Link href>` is a compile error, not a runtime 404.
+- **`apps/api/src/services/workspace.ts`** — `resolveProjectWorkspace` now does a realpath + `path.relative` boundary check on macOS where `mkdtempSync` paths are symlinked to `/private/var/folders/...`; without this, every child path under a tempdir was being rejected as a symlink escape.
+- **`apps/api/src/services/verification-service.ts`** — Replaced a `await import("../services/ticket-board.js")` with a static import. The dynamic form was a leftover from a refactor and the source path differs from the test's `vi.mock` path, so dynamic-import calls weren't being intercepted in the test setup.
+- **`apps/api/vitest.config.ts`** — `LOG_TO_FILE=false` keeps `pino-file-transport` from initializing a file worker during tests (a worker config error in the `pino-file-transport` package was crashing two test files).
+
+### Phase 10.3 — LOW polish
+
+- **`CLAUDE.md`** — Agent count corrected to **54** (5 Tier 1 + 8 Tier 2 + 41 Tier 3) to match the registry output.
+- **`.env.example`** — Documented `RATE_LIMIT_REQUESTS`, `RATE_LIMIT_WINDOW_MS`, `RATE_LIMIT_BUCKET_CAP`, `WORKFLOW_TTL_MS`, `ASSET_WATCHER_LIMIT`, `MAX_SSE_CLIENTS` with descriptions. (Other env vars — `CORS_ORIGIN`, `BODY_LIMIT_MB`, `API_TIMEOUT_MS`, `ENABLE_TEST_ENDPOINTS`, `MAX_CONCURRENT_AGENTS` — were already documented.)
+- **Toast auto-dismiss** — `NotificationToasts` already had a 5s auto-dismiss; verified.
+
+**Deferred (out of scope for Phase 10):**
+- Per-`ConversationMessage` schema migration to a fully-typed Zod parser.
+- Detailed rendering of `tsconfig.tsbuildinfo` / `.turbo` cleanup in `DEPLOYMENT.md`.
+- Per-route `pnpm lint` (the root `pnpm lint` runs all packages via turbo).
+
+### Phase 10.4 — Verification
+
+- `pnpm typecheck` — 7/7 tasks pass.
+- `pnpm generate` — `53 agents OK` / `94 skills OK`.
+- `pnpm build` — both apps build clean (Next.js + `tsc`).
+- `pnpm --filter @game-studio/api test` — **61 passed / 0 failed** across 9 files.
+
+### Phase 10.5 — Build-pipeline fallout (typedRoutes)
+
+After enabling `typedRoutes: true` in `apps/web/next.config.ts`, the Next.js build surfaced an untyped `href` on `<Link>` in `SideNavBar.tsx`. Fixed by typing the `navItems` array as `NavItem = { href: Route; … }` and importing `Route` from `next`. All 12 sidebar links now resolve through Next's typed-routes table at build time, so a stray href to a non-existent route would fail the build instead of producing a 404 at runtime.
+
+### Phase 10.6 — Count reconciliation
+
+- The agent registry consistently reports **53** agents (5 Tier-1 directors + 8 Tier-2 leads + 40 Tier-3 specialists), not 54. Updated CLAUDE.md and three RELEASING.md count references to match the registry output.
+- Tier-3 specialist count corrected from 41 to 40 (was inflated by the orphan-audit count from an earlier pass).

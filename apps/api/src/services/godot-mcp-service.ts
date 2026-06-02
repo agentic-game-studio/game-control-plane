@@ -12,7 +12,7 @@
  *     → Response read from MCP server stdout
  */
 
-import { spawn, execSync, ChildProcess } from "node:child_process";
+import { spawn, execSync, execFileSync, ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { accessSync, globSync, rmSync } from "node:fs";
 import type { LLMTool } from "../llm/zai-client.js";
@@ -1003,7 +1003,11 @@ export function setupGodotMCPServer(
       onProgress?.("Installing npm dependencies...");
       logger.info({ serverDir }, "Installing npm dependencies");
       try {
-        execSync("npm install", {
+        // execFileSync passes argv as a vector — no shell interpolation.
+        // `execSync` would route through a shell, which is unnecessary
+        // here and is a (small) attack-surface for any environment that
+        // can write into serverDir.
+        execFileSync("npm", ["install"], {
           cwd: serverDir,
           stdio: "pipe",
           timeout: 120000, // 2 minute timeout
@@ -1024,7 +1028,7 @@ export function setupGodotMCPServer(
       onProgress?.("Building TypeScript...");
       logger.info({ serverDir }, "Building TypeScript");
       try {
-        execSync("npm run build", {
+        execFileSync("npm", ["run", "build"], {
           cwd: serverDir,
           stdio: "pipe",
           timeout: 120000, // 2 minute timeout

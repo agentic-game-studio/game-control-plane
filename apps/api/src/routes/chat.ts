@@ -1506,7 +1506,12 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
     } as WSEvent);
 
     await saveChatState();
-    res.status(500).json({ success: false, error: error.message });
+    // Don't leak the internal error verbatim — a ZAI API key rejection
+    // surfaces "401 Unauthorized: invalid x-api-key", an internal LLM
+    // client exception surfaces a stack-trace-shaped message, etc. Send
+    // a generic "agent invocation failed" to the client and keep the
+    // full text in the message transcript + logger for debugging.
+    res.status(500).json({ success: false, error: "Agent invocation failed" });
   }
 });
 
@@ -1813,10 +1818,17 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
       const error = err as Error;
       logger.error({ event: "spawn_failed", agentRole, sessionId, error: error.message, stack: error.stack }, `Agent ${agentRole} failed: ${error.message}`);
 
+      // Sanitize the error before broadcasting over WS. The full text stays
+      // in the server log + chat transcript, but a connected UI shouldn't
+      // receive an LLM client stack trace or an internal key-rotation
+      // message. Truncate to 200 chars as a belt-and-suspenders bound.
+      const safeError = error.message.length > 200
+        ? `${error.message.slice(0, 200)}…`
+        : error.message;
       broadcast({
         type: "agent:failed",
         agentId: invocationId,
-        error: error.message,
+        error: safeError,
         sessionId: sessionId,
       } as WSEvent);
 

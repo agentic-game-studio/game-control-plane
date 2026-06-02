@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "@/hooks/useWebSocket";
+import { useDialog } from "@/hooks/useDialog";
 import type { WSEvent } from "@game-studio/types";
 
 interface GateStatus {
@@ -109,10 +110,11 @@ export default function GatesPage() {
   };
 
   useWebSocket(handleWSEvent);
+  const { alert: showAlert } = useDialog();
 
   const handleRunGate = async (gateId: string) => {
     if (!sessionId) {
-      alert("No session available. Please select a session first.");
+      await showAlert("No session available. Please select a session first.");
       return;
     }
     setRunning(gateId);
@@ -129,7 +131,7 @@ export default function GatesPage() {
       loadGates();
     } catch (error) {
       console.error("Failed to run gate:", error);
-      alert(`Failed to run gate: ${error}`);
+      await showAlert(`Failed to run gate: ${error}`);
     } finally {
       setRunning(null);
     }
