@@ -1,7 +1,7 @@
-import { createLogger } from "../../lib/logger";
 "use client";
 import { useEffect } from "react";
 import Link from "next/link";
+import { createLogger } from "../../lib/logger";
 /**
  * Studio error boundary — catches any uncaught exception in the (studio) route
  * group and renders a recovery UI instead of a blank page. Without this, a
