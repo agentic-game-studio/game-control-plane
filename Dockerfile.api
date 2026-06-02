@@ -41,8 +41,8 @@ RUN corepack enable \
     && apt-get update \
     && apt-get install -y --no-install-recommends wget ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && groupadd --system --gid 1001 nodejs \
-    && useradd --system --uid 1001 --gid nodejs --create-home --shell /bin/bash node
+    && groupadd --system --gid 1001 nodejs 2>/dev/null || true \
+    && useradd --system --uid 1001 --gid nodejs --create-home --shell /bin/bash node 2>/dev/null || true
 
 # Copy only what the runtime needs from the builder.
 COPY --from=builder --chown=node:nodejs /app/package.json /app/pnpm-lock.yaml /app/pnpm-workspace.yaml /app/turbo.json ./
