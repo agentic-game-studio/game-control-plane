@@ -25,7 +25,14 @@ RUN pnpm install --frozen-lockfile
 
 # Now copy the rest of the source and build only the API.
 COPY apps ./apps
-RUN pnpm --filter @game-studio/api... build
+
+# pnpm 10 dropped the recursive `...` filter. Run `pnpm generate` (which
+# produces the agent and skill registries used at runtime) then a plain
+# pnpm build for the api workspace package. The api's `build` script is
+# `tsc --noEmit` — type-check only, no dist output, which is fine because
+# the runtime uses tsx on source.
+RUN pnpm generate \
+    && pnpm --filter @game-studio/api build
 
 # pnpm 10's prune no longer accepts --filter. Skip the prune step;
 # the runtime image carries all workspace deps. Slight size penalty
@@ -48,7 +55,6 @@ RUN corepack enable \
 # Copy only what the runtime needs from the builder.
 COPY --from=builder --chown=node:nodejs /app/package.json /app/pnpm-lock.yaml /app/pnpm-workspace.yaml /app/turbo.json ./
 COPY --from=builder --chown=node:nodejs /app/apps/api/package.json ./apps/api/package.json
-COPY --from=builder --chown=node:nodejs /app/apps/api/dist ./apps/api/dist
 COPY --from=builder --chown=node:nodejs /app/packages ./packages
 COPY --from=builder --chown=node:nodejs /app/node_modules ./node_modules
 
