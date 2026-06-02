@@ -2,7 +2,7 @@
 
 > **NO RULES. JUST CREATE.**
 
-End-to-end AI-native game production — from a single prompt to a **playable, tested, exportable** Godot game. Not a demo chatbot: a **51-agent studio** with skills, director gates, Kanban quest tracking, autonomous loops, asset generation, and release pipelines.
+End-to-end AI-native game production — from a single prompt to a **playable, tested, exportable** Godot game. Not a demo chatbot: a **53-agent studio** with skills, director gates, Kanban quest tracking, autonomous loops, asset generation, and release pipelines.
 
 ---
 
@@ -27,7 +27,7 @@ End-to-end AI-native game production — from a single prompt to a **playable, t
 
 | Pain | Our answer |
 |------|------------|
-| Agents work in isolation | **3-tier hierarchy** — directors delegate to 39 specialists with explicit `reportsTo` and delegation maps |
+| Agents work in isolation | **3-tier hierarchy** — directors delegate to 40 specialists with explicit `reportsTo` and delegation maps |
 | Prompts drift; no accountability | **Quest Bridge** — every `Task` spawn creates a Kanban ticket; auto-verification on QA column |
 | “It compiles” ≠ shippable | **Executable QA** — Godot boot → GUT → smoke → regression baseline before tickets complete |
 | Ideas never become builds | **Autonomous loop** — GDD ingest → ticket generation → implement → verify → milestone gates → export |
@@ -44,7 +44,7 @@ Feature completeness for evaluators — each item maps to runnable code:
 | Capability | Status | Entry points |
 |------------|--------|--------------|
 | Multi-agent orchestration (LLM + tools) | ✅ | `apps/api/src/services/llm-service.ts` |
-| 51 agents, 92 skills (validated registries) | ✅ | `packages/agents/`, `packages/skills/` |
+| 53 agents, 94 skills (validated registries) | ✅ | `packages/agents/`, `packages/skills/` |
 | Producer chat + slash commands | ✅ | `apps/web/src/app/(studio)/chat/` |
 | Autonomous production loop | ✅ | `apps/api/src/routes/autonomous.ts` |
 | GDD → Kanban ticket ingest | ✅ | `apps/api/src/services/gdd-ingest-service.ts` |
@@ -106,7 +106,7 @@ cp .env.example .env
 
 ```bash
 pnpm install
-pnpm generate          # validate 51 agents + 92 skills
+pnpm generate          # validate 53 agents + 94 skills
 pnpm typecheck
 
 # API → http://localhost:3001
@@ -148,8 +148,8 @@ flowchart TB
   end
 
   subgraph Registry["Shared Packages"]
-    Agents[51 Agents]
-    Skills[92 Skills]
+    Agents[53 Agents]
+    Skills[94 Skills]
     Types[TypeScript Contracts]
   end
 
@@ -213,7 +213,7 @@ Structured for **automated repo evaluation** — typed monorepo, validated regis
 |---------|------|
 | `@game-studio/types` | Single source of truth for agents, skills, tickets, WebSocket events |
 | `@game-studio/agents` | 51 agent defs + tier mapping + delegation graph |
-| `@game-studio/skills` | 92 skills incl. 13 Godot production skills + 12 team workflows |
+| `@game-studio/skills` | 94 skills incl. 13 Godot production skills + 12 team workflows |
 | `@game-studio/api` | Express API, LLM orchestration, autonomous loop, MCP bridge |
 | `@game-studio/web` | Next.js 15 App Router studio UI |
 | `@game-studio/state` | File-based session persistence |
@@ -269,7 +269,7 @@ The **credit ledger**, **webhook notifications**, and **multi-project dashboard*
 | | Copilot / Cursor | Game Studio Control Plane |
 |--|------------------|---------------------------|
 | Unit of work | File / chat turn | **Quest ticket + milestone** |
-| Team model | Single assistant | **51-role studio hierarchy** |
+| Team model | Single assistant | **53-role studio hierarchy** |
 | Verification | User runs tests | **Automated QA + AI verifier + director gates** |
 | Output | Code snippets | **Playable game + assets + export artifact** |
 

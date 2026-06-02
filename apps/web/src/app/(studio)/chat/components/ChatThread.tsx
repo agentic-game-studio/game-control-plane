@@ -9,6 +9,7 @@ import DiffView from "./DiffView";
 import QuestionMessage from "./QuestionMessage";
 import PlanMessage from "./PlanMessage";
 import WorkflowMessage from "./WorkflowMessage";
+import { COMMANDS } from "./CommandInput";
 
 interface ChatThreadProps {
   messages: ChatMessage[];
@@ -352,7 +353,7 @@ const WelcomeMessage = memo(function WelcomeMessage({ msg }: { msg: ChatMessage 
             </div>
             <div className="mt-3 pt-2 border-t border-[#e1e1ef]">
               <span className="font-[var(--font-terminal)] text-[10px] text-[#737688]">
-                Type <code className="text-[#0055FF] font-bold">/help</code> to see all {20} commands
+                Type <code className="text-[#0055FF] font-bold">/help</code> to see all {COMMANDS.length} commands
               </span>
             </div>
           </div>

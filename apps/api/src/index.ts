@@ -192,6 +192,13 @@ app.use("/api/chat/spawn", rateLimiter);
 app.use("/api/autonomous/start", rateLimiter);
 app.use("/api/teams/run", rateLimiter);
 app.use("/api/assets/generate", rateLimiter);
+// 7C-7th: rate limit the remaining LLM-burning endpoints. /api/skills/:
+// invoke shells into the same tool loop as chat, /api/gates/:id/run
+// invokes a director agent + parses a verdict, and /api/settings/consume
+// was added in 6A. Without these, a leaked API_SECRET could drain the
+// subscription by spinning up a tight loop of skill/gate invocations.
+app.use("/api/skills/:id/invoke", rateLimiter);
+app.use("/api/gates/:gateId/run", rateLimiter);
 // Q7-6th: /api/settings/consume burns credits — with a leaked API_SECRET,
 // an attacker could drain subscription+onTop in a tight loop. Same rate
 // bucket as the other LLM-burning endpoints.

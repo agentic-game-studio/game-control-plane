@@ -12,7 +12,7 @@ interface CommandInputProps {
 const MAX_PASTED_IMAGES = 4;
 const MAX_IMAGE_BYTES = 1_000_000; // 1MB per image; matches the 5MB body limit on the API
 
-const COMMANDS = [
+export const COMMANDS = [
   { cmd: "/autonomous", desc: "Start autonomous production loop" },
   { cmd: "/spawn", desc: "Bring an agent online (manual)" },
   { cmd: "/approve", desc: "Approve last agent request" },
