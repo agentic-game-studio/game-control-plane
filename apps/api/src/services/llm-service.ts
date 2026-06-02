@@ -1234,8 +1234,44 @@ loop_offset=0
         const globalWorkspaceDir = loadConfig().WORKSPACE_DIR;
         const cwd = command === "init" ? globalWorkspaceDir : projectPath;
 
-        const shipthisBin = process.env.SHIPTHIS_BIN
-          ?? path.resolve(__dirname, "..", "..", "..", "..", "cli-main", "bin", "run.js");
+        // Validate SHIPTHIS_BIN before exec. The previous version read
+        // the env var raw and passed it to `node` via execFile — a shell-
+        // injection vector, no — but a binary-substitution attack: an
+        // attacker who controls the env (compromised docker setup, leaked
+        // .env on a shared host) could redirect every GodotCLI call at
+        // an arbitrary script. The execFile argv-array form blocks shell
+        // metacharacter abuse, but the binary path itself is still trusted
+        // to "be a ShipThis CLI". Require it to be a real file inside an
+        // expected prefix (cli-main/ in the repo, or $SHIPTHIS_BIN if it
+        // stat-resolves). This mirrors the GODOT_BIN allowlist above.
+        const defaultShipthisBin = path.resolve(__dirname, "..", "..", "..", "..", "cli-main", "bin", "run.js");
+        const candidateShipthisBin = process.env.SHIPTHIS_BIN ?? defaultShipthisBin;
+        let shipthisBin: string;
+        try {
+          const st = await fs.stat(candidateShipthisBin);
+          if (!st.isFile()) throw new Error("not a file");
+          const resolved = path.resolve(candidateShipthisBin);
+          // Allow if it's the bundled cli-main path, or if it sits
+          // under one of the trusted prefixes. A user-set SHIPTHIS_BIN
+          // pointing at /tmp/whatever.js will be rejected unless it
+          // lives under an opt-in trusted root.
+          const TRUSTED_PREFIXES = [
+            defaultShipthisBin,
+            path.resolve(loadConfig().WORKSPACE_DIR),
+            "/usr/local/bin",
+            "/opt/homebrew/bin",
+            path.join(os.homedir(), ".local", "bin"),
+          ].map((p) => path.resolve(p));
+          const trusted = TRUSTED_PREFIXES.some((prefix) =>
+            resolved === prefix || resolved.startsWith(prefix + path.sep)
+          );
+          if (!trusted) {
+            return `Error: SHIPTHIS_BIN is outside trusted prefixes: ${resolved}. Set it to a path under cli-main/, the workspace, or a system bin dir.`;
+          }
+          shipthisBin = resolved;
+        } catch (e) {
+          return `Error: SHIPTHIS_BIN is not a usable file: ${candidateShipthisBin} (${(e as Error).message})`;
+        }
 
         const args = ["local", command];
         if (command === "init" && input.name) args.push(input.name as string);
@@ -1411,8 +1447,15 @@ function matchPattern(filename: string, pattern: string): boolean {
     .replace(/\\\?/g, ".");                  // restore ? (single char)
   try {
     return new RegExp(`^${escaped}$`).test(filename);
-  } catch {
-    return false; // Invalid pattern — no match
+  } catch (e) {
+    // Most invalid patterns reach this branch because the LLM passed
+    // something like "[abc]" expecting literal bracket matching. The
+    // glob-to-regex converter above already escapes brackets, so the
+    // remaining throw is usually a catastrophic-backtrack guard or a
+    // runaway quantifier on a pathological pattern — neither is a match.
+    logger.warn({ pattern, error: (e as Error).message, event: "match_pattern_invalid" },
+      "matchPattern received a pattern that failed to compile — returning no-match");
+    return false;
   }
 }
 
@@ -1444,7 +1487,7 @@ async function grepFiles(
         if (entry.isDirectory()) {
           await searchDir(fullPath);
         } else if (entry.isFile()) {
-          if (globFilter && !matchPattern(entry.name, globFilter.replace(/^\*\./, ""))) {
+          if (globFilter && !matchPattern(entry.name, globFilter)) {
             continue;
           }
 

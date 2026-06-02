@@ -446,16 +446,51 @@ async function loadLoopState(sessionId: string): Promise<LoopState | null> {
   }
 }
 
+/** Per-session save chain. Maps sessionId → tail of the pending
+ * save promise. Each `saveLoopState` call awaits the previous tail
+ * before writing, so two writers to the same session serialize
+ * (no torn writes, no stale-writer clobbering a fresher state). */
+const saveChains = new Map<string, Promise<void>>();
+
 async function saveLoopState(state: LoopState): Promise<void> {
   const path = getLoopStatePath(state.sessionId);
-  // Atomic write: write to .tmp + rename so a crash mid-write can't
-  // leave a truncated loop-state.json that fails to parse on next read.
-  // fs.promises.writeFile uses O_CREAT|O_TRUNC; the rename is atomic
-  // on the same filesystem, which gives the same crash-safety as
-  // fsync+rename without the extra sync(2) syscall on the hot path.
-  const tmp = `${path}.tmp`;
-  await writeFileAsync(tmp, JSON.stringify(state, null, 2), "utf-8");
-  await renameAsync(tmp, path);
+  // Per-session save mutex. Without this, /stop's idle save can be
+  // overwritten by a /start / runIteration save in flight on the same
+  // sessionId — the IIFE re-saves its locally-buffered state with
+  // status="running" and currentIteration=N+1, undoing the stop. The
+  // chain is "last write wins" by file mtime, so /stop's intent is
+  // silently dropped. The mutex serializes all writes to the same
+  // session's state file, so the second writer sees the first writer's
+  // state and can react (e.g. skip the save if the iteration is stale).
+  const prev = saveChains.get(state.sessionId) ?? Promise.resolve();
+  const next = prev.then(async () => {
+    // Atomic write: write to .tmp + rename so a crash mid-write can't
+    // leave a truncated loop-state.json that fails to parse on next read.
+    // fs.promises.writeFile uses O_CREAT|O_TRUNC; the rename is atomic
+    // on the same filesystem, which gives the same crash-safety as
+    // fsync+rename without the extra sync(2) syscall on the hot path.
+    const tmp = `${path}.tmp`;
+    await writeFileAsync(tmp, JSON.stringify(state, null, 2), "utf-8");
+    await renameAsync(tmp, path);
+  }).catch((err) => {
+    // Don't let a single failed save poison the chain for subsequent
+    // writers — log and continue. The next save will retry from a
+    // clean tail.
+    logger.error({ err: (err as Error).message, sessionId: state.sessionId, event: "loop_state_save_failed" },
+      "Loop state save failed");
+  });
+  // Update the tail to the new promise so subsequent writers wait
+  // for this one to complete. Catch to avoid unhandled rejection
+  // surfacing as a process-level crash.
+  saveChains.set(state.sessionId, next.catch(() => {}));
+  // GC: when the chain is idle (no pending writers), drop the entry
+  // so an unbounded set of historical sessionIds doesn't grow.
+  next.finally(() => {
+    if (saveChains.get(state.sessionId) === next.catch(() => {})) {
+      saveChains.delete(state.sessionId);
+    }
+  });
+  await next;
 }
 
 async function loadHistory(): Promise<LoopRunRecord[]> {
@@ -1054,6 +1089,24 @@ If the failure is an infinite loop or hang (timeout), suggest a workaround.`,
   state.currentIteration++;
   state.currentTicketId = undefined;
   state.currentAgentRole = undefined;
+  // Reload from disk before saving so a concurrent /stop's idle save
+  // (or a /start that picked up while we were iterating) isn't clobbered
+  // by our locally-buffered "running" state. If the disk state shows a
+  // status that the iteration shouldn't be in (idle / error / done), or
+  // the iteration counter has moved on, merge instead of overwriting.
+  const onDisk = await loadLoopState(state.sessionId);
+  if (onDisk && onDisk.status !== "running") {
+    logger.info({ sessionId: state.sessionId, diskStatus: onDisk.status, iter: state.currentIteration, event: "iteration_save_skipped_stopped" },
+      "Skipping iteration save — loop was stopped or finished while this iteration was running");
+    return { ticket: activeTicket, done: true };
+  }
+  if (onDisk && onDisk.currentIteration > state.currentIteration) {
+    // Another writer (a concurrent iteration or a manually edited state)
+    // has a higher iteration count. Don't regress.
+    logger.warn({ sessionId: state.sessionId, diskIter: onDisk.currentIteration, ourIter: state.currentIteration, event: "iteration_save_skipped_stale" },
+      "Skipping iteration save — disk state has a higher iteration count");
+    return { ticket: activeTicket, done: false };
+  }
   await saveLoopState(state);
 
   // Check if we've hit max iterations

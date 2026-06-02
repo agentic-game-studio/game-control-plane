@@ -295,6 +295,13 @@ export { chatStoreReady };
 
 /** Per-session lock to prevent concurrent agent responses for the same session */
 const sessionsResponding = new Set<string>();
+/** Tracks /spawn calls in progress for a given sessionId. The duplicate
+ * check at the start of /spawn reads `chatStore.sessions[sessionId]` and
+ * is not atomic with the assignment of the new session object — two
+ * concurrent /spawn requests for the same role can both pass the check
+ * and the second will silently overwrite the first. This set serializes
+ * the validation phase (sync check + sync add, no awaits between). */
+const pendingSpawns = new Set<string>();
 // Defensive upper bound. The lock should only ever hold sessionIds that
 // are currently mid-LLM-call, so the set should stay tiny. If a request
 // error path ever leaks a sessionId without `delete`, the set can grow
@@ -1210,7 +1217,11 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
   // either added the id, then both would proceed to call the LLM
   // concurrently. By installing the lock right after the check and
   // before any await, the second request will see the id present
-  // and be rejected.
+  // and be rejected. The lock must be released on every async exit
+  // path — including the `await saveChatState()` at line ~1272 that
+  // runs before the LLM-call try block — or a disk-full or quota
+  // error will leave the session permanently locked.
+  let lockHeld = false;
   if (body.type !== "system" && body.type !== "progress" && body.type !== "producer_update") {
     if (sessionsResponding.has(id)) {
       res.status(409).json({ success: false, error: "Agent is already responding — please wait" });
@@ -1225,6 +1236,7 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
       return;
     }
     sessionsResponding.add(id);
+    lockHeld = true;
   }
 
   const userMessageId = `msg-${crypto.randomUUID().slice(0, 8)}`;
@@ -1269,6 +1281,26 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
 
   await saveChatState();
 
+  // The lock is now held; every path below must release it. The two
+  // pre-existing cleanup points (success at 1502, catch at 1510) only
+  // cover the LLM-call branch. A throw from the `saveChatState` call
+  // above, or from any of the awaits before we reach the LLM try block,
+  // would leave `sessionsResponding` holding `id` and lock the session
+  // permanently. Install a `req.on("close", ...)` handler so a client
+  // disconnect also fires the cleanup.
+  const releaseLock = () => {
+    if (lockHeld) {
+      sessionsResponding.delete(id);
+      lockHeld = false;
+    }
+  };
+  const clientDisconnectHandler = () => {
+    logger.info({ sessionId: id, event: "chat_client_disconnected_pre_llm" },
+      "Client disconnected before LLM call — releasing per-session lock");
+    releaseLock();
+  };
+  req.on("close", clientDisconnectHandler);
+
   // Note: We do NOT broadcast the user message here because the frontend
   // already adds it optimistically. Broadcasting would create a duplicate.
 
@@ -1307,7 +1339,8 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
   try {
     await saveChatState();
   } catch (saveErr) {
-    sessionsResponding.delete(id);
+    req.off("close", clientDisconnectHandler);
+    releaseLock();
     throw saveErr;
   }
 
@@ -1495,7 +1528,8 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
     } as WSEvent);
 
     await saveChatState();
-    sessionsResponding.delete(id);
+    req.off("close", clientDisconnectHandler);
+    releaseLock();
     sessionAbortControllers.delete(id);
     res.status(201).json({ success: true, data: { userMessage, assistantMessage } });
   } catch (err: unknown) {
@@ -1503,7 +1537,8 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
 
     // R1: Clear heartbeat on error to prevent permanent timer leak
     clearInterval(heartbeat);
-    sessionsResponding.delete(id);
+    req.off("close", clientDisconnectHandler);
+    releaseLock();
     sessionAbortControllers.delete(id);
 
     // Remove the progress placeholder before adding the error message
@@ -1563,11 +1598,20 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
   const now = new Date().toISOString();
   const agentRole = role as AgentRole;
 
-  // R2: Return 409 if session ID already exists
-  if (chatStore.sessions[sessionId]) {
-    res.status(409).json({ success: false, error: `Session ${sessionId} already exists` });
+  // R2 + spawn TOCTOU: Return 409 if session ID is already being spawned
+  // or already exists. The check + add below is sync (no await between),
+  // so two concurrent /spawn calls for the same role can't both pass.
+  if (pendingSpawns.has(sessionId) || chatStore.sessions[sessionId]) {
+    res.status(409).json({ success: false, error: `Session ${sessionId} already exists or is being spawned` });
     return;
   }
+  pendingSpawns.add(sessionId);
+  // Track whether the lock made it to the response. The body has a
+  // single success-path return at the very end that sets this; an
+  // unexpected throw in the middle would otherwise leave the lock
+  // held until the process restarts. The finally always releases.
+  let spawnResponded = false;
+  try {
 
   // Start Godot MCP service for godot projects (if not already running)
   if (project.engine === "godot") {
@@ -1884,6 +1928,17 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
     success: spawnStatus !== "failed",
     data: { invocationId, role, sessionId, status: spawnStatus },
   });
+  spawnResponded = true;
+  } finally {
+    if (!spawnResponded) {
+      pendingSpawns.delete(sessionId);
+      // Best-effort 500 — if response was already sent, the socket
+      // will close and Express will log the unhandled error.
+      if (!res.headersSent) {
+        res.status(500).json({ success: false, error: "Spawn failed unexpectedly" });
+      }
+    }
+  }
 });
 
 // POST /api/chat/approve — Approve agent action

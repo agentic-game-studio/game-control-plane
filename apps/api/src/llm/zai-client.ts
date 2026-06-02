@@ -102,6 +102,16 @@ const MAX_TRACKED_MODELS = 32;
 
 const modelSemaphores = new Map<string, Semaphore>();
 
+/** Dedicated semaphore for in-loop summarization calls. Separate from
+ * the per-model semaphores so a tier-3 (haiku) agent can summarize
+ * without deadlocking: the main call already holds the
+ * `glm-4.7-flash` permit (limit 1), and a summary call using the
+ * same key would wait on the main release — but the main call is
+ * awaiting the summary. A separate key avoids the self-reference.
+ * Generous limit (8) since summaries are cheap, short, and fire
+ * inline with the agent's main turn. */
+const SUMMARY_SEMAPHORE = new Semaphore(8);
+
 function getSemaphore(model: string): Semaphore {
   const existing = modelSemaphores.get(model);
   if (existing) {
@@ -384,9 +394,8 @@ Respond ONLY with the summary, nothing else. Max 2000 characters.`;
   const config = loadConfig();
   const summaryModel = getModelForTier("haiku"); // glm-4.7-flash — cheap summarization
   const summaryProvider = resolveProviderConfig(config, summaryModel);
-  const summarySemaphore = getSemaphore(summaryModel);
   try {
-    await summarySemaphore.acquire();
+    await SUMMARY_SEMAPHORE.acquire();
     let summaryResponse: Response;
     try {
       summaryResponse = await fetchWithRetry(
@@ -402,7 +411,7 @@ Respond ONLY with the summary, nothing else. Max 2000 characters.`;
         }
       );
     } finally {
-      summarySemaphore.release();
+      SUMMARY_SEMAPHORE.release();
     }
 
     if (summaryResponse.ok) {
@@ -523,6 +532,20 @@ export async function callZAI(request: LLMRequest): Promise<LLMResponse> {
           role: m.role as "user" | "assistant",
           content: m.content,
         };
+      }
+      // String content. If the message also carries tool_calls, fold the
+      // tool_use blocks into the content array in the API-required order:
+      // text blocks first, then tool_use. The Anthropic API rejects
+      // tool_use blocks that appear before a final text block in the
+      // assistant turn, and the LLM may emit them interleaved.
+      if (m.role === "assistant" && m.tool_calls && m.tool_calls.length > 0) {
+        const blocks: Array<TextContent | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> }> = [];
+        const text = typeof m.content === "string" ? m.content : "";
+        if (text) blocks.push({ type: "text", text });
+        for (const tc of m.tool_calls) {
+          blocks.push({ type: "tool_use", id: tc.id, name: tc.name, input: tc.input });
+        }
+        return { role: "assistant" as const, content: blocks };
       }
       return {
         role: m.role as "user" | "assistant",
