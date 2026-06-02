@@ -55,5 +55,7 @@ docs
 **/*.md
 !packages/types/src/**/*.md
 
-# Web app isn't needed inside the API image
+# Web app isn't needed inside the API image, but pnpm needs its
+# package.json for workspace resolution
 apps/web
+!apps/web/package.json
