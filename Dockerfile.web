@@ -52,7 +52,11 @@ ENV HOSTNAME=0.0.0.0
 # crashed at first request when it tried to open a write fd.
 COPY --from=build --chown=node:node /app/apps ./apps
 COPY --from=build --chown=node:node /app/packages ./packages
-COPY --from=build --chown=node:node /app/package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json ./
+# All sources as absolute paths. Relative paths after `--from=build`
+# resolve against the build stage's WORKDIR, which BuildKit does not
+# reliably carry across `FROM <prev> AS <new>` boundaries. Absolute
+# paths sidestep the lookup and match what the runtime stage expects.
+COPY --from=build --chown=node:node /app/package.json /app/pnpm-lock.yaml /app/pnpm-workspace.yaml /app/turbo.json ./
 
 # Re-install in production mode (drops devDeps) using the cached store.
 RUN corepack enable \
