@@ -6,6 +6,7 @@ import { existsSync, mkdirSync } from "fs";
 import { promises as fs } from "fs";
 import { join, resolve, relative, sep } from "path";
 import { loadConfig } from "../config.js";
+import { logger } from "../utils/logger.js";
 
 /** Reject user-controlled path segments that could escape the workspace.
  * Whitelist: letters, digits, dash, underscore, dot. Anything else
@@ -75,8 +76,24 @@ export async function externalizeProductionNote(
   // dependency on each other. Use fs.appendFile (async) rather than
   // appendFileSync so the event loop is not blocked on disk I/O during
   // a long autonomous production note dump.
-  await Promise.all([
+  //
+  // Q9-12: use allSettled so one disk failure (EACCES on the decisions
+  // log, ENOSPC on the wiki) doesn't take down the other. With Promise.all
+  // a single rejection short-circuits and the second file is never written
+  // — a half-logged note is worse than a logged failure.
+  const results = await Promise.allSettled([
     fs.appendFile(decisionsPath, line, "utf-8"),
     fs.appendFile(wikiPath, line, "utf-8"),
   ]);
+  // Surface non-fatal write failures so an operator can investigate
+  // without the error being silent. Both files are best-effort, so
+  // we don't throw — we just log the first rejection.
+  for (const result of results) {
+    if (result.status === "rejected") {
+      logger.warn(
+        { err: result.reason instanceof Error ? result.reason.message : String(result.reason) },
+        "wiki-memory appendFile failed — note partially persisted",
+      );
+    }
+  }
 }

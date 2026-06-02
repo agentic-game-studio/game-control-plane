@@ -4,8 +4,18 @@
  * SSRF protection: validates the URL before issuing a fetch so a malicious
  * settings value can't probe internal services (cloud metadata endpoints,
  * localhost-bound admin UIs, link-local addresses).
+ *
+ * Two-stage check:
+ *  1. `validateWebhookUrl` — sync. Rejects bad schemes and IP literals
+ *     that obviously point at private/loopback space.
+ *  2. `resolveAndValidateWebhookTarget` — async. Resolves the hostname via
+ *     DNS and re-checks every returned address. Defends against the
+ *     `evil.com → 127.0.0.1` DNS-rebinding flavor of SSRF: a registered
+ *     domain that resolves to a private IP would pass stage 1 (the hostname
+ *     literal is fine) but fail stage 2.
  */
 
+import { lookup } from "node:dns/promises";
 import { readData } from "./data-store.js";
 import type { SettingsConfig } from "@game-studio/types";
 import { logger } from "../utils/logger.js";
@@ -60,6 +70,39 @@ export function validateWebhookUrl(raw: string): URL | null {
   return parsed;
 }
 
+/**
+ * Resolve the URL's hostname via DNS and re-check the resolved IPs against
+ * the blocklist. Returns true if every resolved address is safe to fetch.
+ *
+ * Why this is separate from `validateWebhookUrl`: tests pin the sync
+ * accept/reject matrix without a real DNS resolver, and the URL-literal
+ * check still catches the common abuses (raw IPs, localhost). DNS
+ * resolution catches the harder case: an attacker who controls a registered
+ * domain and points it at `169.254.169.254` (or `127.0.0.1`, or any RFC1918
+ * range).
+ *
+ * Tradeoff: a malicious DNS server can rebind between this lookup and the
+ * actual fetch (DNS rebinding). True hardening requires pinning the
+ * resolved IP and dialing it directly with a Host header. For a webhook
+ * sender that fires a single short-lived request, the rebind window is
+ * narrow and this check raises the bar substantially.
+ */
+export async function resolveAndValidateWebhookTarget(parsed: URL): Promise<boolean> {
+  try {
+    const results = await lookup(parsed.hostname, { all: true });
+    for (const { address } of results) {
+      if (isBlockedAddress(address)) return false;
+    }
+    return true;
+  } catch {
+    // DNS failure — refuse to send. An NXDOMAIN or SERVFAIL means we
+    // can't verify the target, and an attacker who controls the DNS path
+    // could exploit the difference between our resolver and Node's
+    // fetch resolver. Fail closed.
+    return false;
+  }
+}
+
 export async function fireWebhook(event: string, payload: Record<string, unknown>): Promise<void> {
   let webhookUrl: string | undefined;
   try {
@@ -76,6 +119,17 @@ export async function fireWebhook(event: string, payload: Record<string, unknown
     logger.warn(
       { event, webhookUrl, event_type: "webhook_rejected" },
       "Webhook URL rejected by SSRF guard (must be http(s) and not point at private/loopback addresses)",
+    );
+    return;
+  }
+
+  // Stage 2: resolve hostname and ensure no returned IP is in a blocked
+  // range. Catches the `evil.com → 127.0.0.1` flavor that stage 1 misses.
+  const dnsSafe = await resolveAndValidateWebhookTarget(parsed);
+  if (!dnsSafe) {
+    logger.warn(
+      { event, webhookUrl, hostname: parsed.hostname, event_type: "webhook_rejected_dns" },
+      "Webhook URL rejected by SSRF guard (hostname resolves to private/loopback IP)",
     );
     return;
   }

@@ -51,14 +51,30 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
       } catch { /* localStorage unavailable */ }
     } catch (err) {
       console.error("Failed to fetch projects:", err);
-      setError(err instanceof Error ? err.message : "Failed to load projects");
-      // Fall back to cached projects on error so the UI stays usable
-      // through a brief API outage. Empty array if nothing cached.
+      // Q9-14: fall back to cached projects first, then only surface the
+      // error banner if cache is also empty. The previous order set the
+      // banner unconditionally on API failure, which confuses offline
+      // reloads — the user sees a red error but the project list still
+      // renders fine from cache.
+      let cacheHit = false;
       try {
         const cached = localStorage.getItem(CACHE_KEY);
-        if (cached) setProjects(JSON.parse(cached) as Project[]);
-        else setProjects([]);
-      } catch { setProjects([]); }
+        if (cached) {
+          setProjects(JSON.parse(cached) as Project[]);
+          cacheHit = true;
+        } else {
+          setProjects([]);
+        }
+      } catch {
+        setProjects([]);
+      }
+      if (cacheHit) {
+        // API failed but cache served us. Don't show a banner — the UI
+        // is usable. Clear any prior error.
+        setError(null);
+      } else {
+        setError(err instanceof Error ? err.message : "Failed to load projects");
+      }
     } finally {
       setLoading(false);
     }

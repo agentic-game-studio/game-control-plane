@@ -204,7 +204,7 @@ async function getBoard(projectId?: string | null): Promise<TicketsBoard> {
   }
 }
 
-function findTicketInBoard(board: TicketsBoard, ticketId: string): { col: number; idx: number; ticket: Ticket } | null {
+export function findTicketInBoard(board: TicketsBoard, ticketId: string): { col: number; idx: number; ticket: Ticket } | null {
   for (let c = 0; c < board.columns.length; c++) {
     for (let i = 0; i < board.columns[c].tickets.length; i++) {
       if (board.columns[c].tickets[i].id === ticketId) {
@@ -388,6 +388,24 @@ export async function createFixTicket(
 // a few seconds collapses the read storm on the hot moveQuestTicket path.
 const TICKET_PROJECT_CACHE_TTL_MS = 30_000;
 const ticketProjectCache = new Map<string, { value: string | null; expiresAt: number }>();
+
+/**
+ * Drop cached project lookups for `projectId`. Called from the dashboard
+ * DELETE handler so stale cache entries don't route fresh lookups for
+ * recycled ticket ids back to a project that no longer exists.
+ *
+ * Q9-8: without this, a project deletion would leave the in-memory cache
+ * pointing ticketIds at the just-removed project until the 30s TTL
+ * expired — moveQuestTicket calls in that window would write to the
+ * vanished project's board (a no-op at best, a confused error at worst).
+ */
+export function clearTicketProjectCacheForProject(projectId: string): void {
+  for (const [ticketId, entry] of ticketProjectCache) {
+    if (entry.value === projectId) {
+      ticketProjectCache.delete(ticketId);
+    }
+  }
+}
 
 async function resolveProjectIdForTicket(ticketId: string): Promise<string | null> {
   const cached = ticketProjectCache.get(ticketId);

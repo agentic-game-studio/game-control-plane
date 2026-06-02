@@ -19,6 +19,7 @@ import { unwatchProjectAssets } from "./assets.js";
 import { detectEngineFromWorkspace } from "../services/llm-service.js";
 import { resolveProjectWorkspace, validateWorkspacePath } from "../utils/workspace.js";
 import { getTicketsBoardFile, writeTicketsBoard } from "../services/ticket-board.js";
+import { clearTicketProjectCacheForProject } from "../services/quest-bridge.js";
 import { loadConfig } from "../config.js";
 import path from "node:path";
 
@@ -604,6 +605,7 @@ dashboardRouter.delete("/projects/:id", async (req: Request, res: Response) => {
       Promise.resolve(dropProjectStore(projectIdStr)),
       Promise.resolve(unwatchProjectAssets(projectIdStr)),
       Promise.resolve(clearProjectProducerSummary(projectIdStr)),
+      Promise.resolve(clearTicketProjectCacheForProject(projectIdStr)),
       deleteData(ticketsFile).catch(() => {}),
     ]);
 

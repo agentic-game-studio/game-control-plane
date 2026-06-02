@@ -31,24 +31,44 @@ export function useAssets(projectId?: string) {
   const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const lastProjectId = useRef<string | undefined>(projectId);
   const mountedRef = useRef(true);
+  // Q9-6: single-flight de-dup. Two consumers (assets page + Producer
+  // chat) can mount the hook in the same render and fire a parallel
+  // GET each. The second call wastes a round-trip and worsens the
+  // "loading" flicker. We coalesce by remembering the in-flight promise
+  // keyed by projectId — subsequent callers await the same promise.
+  const inflightRef = useRef<{ key: string; promise: Promise<void> } | null>(null);
 
   const fetchAssets = useCallback(async () => {
-    try {
-      const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
-      const result = await apiFetch<AssetsData>(`/api/assets${qs}`);
-      if (!mountedRef.current) return;
-      setData(result);
-      setError(null);
-    } catch (err) {
-      console.error("Failed to fetch assets:", err);
-      if (!mountedRef.current) return;
-      setError(err instanceof Error ? err.message : "Failed to load assets");
-      setData(DEFAULT_ASSETS);
-    } finally {
-      if (mountedRef.current) {
-        setLoading(false);
-      }
+    const key = projectId ?? "";
+    if (inflightRef.current && inflightRef.current.key === key) {
+      return inflightRef.current.promise;
     }
+    const promise = (async () => {
+      try {
+        const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+        const result = await apiFetch<AssetsData>(`/api/assets${qs}`);
+        if (!mountedRef.current) return;
+        setData(result);
+        setError(null);
+      } catch (err) {
+        console.error("Failed to fetch assets:", err);
+        if (!mountedRef.current) return;
+        setError(err instanceof Error ? err.message : "Failed to load assets");
+        setData(DEFAULT_ASSETS);
+      } finally {
+        if (mountedRef.current) {
+          setLoading(false);
+        }
+        // Clear the inflight ref only if it still matches this run —
+        // a key change mid-flight would have already installed a new
+        // entry that we mustn't blow away.
+        if (inflightRef.current?.key === key) {
+          inflightRef.current = null;
+        }
+      }
+    })();
+    inflightRef.current = { key, promise };
+    return promise;
   }, [projectId]);
 
   useEffect(() => {

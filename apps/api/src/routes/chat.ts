@@ -1052,6 +1052,11 @@ Max 4000 characters. Respond ONLY with the summary.`;
     } else {
       summaryHeaders["x-api-key"] = summaryApiKey;
     }
+    // Q9-10: cap the summary LLM call. Without a timeout, a hung model
+    // server would block the /compact request indefinitely — the user
+    // has no abort path, and the connection stays open. 60s is generous
+    // for a 2048-token summary on haiku but tight enough that a stuck
+    // request returns 500 in operator-visible time.
     const summaryResponse = await fetch(`${summaryBaseUrl}/v1/messages`, {
       method: "POST",
       headers: summaryHeaders,
@@ -1060,6 +1065,7 @@ Max 4000 characters. Respond ONLY with the summary.`;
         max_tokens: 2048,
         messages: [{ role: "user", content: summaryPrompt }],
       }),
+      signal: AbortSignal.timeout(60_000),
     });
 
     let summaryText = "";

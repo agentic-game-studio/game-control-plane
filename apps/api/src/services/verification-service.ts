@@ -6,7 +6,7 @@
  */
 
 import { invokeAgent } from "./llm-service.js";
-import { moveQuestTicket, createFixTicket } from "./quest-bridge.js";
+import { moveQuestTicket, createFixTicket, findTicketInBoard } from "./quest-bridge.js";
 import { broadcastEvent } from "./data-store.js";
 import { updateTicketsBoard, readTicketsBoard } from "./ticket-board.js";
 import type { Ticket, AgentRole, WSEvent } from "@game-studio/types";
@@ -136,11 +136,81 @@ export async function verifyTicket(
       `Ticket ${ticket.id} verification: ${verdict}`,
     );
 
-    // Move ticket based on verdict (pass knownProjectId to skip resolver N+1)
-    if (passed) {
-      await moveQuestTicket(ticket.id, "completed", ticket.assignee, ticket.projectId);
+    // Move ticket based on verdict, atomically resetting the failure
+    // counter on PASS in the same board-mutation call (Q9-13). The
+    // previous split was: moveQuestTicket, then a separate
+    // updateTicketsBoard to reset the counter. The two operations ran
+    // under separate locks, so a concurrent verify-error could increment
+    // the counter between them, then the reset would clobber it back to
+    // 0 — the ticket would then be "completed" with a stale counter that
+    // didn't reflect the most recent failure.
+    //
+    // Doing both in one updateTicketsBoard call keeps the move, the
+    // counter reset, and the test-evidence write under a single lock.
+    if (ticket.projectId) {
+      const targetStatus: "completed" | "available" = passed ? "completed" : "available";
+      const targetAssignee = ticket.assignee;
+      // Capture the source column id *before* the mutation runs so the
+      // broadcast event can carry the actual fromColumn. Without this
+      // snapshot, the updater mutates the board and the broadcast can't
+      // report the correct source — produces a self-loop animation in
+      // the UI (fromColumn === toColumn).
+      let fromColumnId: string | null = null;
+      const updatedBoard = await updateTicketsBoard(ticket.projectId, (board) => {
+        const found = findTicketInBoard(board, ticket.id);
+        if (!found) return board;
+        const { col: fromColIdx, idx, ticket: t } = found;
+        // Move the ticket.
+        fromColumnId = board.columns[fromColIdx].id;
+        const fromColumn = board.columns[fromColIdx];
+        t.status = targetStatus;
+        t.updatedAt = new Date().toISOString();
+        if (targetAssignee !== undefined) t.assignee = targetAssignee;
+        t.testEvidence = {
+          ...t.testEvidence,
+          llmVerification: { verdict, verifier, at: new Date().toISOString() },
+        };
+        if (passed) {
+          // Reset the per-ticket failure counter on a successful verify so
+          // the cap counts *consecutive* errors (as documented at
+          // MAX_VERIFY_FAILURES) rather than cumulative errors across the
+          // ticket's lifetime.
+          t.consecutiveFailures = 0;
+          t.lastError = undefined;
+        }
+        const targetCol = board.columns.find((c) => c.id === targetStatus);
+        if (targetCol && targetCol.id !== fromColumn.id) {
+          fromColumn.tickets.splice(idx, 1);
+          targetCol.tickets.push(t);
+        }
+        return board;
+      });
+
+      // Broadcast the move (mirrors moveQuestTicket's broadcast) so the UI
+      // animates the column change. Use the updated board's view of the
+      // ticket (now with refreshed status + reset counter) so consumers
+      // see consistent state.
+      const found = findTicketInBoard(updatedBoard, ticket.id);
+      if (found) {
+        broadcastEvent({
+          type: "ticket:moved",
+          ticket: found.ticket,
+          fromColumn: fromColumnId ?? found.ticket.status,
+          toColumn: targetStatus,
+          projectId: ticket.projectId,
+        } as WSEvent);
+      }
     } else {
-      await moveQuestTicket(ticket.id, "available", ticket.assignee, ticket.projectId);
+      // No projectId — fall back to the legacy path. The old code could
+      // move a ticket with no projectId, so we keep that behavior.
+      if (passed) {
+        await moveQuestTicket(ticket.id, "completed", ticket.assignee);
+      } else {
+        await moveQuestTicket(ticket.id, "available", ticket.assignee);
+      }
+    }
+
+    if (!passed) {
       if (ticket.sessionId && verdict !== "PASS") {
         await createFixTicket(
           ticket.sessionId,
@@ -152,29 +222,6 @@ export async function verifyTicket(
           logger.warn({ ticketId: ticket.id, error: err instanceof Error ? err.message : String(err) }, "createFixTicket failed");
         });
       }
-    }
-
-    if (ticket.projectId) {
-      await updateTicketsBoard(ticket.projectId, (board) => {
-        for (const col of board.columns) {
-          const t = col.tickets.find((x) => x.id === ticket.id);
-          if (t) {
-            t.testEvidence = {
-              ...t.testEvidence,
-              llmVerification: { verdict, verifier, at: new Date().toISOString() },
-            };
-            if (passed) {
-              // Reset the per-ticket failure counter on a successful verify so
-              // the cap counts *consecutive* errors (as documented at
-              // MAX_VERIFY_FAILURES) rather than cumulative errors across the
-              // ticket's lifetime.
-              t.consecutiveFailures = 0;
-              t.lastError = undefined;
-            }
-          }
-        }
-        return board;
-      });
     }
 
     broadcastEvent({

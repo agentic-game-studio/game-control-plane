@@ -241,7 +241,15 @@ app.get("/health", (_req, res) => {
 // config so a deployment with higher headroom can raise it without a
 // code change.
 app.get("/api/sessions/:sessionId/stream", (req, res) => {
-  if (sseClients.size >= loadConfig().MAX_SSE_CLIENTS) {
+  // Q9-9: TOCTOU guard. In current Node semantics there is no `await`
+  // between the size check and the `sseClients.add()` call, so they run
+  // in a single synchronous turn — two concurrent requests cannot
+  // observe the absent slot and both add. However, a future refactor
+  // that inserts an `await` (e.g. async auth) would silently break the
+  // check. We commit-and-verify: add first, then if the count is over
+  // cap, remove and reject. This stays atomic under any future yield.
+  const maxClients = loadConfig().MAX_SSE_CLIENTS;
+  if (sseClients.size >= maxClients) {
     res.status(503).json({ success: false, error: "Too many SSE connections — try again later" });
     return;
   }
@@ -255,6 +263,16 @@ app.get("/api/sessions/:sessionId/stream", (req, res) => {
 
   const client = { id: clientId, sessionId, send: (data: string) => { res.write(`data: ${data}\n\n`); } };
   sseClients.add(client);
+
+  // Defensive re-check: if we somehow ended up over the cap (would only
+  // happen if a future refactor yielded between the check and add),
+  // remove this client and reject. Better to reject a borderline client
+  // than to silently exceed the configured cap.
+  if (sseClients.size > maxClients) {
+    sseClients.delete(client);
+    res.status(503).json({ success: false, error: "Too many SSE connections — try again later" });
+    return;
+  }
 
   // R8: Send heartbeat comment every 15 seconds to keep connection alive
   const SSE_HEARTBEAT_MS = 15_000;

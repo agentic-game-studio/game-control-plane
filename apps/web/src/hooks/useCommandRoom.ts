@@ -802,6 +802,25 @@ export function useCommandRoom() {
   const [compactingSessionId, setCompactingSessionId] = useState<string | null>(null);
   const [activityFeed, setActivityFeed] = useState<ActivityItem[]>([]);
   const [toastNotifications, setToastNotifications] = useState<ActivityItem[]>([]);
+
+  // Q9-11: surface console.error paths to the user. Many error handlers
+  // logged to console but the UI never saw them — operators staring at a
+  // clean screen with no idea their API call failed. This helper pushes
+  // a sticky toast so a critical error stays visible until dismissed.
+  const pushToast = useCallback(
+    (kind: ActivityItem["kind"], title: string, detail: string) => {
+      const entry: ActivityItem = {
+        id: uid(),
+        kind,
+        title,
+        detail,
+        timestamp: timestamp(),
+      };
+      setActivityFeed((prev) => [entry, ...prev].slice(0, 24));
+      setToastNotifications((prev) => [entry, ...prev].slice(0, 4));
+    },
+    [],
+  );
   const lastSpawnedRef = useRef<string | null>(null);
   const activityLogRef = useRef<string[]>([]);
   const addSessionMessageRef = useRef<(role: string, msg: Omit<ChatMessage, "id" | "timestamp">) => void | undefined>(undefined);
@@ -1517,6 +1536,13 @@ export function useCommandRoom() {
       body: JSON.stringify({ invocationId: role }),
     }).catch((error) => {
       console.error("Failed to approve agent via API:", error);
+      // Q9-11: surface to user. Approval is a high-stakes action; a silent
+      // failure would leave them wondering why the agent isn't progressing.
+      pushToast(
+        "failed",
+        "Approval failed",
+        error instanceof Error ? error.message : "Unknown error",
+      );
     });
 
     // Now send a message to the agent session to continue
@@ -1648,6 +1674,15 @@ export function useCommandRoom() {
             // Silently ignore if session already gone
             if (err instanceof Error && err.message.includes("Session not found")) return;
             console.error("Failed to clear session:", err);
+            // Q9-11: surface non-stale-clear failures. "Session not found"
+            // is the expected race (cleared between fetch and delete), but
+            // any other error means the backend rejected our request and
+            // the session will reappear on refresh.
+            pushToast(
+              "failed",
+              "Clear session failed",
+              err instanceof Error ? err.message : "Unknown error",
+            );
           });
 
           setAllSessions((prev) => {
@@ -2259,6 +2294,14 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
       // Silently ignore if session already gone — stale cache or already closed
       if (err instanceof Error && err.message.includes("Session not found")) return;
       console.error("Failed to delete session:", err);
+      // Q9-11: surface the non-stale-delete failure. Closing a tab while
+      // the delete is in flight is fine; a backend rejection means the
+      // session is still on disk and will resurface on next refresh.
+      pushToast(
+        "failed",
+        "Delete session failed",
+        err instanceof Error ? err.message : "Unknown error",
+      );
     });
     setAllSessions((prev) => {
       const next = new Map(prev);
@@ -2297,6 +2340,14 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
         return { success: true, summary: "Already closed" };
       }
       console.error("Failed to close consultation:", err);
+      // Q9-11: surface — the caller (button onClick) propagates this as
+      // a thrown error with no UI feedback. Toast so the user knows the
+      // close didn't actually happen.
+      pushToast(
+        "failed",
+        "Close consultation failed",
+        err instanceof Error ? err.message : "Unknown error",
+      );
       throw err;
     }
   }, []);

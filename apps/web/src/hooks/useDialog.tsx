@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useCallback, useContext, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useMemo, useRef, useState } from "react";
 
 /**
  * Promise-based dialog API.
@@ -12,6 +12,11 @@ import { createContext, useCallback, useContext, useMemo, useState } from "react
  * functions. Components call them like the native versions, but the
  * UI is consistent with the rest of the app and respects focus +
  * keyboard interaction.
+ *
+ * Concurrent calls are queued (Q9-7): if two components call confirm()
+ * back-to-back, the second is shown only after the first resolves.
+ * Previously the second call's `setCurrent` overwrote `current`,
+ * stranding the first call's promise (it never resolved).
  *
  * Usage:
  *   const { confirm, alert } = useDialog();
@@ -32,20 +37,41 @@ const DialogContext = createContext<DialogContextValue | null>(null);
 
 export function DialogProvider({ children }: { children: React.ReactNode }) {
   const [current, setCurrent] = useState<DialogRequest | null>(null);
+  // Pending dialogs. Each `confirm()`/`alert()` call pushes here and the
+  // close handler drains FIFO. A ref (not state) so the enqueue path
+  // doesn't have to wait for a re-render to see the latest queue.
+  const queueRef = useRef<DialogRequest[]>([]);
+
+  const enqueue = useCallback((req: DialogRequest) => {
+    // Use a functional updater so two synchronous enqueues both observe
+    // the latest `current` — without this, two calls in the same tick
+    // would both see `current === null` and the second would overwrite
+    // the first.
+    setCurrent((prev) => {
+      if (prev) {
+        queueRef.current.push(req);
+        return prev;
+      }
+      return req;
+    });
+  }, []);
 
   const confirm = useCallback((message: string) =>
     new Promise<boolean>((resolve) => {
-      setCurrent({ kind: "confirm", message, resolve });
-    }), []);
+      enqueue({ kind: "confirm", message, resolve });
+    }), [enqueue]);
 
   const alert = useCallback((message: string) =>
     new Promise<void>((resolve) => {
-      setCurrent({ kind: "alert", message, resolve: () => resolve() });
-    }), []);
+      enqueue({ kind: "alert", message, resolve: () => resolve() });
+    }), [enqueue]);
 
   const close = useCallback((value: boolean) => {
     if (current) current.resolve(value);
-    setCurrent(null);
+    // Drain the queue: if anything is waiting, show it next; otherwise
+    // clear `current` so the dialog unmounts.
+    const next = queueRef.current.shift();
+    setCurrent(next ?? null);
   }, [current]);
 
   const value = useMemo(() => ({ confirm, alert }), [confirm, alert]);

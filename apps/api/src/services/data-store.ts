@@ -60,6 +60,12 @@ export async function writeData<T>(filename: string, data: T): Promise<void> {
  * future change makes those steps throw-able, wrap the `fileLocks.set` call
  * in a `try/finally` that calls `resolveLock` defensively so the lock is
  * never stranded.
+ *
+ * V8 single-thread guarantee: the `fileLocks.get(filename) ?? new Promise()`
+ * + `fileLocks.set` pair runs in one synchronous microtask — no `await`
+ * between them — so two callers cannot both observe the absent entry and
+ * both install a lock. If a future refactor adds an `await` between the get
+ * and set, this guarantee breaks.
  */
 export async function updateData<T>(
   filename: string,
@@ -83,6 +89,51 @@ export async function updateData<T>(
     // the same `lockPromise` reference that was set above; a later caller
     // that has already installed a new lock will not have its entry
     // removed because the comparison will not match.
+    if (fileLocks.get(filename) === lockPromise) {
+      fileLocks.delete(filename);
+    }
+  }
+}
+
+/**
+ * Atomically read a file or create it with `defaultValue` if it doesn't
+ * exist. Uses the same per-file mutex as `updateData` so a concurrent
+ * first-time read from two callers (e.g., the same project being created
+ * via two routes) cannot race: exactly one writer installs the default,
+ * the other sees the just-written file.
+ *
+ * Why this exists: `updateData` calls `readData` first and propagates
+ * ENOENT, so it cannot be used in the "create if missing" path. Callers
+ * that need that behavior (ticket boards, asset inventories) must reach
+ * for this helper rather than try { readData } catch { writeData }, which
+ * has a TOCTOU window where two callers both write the default.
+ */
+export async function getOrCreateData<T>(
+  filename: string,
+  defaultValue: () => T
+): Promise<T> {
+  const prev = fileLocks.get(filename) ?? Promise.resolve();
+  let resolveLock: () => void;
+  const lockPromise = new Promise<void>((r) => { resolveLock = r; });
+  fileLocks.set(filename, lockPromise);
+
+  try {
+    await prev;
+    try {
+      return await readData<T>(filename);
+    } catch (err) {
+      // Only ENOENT triggers the create path — corrupted JSON should
+      // surface to the caller so they can decide whether to recover or
+      // bail (a corrupted file is usually a data-loss signal, not a
+      // "just overwrite it" signal).
+      const msg = (err as Error).message || "";
+      if (!msg.includes("not found")) throw err;
+      const value = defaultValue();
+      await writeData(filename, value);
+      return value;
+    }
+  } finally {
+    resolveLock!();
     if (fileLocks.get(filename) === lockPromise) {
       fileLocks.delete(filename);
     }

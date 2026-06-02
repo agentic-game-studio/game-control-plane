@@ -41,7 +41,14 @@ export function Modal({
 
     // Trap focus inside the dialog. If Tab would move focus past the last
     // element, wrap it back to the first; same for Shift+Tab on the first.
+    // Also close on Escape (Q9-5) — keyboard users expect this convention
+    // and the absence of it forces a mouse trip to the close button.
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onClose();
+        return;
+      }
       if (e.key !== "Tab") return;
       const focusable = dialogRef.current?.querySelectorAll<HTMLElement>(
         'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
@@ -64,7 +71,7 @@ export function Modal({
       // Restore focus on unmount/close.
       previouslyFocusedRef.current?.focus?.();
     };
-  }, [isOpen]);
+  }, [isOpen, onClose]);
 
   if (!isOpen) return null;
 
