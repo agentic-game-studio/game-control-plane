@@ -2,8 +2,9 @@ import { Router } from "express";
 import type { Request, Response } from "express";
 import { readData, writeData, updateData, broadcastEvent } from "../services/data-store.js";
 import { logger } from "../utils/logger.js";
+import { newId } from "../utils/ids.js";
 import type { SettingsConfig, SubscriptionTier } from "@game-studio/types";
-import { DEFAULT_SETTINGS, TIER_DEFINITIONS } from "@game-studio/types";
+import { DEFAULT_SETTINGS, TIER_DEFINITIONS, createDefaultSettings } from "@game-studio/types";
 import type { WSEvent } from "@game-studio/types";
 
 const VALID_ENGINES = ["Unity", "Unreal", "Godot"];
@@ -69,7 +70,7 @@ settingsRouter.get("/", async (_req: Request, res: Response) => {
     }
     res.json({ success: true, data: resetData });
   } catch {
-    const fresh = DEFAULT_SETTINGS;
+    const fresh = createDefaultSettings();
     await writeData("settings.json", fresh);
     res.json({ success: true, data: fresh });
   }
@@ -145,7 +146,7 @@ settingsRouter.patch("/", async (req: Request, res: Response) => {
 // POST /api/settings/reset - Reset settings to defaults
 settingsRouter.post("/reset", async (_req: Request, res: Response) => {
   try {
-    const fresh = DEFAULT_SETTINGS;
+    const fresh = createDefaultSettings();
     await writeData("settings.json", fresh);
     broadcastEvent({ type: "settings:updated", settings: fresh } as WSEvent);
     res.json({ success: true, data: fresh });
@@ -180,7 +181,7 @@ settingsRouter.post("/topup", async (req: Request, res: Response) => {
       topUpHistory: [
         ...data.topUpHistory,
         {
-          id: `top-${Date.now()}`,
+          id: newId("top"),
           amount,
           timestamp: new Date().toISOString(),
         },
@@ -276,7 +277,7 @@ settingsRouter.post("/consume", async (req: Request, res: Response) => {
         usageLog: [
           ...data.usageLog,
           {
-            id: `use-${Date.now()}`,
+            id: newId("use"),
             taskName,
             creditsUsed,
             timestamp: new Date().toISOString(),

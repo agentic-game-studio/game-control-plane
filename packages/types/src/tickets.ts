@@ -61,6 +61,8 @@ export interface UpdateTicketRequest {
   credits?: number;
   estimateHours?: number;
   status?: TicketStatus;
+  /** Preferred agent role to handle this ticket. */
+  agentRole?: string;
   assignee?: string;
   acknowledged?: boolean;
 }

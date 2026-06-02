@@ -27,6 +27,9 @@ const envSchema = z
     RATE_LIMIT_WINDOW_MS: z.coerce.number().default(60_000),
     RATE_LIMIT_BUCKET_CAP: z.coerce.number().default(10_000),
     MAX_SSE_CLIENTS: z.coerce.number().default(50),
+    MAX_CONCURRENT_SUBAGENTS_PER_PROJECT: z.coerce.number().default(8),
+    MAX_VERIFY_FAILURES: z.coerce.number().default(3),
+    MAX_DEAD_LETTERED_PER_PROJECT: z.coerce.number().default(50),
     // 11-M6: Express `req.ip` returns the socket address by default —
     // which on a deployment behind a proxy (Railway, nginx, Cloudflare)
     // means every request looks like it comes from the same proxy IP,
@@ -83,6 +86,9 @@ export function loadConfig() {
     RATE_LIMIT_WINDOW_MS: process.env.RATE_LIMIT_WINDOW_MS,
     RATE_LIMIT_BUCKET_CAP: process.env.RATE_LIMIT_BUCKET_CAP,
     MAX_SSE_CLIENTS: process.env.MAX_SSE_CLIENTS,
+    MAX_CONCURRENT_SUBAGENTS_PER_PROJECT: process.env.MAX_CONCURRENT_SUBAGENTS_PER_PROJECT,
+    MAX_VERIFY_FAILURES: process.env.MAX_VERIFY_FAILURES,
+    MAX_DEAD_LETTERED_PER_PROJECT: process.env.MAX_DEAD_LETTERED_PER_PROJECT,
     TRUST_PROXY: process.env.TRUST_PROXY,
     ENABLE_TEST_ENDPOINTS: process.env.ENABLE_TEST_ENDPOINTS,
   };

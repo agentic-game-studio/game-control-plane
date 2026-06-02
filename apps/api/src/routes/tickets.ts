@@ -17,6 +17,26 @@ import type { WSEvent } from "@game-studio/types";
 
 export const ticketsRouter: Router = Router();
 
+// 13-M5: explicit allowlist for PATCH /tickets/:id body fields.
+// Spreading `updates` verbatim would let a client overwrite
+// `id`, `createdAt`, `consecutiveFailures`, `lastError`, or
+// `testEvidence` — fields the API owns and a malicious client
+// could forge. `id` and `updatedAt` are re-asserted after spread
+// (defence-in-depth), but the allowlist makes the contract
+// explicit and keeps the surface tight.
+const ALLOWED_TICKET_UPDATE_FIELDS: ReadonlyArray<keyof UpdateTicketRequest> = [
+  "title",
+  "description",
+  "status",
+  "credits",
+  "estimateHours",
+  "agentRole",
+  "acknowledged",
+  "assignee",
+  "area",
+  "subarea",
+];
+
 function getProjectId(req: Request): string | null {
   const queryProjectId = typeof req.query.projectId === "string" ? req.query.projectId : null;
   const bodyProjectId = req.body && typeof req.body.projectId === "string" ? req.body.projectId : null;
@@ -125,18 +145,24 @@ ticketsRouter.patch("/:id", async (req: Request, res: Response) => {
   const updates = req.body as UpdateTicketRequest;
   const projectId = getProjectId(req);
 
-  try {
-    const data = await readTicketsBoard(projectId);
+  // 13-M17: route through updateTicketsBoard (per-file mutex) so a
+  // concurrent PATCH /tickets/:id or PATCH /tickets/:id/move on
+  // the same ticket can't clobber each other. The previous version
+  // used readTicketsBoard + writeTicketsBoard (lock-free), so two
+  // concurrent PATCHes could both see the same starting state and
+  // last-writer-wins, losing one update silently.
+  let notFound = false;
+  let updatedTicket: Ticket | null = null;
 
-    // Find the ticket
+  await updateTicketsBoard(projectId, (board) => {
     let ticket: Ticket | undefined;
-    let ticketColumn: number = -1;
-    let ticketIndex: number = -1;
+    let ticketColumn = -1;
+    let ticketIndex = -1;
 
-    for (let i = 0; i < data.columns.length; i++) {
-      const idx = data.columns[i].tickets.findIndex((t) => t.id === id);
+    for (let i = 0; i < board.columns.length; i++) {
+      const idx = board.columns[i].tickets.findIndex((t) => t.id === id);
       if (idx !== -1) {
-        ticket = data.columns[i].tickets[idx];
+        ticket = board.columns[i].tickets[idx];
         ticketColumn = i;
         ticketIndex = idx;
         break;
@@ -144,37 +170,53 @@ ticketsRouter.patch("/:id", async (req: Request, res: Response) => {
     }
 
     if (!ticket) {
-      res.status(404).json({ success: false, error: "Ticket not found" });
-      return;
+      notFound = true;
+      return board;
+    }
+
+    // 13-M5: only allow specific fields. The previous version spread
+    // `updates` verbatim, so a client could PATCH `id`,
+    // `createdAt`, or `consecutiveFailures` — the `id` was
+    // re-asserted after spread, but other fields were not
+    // protected. Lock the allowlist to the documented update
+    // surface.
+    const safeUpdates: Partial<Ticket> = {};
+    for (const key of ALLOWED_TICKET_UPDATE_FIELDS) {
+      const value = (updates as Record<string, unknown>)[key];
+      if (value !== undefined) {
+        (safeUpdates as Record<string, unknown>)[key] = value;
+      }
     }
 
     const ticketId = String(id);
-    const updatedTicket: Ticket = {
+    updatedTicket = {
       ...ticket,
-      ...updates,
+      ...safeUpdates,
       projectId: ticket.projectId ?? projectId ?? undefined,
       id: ticketId, // Ensure ID cannot be changed
       updatedAt: new Date().toISOString(),
     };
+    board.columns[ticketColumn].tickets[ticketIndex] = updatedTicket;
+    return board;
+  });
 
-    data.columns[ticketColumn].tickets[ticketIndex] = updatedTicket;
-    await writeTicketsBoard(data, projectId);
-
-    // Broadcast event
-    broadcastEvent({
-      type: "ticket:updated",
-      ticket: updatedTicket,
-      projectId,
-    } as WSEvent);
-
-    res.json({ success: true, data: updatedTicket });
-  } catch (error) {
-    logger.error(
-      { err: error instanceof Error ? error.message : String(error), ticketId: id, projectId, event: "ticket_update_failed" },
-      "Failed to update ticket",
-    );
-    res.status(500).json({ success: false, error: "Failed to update ticket" });
+  if (notFound) {
+    res.status(404).json({ success: false, error: "Ticket not found" });
+    return;
   }
+  if (!updatedTicket) {
+    res.status(500).json({ success: false, error: "Failed to update ticket" });
+    return;
+  }
+
+  // Broadcast event
+  broadcastEvent({
+    type: "ticket:updated",
+    ticket: updatedTicket,
+    projectId,
+  } as WSEvent);
+
+  res.json({ success: true, data: updatedTicket });
 });
 
 // PATCH /api/tickets/:id/move - Move ticket to different column
@@ -270,39 +312,38 @@ ticketsRouter.delete("/:id", async (req: Request, res: Response) => {
   const { id } = req.params;
   const projectId = getProjectId(req);
 
-  try {
-    const data = await readTicketsBoard(projectId);
+  // 13-M17: route through updateTicketsBoard (per-file mutex)
+  // so a concurrent PATCH on the same ticket can't have its
+  // read of the board land AFTER our splice but BEFORE our
+  // write — the previous lock-free readTicketsBoard +
+  // writeTicketsBoard pair would let a PATCH see the ticket
+  // present, then we'd delete it, then the PATCH would write
+  // the ticket back as a "deleted" resurrection.
+  let notFound = false;
 
-    let found = false;
-    for (const column of data.columns) {
+  await updateTicketsBoard(projectId, (board) => {
+    for (const column of board.columns) {
       const ticketIndex = column.tickets.findIndex((t) => t.id === id);
       if (ticketIndex !== -1) {
         column.tickets.splice(ticketIndex, 1);
-        found = true;
-        break;
+        return board;
       }
     }
+    notFound = true;
+    return board;
+  });
 
-    if (!found) {
-      res.status(404).json({ success: false, error: "Ticket not found" });
-      return;
-    }
-
-    await writeTicketsBoard(data, projectId);
-
-    // Broadcast event
-    broadcastEvent({
-      type: "ticket:deleted",
-      ticketId: id,
-      projectId,
-    } as WSEvent);
-
-    res.json({ success: true });
-  } catch (error) {
-    logger.error(
-      { err: error instanceof Error ? error.message : String(error), ticketId: id, projectId, event: "ticket_delete_failed" },
-      "Failed to delete ticket",
-    );
-    res.status(500).json({ success: false, error: "Failed to delete ticket" });
+  if (notFound) {
+    res.status(404).json({ success: false, error: "Ticket not found" });
+    return;
   }
+
+  // Broadcast event
+  broadcastEvent({
+    type: "ticket:deleted",
+    ticketId: id,
+    projectId,
+  } as WSEvent);
+
+  res.json({ success: true });
 });

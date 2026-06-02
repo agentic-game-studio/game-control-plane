@@ -158,8 +158,17 @@ export class SessionStore {
   }
 
   async delete(sessionId: string): Promise<void> {
-    await fs.rm(this.sessionPath(sessionId), { force: true });
-    await fs.rm(this.checkpointDir(sessionId), { recursive: true, force: true });
+    // Route the delete through withSessionLock so a concurrent
+    // createCheckpoint / addLog running for the same sessionId can't
+    // observe the file deletion mid-flight and orphan-write a .tmp
+    // that's never renamed (the previous free-form delete happened
+    // outside the lock; the lock was only cleared after the file was
+    // already gone, so a contender could pass `await prev`, then
+    // see a missing file and write a stale .tmp that never promotes).
+    await withSessionLock(sessionId, async () => {
+      await fs.rm(this.sessionPath(sessionId), { force: true });
+      await fs.rm(this.checkpointDir(sessionId), { recursive: true, force: true });
+    });
     sessionLocks.delete(sessionId);
   }
 

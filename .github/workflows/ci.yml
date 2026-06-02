@@ -67,8 +67,12 @@ jobs:
         # playwright config sets. Without these the e2e suite runs
         # but every test that needs the consultation helper returns
         # 404, and auth-gated tests return 401.
+        # 13-M-CI: use the repo-level E2E_API_KEY secret when set,
+        # otherwise fall back to a clearly-marked non-secret dev value.
+        # The literal "change_this_to_a_random_secret" string looked
+        # like a real-but-committed secret in a code review.
         run: pnpm --filter @game-studio/web test:e2e
         env:
           CI: true
           ENABLE_TEST_ENDPOINTS: "true"
-          E2E_API_KEY: change_this_to_a_random_secret
+          E2E_API_KEY: ${{ secrets.E2E_API_KEY || 'e2e-test-only-not-a-secret' }}

@@ -434,7 +434,11 @@ dashboardRouter.get("/projects/:id", async (req: Request, res: Response) => {
       return;
     }
     res.json({ success: true, data: project });
-  } catch {
+  } catch (error) {
+    logger.error(
+      { err: error instanceof Error ? error.message : String(error), event: "dashboard_read_project_failed", projectId: id },
+      "Failed to read project",
+    );
     res.status(500).json({ success: false, error: "Failed to read project" });
   }
 });
@@ -538,7 +542,11 @@ dashboardRouter.post("/projects", async (req: Request, res: Response) => {
       data: newProject,
       pluginInstall: pluginInstallResult,
     });
-  } catch {
+  } catch (error) {
+    logger.error(
+      { err: error instanceof Error ? error.message : String(error), event: "dashboard_create_project_failed" },
+      "Failed to create project",
+    );
     res.status(500).json({ success: false, error: "Failed to create project" });
   }
 });
@@ -602,7 +610,11 @@ dashboardRouter.patch("/projects/:id", async (req: Request, res: Response) => {
     } as WSEvent);
 
     res.json({ success: true, data: updatedProject });
-  } catch {
+  } catch (error) {
+    logger.error(
+      { err: error instanceof Error ? error.message : String(error), event: "dashboard_update_project_failed", projectId: id },
+      "Failed to update project",
+    );
     res.status(500).json({ success: false, error: "Failed to update project" });
   }
 });
@@ -671,7 +683,11 @@ dashboardRouter.delete("/projects/:id", async (req: Request, res: Response) => {
     } as WSEvent);
 
     res.json({ success: true });
-  } catch {
+  } catch (error) {
+    logger.error(
+      { err: error instanceof Error ? error.message : String(error), event: "dashboard_delete_project_failed", projectId: id },
+      "Failed to delete project",
+    );
     res.status(500).json({ success: false, error: "Failed to delete project" });
   }
 });
@@ -713,7 +729,11 @@ dashboardRouter.post("/projects/:id/install-plugin", async (req: Request, res: R
     } else {
       res.status(500).json({ success: false, error: result.error });
     }
-  } catch {
+  } catch (error) {
+    logger.error(
+      { err: error instanceof Error ? error.message : String(error), event: "dashboard_install_plugin_failed", projectId: id },
+      "Failed to install plugin",
+    );
     res.status(500).json({ success: false, error: "Failed to install plugin" });
   }
 });
@@ -759,7 +779,11 @@ dashboardRouter.get("/projects/:id/plugin-status", async (req: Request, res: Res
         enabled,
       },
     });
-  } catch {
+  } catch (error) {
+    logger.error(
+      { err: error instanceof Error ? error.message : String(error), event: "dashboard_check_plugin_status_failed", projectId: id },
+      "Failed to check plugin status",
+    );
     res.status(500).json({ success: false, error: "Failed to check plugin status" });
   }
 });
@@ -791,7 +815,11 @@ dashboardRouter.get("/server-status", async (_req: Request, res: Response) => {
         serverDir,
       },
     });
-  } catch {
+  } catch (error) {
+    logger.error(
+      { err: error instanceof Error ? error.message : String(error), event: "dashboard_check_server_status_failed" },
+      "Failed to check server status",
+    );
     res.status(500).json({ success: false, error: "Failed to check server status" });
   }
 });
@@ -813,7 +841,11 @@ dashboardRouter.post("/setup-server", async (_req: Request, res: Response) => {
     } else {
       res.status(500).json({ success: false, error: result.error });
     }
-  } catch {
+  } catch (error) {
+    logger.error(
+      { err: error instanceof Error ? error.message : String(error), event: "dashboard_setup_server_failed" },
+      "Failed to setup server",
+    );
     res.status(500).json({ success: false, error: "Failed to setup server" });
   }
 });
@@ -861,7 +893,11 @@ dashboardRouter.get("/projects/:id/mcp-health", async (req: Request, res: Respon
         error: health.error,
       },
     });
-  } catch {
+  } catch (error) {
+    logger.error(
+      { err: error instanceof Error ? error.message : String(error), event: "dashboard_check_mcp_health_failed", projectId: id },
+      "Failed to check MCP health",
+    );
     res.status(500).json({ success: false, error: "Failed to check MCP health" });
   }
 });
@@ -895,7 +931,11 @@ dashboardRouter.post("/projects/:id/launch-editor", async (req: Request, res: Re
 
     const result = launchGodotEditor(projectDir);
     res.json({ success: result.success, data: result });
-  } catch {
+  } catch (error) {
+    logger.error(
+      { err: error instanceof Error ? error.message : String(error), event: "dashboard_launch_editor_failed", projectId: id },
+      "Failed to launch editor",
+    );
     res.status(500).json({ success: false, error: "Failed to launch editor" });
   }
 });

@@ -617,16 +617,17 @@ def run_pipeline(preset: AssetPreset, output_dir: Path, dry_run: bool = False,
 
 def load_presets(yaml_path: Path) -> list[AssetPreset]:
     """Load asset presets from a YAML file."""
+    # 13-M-asset-pipeline: dropped the JSON-with-comments fallback. The
+    # fallback would only work on YAML files that happened to be valid
+    # JSON — multi-doc YAML, anchors, and YAML lists broke silently.
+    # PyYAML is in the standard asset-pipeline dep set; if a user
+    # doesn't have it, we want a loud error, not a garbled parse.
     try:
         import yaml
-    except ImportError:
-        # Fallback: parse simple JSON-with-comments format
-        with open(yaml_path) as f:
-            content = f.read()
-        # Strip comments
-        content = re.sub(r'#[^\n]*', '', content)
-        items = json.loads(content)
-        return [AssetPreset(**item) for item in items]
+    except ImportError as e:
+        raise RuntimeError(
+            "PyYAML is required to load presets. Install with `pip install pyyaml`."
+        ) from e
 
     with open(yaml_path) as f:
         data = yaml.safe_load(f)

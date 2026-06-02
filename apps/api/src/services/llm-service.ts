@@ -9,6 +9,7 @@
 
 import fs from "node:fs/promises";
 import { realpathSync as realpathSyncCb, readFileSync as readFileSyncCb } from "node:fs";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
@@ -694,7 +695,9 @@ async function executeTool(
         // subagent creates a ticket in `in_progress` (line below) and
         // moves it to verify/completed when done. Count those, and
         // reject the spawn with a clear error if over the cap.
-        const MAX_CONCURRENT_SUBAGENTS_PER_PROJECT = 8;
+        // 13-M-magic: read cap from config (env override) instead of
+        // a hard-coded 8 in the service module.
+        const maxConcurrentSubagents = loadConfig().MAX_CONCURRENT_SUBAGENTS_PER_PROJECT;
         const projectIdForCap = projectContext?.projectId;
         if (projectIdForCap) {
           try {
@@ -702,8 +705,8 @@ async function executeTool(
             const inProgressCount = board.columns
               .filter((c) => c.id === "in_progress")
               .reduce((sum, c) => sum + c.tickets.length, 0);
-            if (inProgressCount >= MAX_CONCURRENT_SUBAGENTS_PER_PROJECT) {
-              return `Error: Project has ${inProgressCount} subagents in flight (max ${MAX_CONCURRENT_SUBAGENTS_PER_PROJECT}). Wait for existing tasks to complete before spawning more.`;
+            if (inProgressCount >= maxConcurrentSubagents) {
+              return `Error: Project has ${inProgressCount} subagents in flight (max ${maxConcurrentSubagents}). Wait for existing tasks to complete before spawning more.`;
             }
           } catch {
             // If the board read fails, fall through and let the
@@ -1114,7 +1117,7 @@ async function executeTool(
 
 importer="${ext === "ogg" ? "ogg_vorbis" : "wav"}"
 type="AudioStream${ext === "ogg" ? "OggVorbis" : "WAV"}"
-uid="uid://generated-audio-${Date.now()}"
+uid="uid://generated-audio-${randomUUID()}"
 
 [deps]
 
@@ -1133,7 +1136,7 @@ loop_offset=0
             const data = await readData<AssetsData>("assets.json");
             const filename = _outputPath.split("/").pop() ?? `${_sfxType}.wav`;
             const audioAsset: GameAsset = {
-              id: `audio-${_sfxType}-${Date.now()}`,
+              id: newId(`audio-${_sfxType}`),
               filename,
               type: "audio",
               category: "sfx",

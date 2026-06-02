@@ -94,12 +94,14 @@ export function broadcast(event: WSEvent) {
       continue;
     }
     // Slow-consumer guard. `client.bufferedAmount` is the number of
-    // bytes queued in the OS socket write buffer. If it exceeds the
-    // cap, terminate — the client can't keep up, and queuing more
-    // events would only delay the inevitable.
-    if (client.bufferedAmount > MAX_BUFFERED_BYTES_PER_CLIENT) {
+    // bytes queued in the OS socket write buffer. Check the projected
+    // total (current buffer + the message we're about to queue) so a
+    // borderline client doesn't get a message that pushes it well past
+    // the cap before the next iteration catches up.
+    const projectedBuffered = client.bufferedAmount + Buffer.byteLength(message);
+    if (projectedBuffered > MAX_BUFFERED_BYTES_PER_CLIENT) {
       logger.warn(
-        { buffered: client.bufferedAmount, cap: MAX_BUFFERED_BYTES_PER_CLIENT, event: "ws_slow_consumer_terminated" },
+        { buffered: client.bufferedAmount, projected: projectedBuffered, cap: MAX_BUFFERED_BYTES_PER_CLIENT, event: "ws_slow_consumer_terminated" },
         "WebSocket client exceeded max buffered bytes — terminating to protect process memory",
       );
       try { client.terminate(); } catch { /* already gone */ }

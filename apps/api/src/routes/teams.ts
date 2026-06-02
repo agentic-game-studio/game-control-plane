@@ -4,6 +4,7 @@ import { teamSkills } from "@game-studio/skills";
 import { invokeAgent } from "../services/llm-service.js";
 import { broadcast } from "../services/websocket.js";
 import { logger } from "../utils/logger.js";
+import { newId } from "../utils/ids.js";
 import type { WSEvent, AgentRole } from "@game-studio/types";
 import type { LLMMessage } from "../llm/zai-client.js";
 import type { SkillDefinition } from "@game-studio/types";
@@ -67,7 +68,7 @@ teamsRouter.post("/:team/run", async (req: Request, res: Response) => {
     projectId?: string;
   };
 
-  const effectiveSessionId = sessionId || `team-${Date.now()}`;
+  const effectiveSessionId = sessionId || newId("team");
   const teamMembers = team.teamMembers || [];
 
   // Reject if a workflow is already in flight for this sessionId. Without this

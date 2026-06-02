@@ -1170,7 +1170,6 @@ export const skillsByPhase: Record<string, SkillDefinition[]> = {
         },
       ],
       userInvocable: true,
-      gates: ["AUTONOMOUS-MODE"],
     },
     {
       name: "gdd-to-tickets",

@@ -11,6 +11,7 @@ import { broadcastEvent } from "./data-store.js";
 import { updateTicketsBoard, readTicketsBoard } from "./ticket-board.js";
 import type { Ticket, AgentRole, WSEvent } from "@game-studio/types";
 import { logger } from "../utils/logger.js";
+import { loadConfig } from "../config.js";
 
 // 10-M1: track in-flight verifications by ticketId so external events
 // (project delete, ticket delete) can abort the underlying LLM call.
@@ -44,8 +45,10 @@ export function cancelVerificationsForProject(projectId: string): number {
  * LLM outage) would burn credits forever as the autonomous loop re-picks
  * the same ticket. After 3 errors, the ticket is parked in the `failed`
  * column with `deadLetter: true` and a `ticket:deadletter` event is broadcast
- * so the UI can surface it for human review. */
-const MAX_VERIFY_FAILURES = 3;
+ * so the UI can surface it for human review.
+ * 13-M-magic: cap is now read from config (env override) via
+ * loadConfig().MAX_VERIFY_FAILURES. */
+// Cap is in config — no module-level const.
 // 12-H6: cap the number of dead-lettered tickets per project. Without
 // this, a broken verifier (missing API key, schema mismatch, etc.) can
 // accumulate hundreds of dead-lettered tickets in the `failed` column.
@@ -53,9 +56,9 @@ const MAX_VERIFY_FAILURES = 3;
 // grows unbounded — a 1000-ticket failed column is ~500KB on disk and
 // gets loaded into memory on every board read. Prune the oldest
 // dead-lettered entries once the cap is exceeded. The cap is generous
-// (50) so legitimate "human review queue" behavior isn't disturbed;
-// it only kicks in for runaway-failure scenarios.
-const MAX_DEAD_LETTERED_PER_PROJECT = 50;
+// (default 50) so legitimate "human review queue" behavior isn't
+// disturbed; it only kicks in for runaway-failure scenarios.
+// Cap is in config — no module-level const.
 
 // ─── Verifier selection map: area keywords → verifier agent role ───
 
@@ -413,7 +416,7 @@ export async function verifyTicket(
       }
     }
 
-    if (failureCount >= MAX_VERIFY_FAILURES) {
+    if (failureCount >= loadConfig().MAX_VERIFY_FAILURES) {
       // Dead-letter: move to the `failed` column with a marker, broadcast a
       // dedicated event so the UI can show a banner, and log loudly.
       logger.error(
@@ -508,11 +511,12 @@ export async function verifyTicket(
       if (projectId) {
         try {
           let prunedCount = 0;
+          const maxDeadLettered = loadConfig().MAX_DEAD_LETTERED_PER_PROJECT;
           await updateTicketsBoard(projectId, (board) => {
             const failedCol = board.columns.find((c) => c.id === "failed");
             if (!failedCol) return board;
             const deadLettered = failedCol.tickets.filter((t) => t.deadLetter);
-            if (deadLettered.length <= MAX_DEAD_LETTERED_PER_PROJECT) return board;
+            if (deadLettered.length <= maxDeadLettered) return board;
             // Sort by lastError timestamp if present, else by id
             // (stable, deterministic). Keep the most recent N.
             deadLettered.sort((a, b) => {
@@ -522,7 +526,7 @@ export async function verifyTicket(
             });
             const toDrop = new Set(
               deadLettered
-                .slice(0, deadLettered.length - MAX_DEAD_LETTERED_PER_PROJECT)
+                .slice(0, deadLettered.length - maxDeadLettered)
                 .map((t) => t.id),
             );
             const nextTickets = failedCol.tickets.filter((t) => !toDrop.has(t.id));
@@ -532,8 +536,8 @@ export async function verifyTicket(
           });
           if (prunedCount > 0) {
             logger.warn(
-              { event: "deadletter_pruned", projectId, prunedCount, cap: MAX_DEAD_LETTERED_PER_PROJECT },
-              `Pruned ${prunedCount} oldest dead-lettered tickets to cap the failed column at ${MAX_DEAD_LETTERED_PER_PROJECT}`,
+              { event: "deadletter_pruned", projectId, prunedCount, cap: maxDeadLettered },
+              `Pruned ${prunedCount} oldest dead-lettered tickets to cap the failed column at ${maxDeadLettered}`,
             );
           }
         } catch (pruneErr) {
