@@ -59,11 +59,12 @@ RUN corepack enable \
     && pnpm install --frozen-lockfile --prod \
     && chown -R node:node /app
 
-# Next.js standalone needs .next/static and public served from the
-# project root at runtime. We pre-bake them into the image so the
-# container needs no external volume to serve the app.
+# Next.js standalone needs .next/static served from the project root at
+# runtime. We pre-bake it into the image so the container needs no
+# external volume to serve the app. (No public/ dir to copy — the web
+# app doesn't ship static assets, and a missing COPY source is a hard
+# build failure under BuildKit. Add the COPY back when a public/ exists.)
 COPY --from=build --chown=node:node /app/apps/web/.next ./apps/web/.next
-COPY --from=build --chown=node:node /app/apps/web/public ./apps/web/public 2>/dev/null || true
 
 # Drop privileges. node:22-bookworm-slim ships a `node` user (uid 1000).
 # Match the API image's uid 1001 / groupadd pattern so a shared volume
