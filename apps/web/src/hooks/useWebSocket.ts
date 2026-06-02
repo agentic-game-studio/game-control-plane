@@ -57,11 +57,25 @@ function connect(): void {
       notifyConnected(true);
       reconnectAttempt = 0;
       if (pingInterval) clearInterval(pingInterval);
-      pingInterval = setInterval(() => {
-        if (ws.readyState === WebSocket.OPEN) {
-          try { ws.send(JSON.stringify({ type: "ping" })); } catch { /* socket died */ }
+      // 12-C4: capture the local interval handle in addition to the
+      // module-global. If a stale onclose (from a previous socket)
+      // happens to fire *after* we've installed a new interval, the
+      // `stillCurrent && pingInterval` cleanup below would clear OUR
+      // interval and leave the live socket without a heartbeat. The
+      // local handle + sharedSocket guard inside the timer body
+      // ensures the interval can't outlive its own socket.
+      const myInterval: ReturnType<typeof setInterval> = setInterval(() => {
+        // Only ping if THIS socket is still the active one and is OPEN.
+        // Without the `sharedSocket === ws` check, an old interval that
+        // somehow escaped cleanup could try to send on a dead socket
+        // (no-op) or, worse, race with a partially-replaced ws ref.
+        if (sharedSocket !== ws || ws.readyState !== WebSocket.OPEN) {
+          clearInterval(myInterval);
+          return;
         }
+        try { ws.send(JSON.stringify({ type: "ping" })); } catch { /* socket died */ }
       }, PING_INTERVAL_MS);
+      pingInterval = myInterval;
     };
 
     ws.onmessage = (msg) => {

@@ -42,6 +42,17 @@ export function DialogProvider({ children }: { children: React.ReactNode }) {
   // close handler drains FIFO. A ref (not state) so the enqueue path
   // doesn't have to wait for a re-render to see the latest queue.
   const queueRef = useRef<DialogRequest[]>([]);
+  // 12-C1: mirror `current` in a ref so `close` doesn't rely on a
+  // stale-closure read of `current`. Two failure modes the old code
+  // had:
+  //   1) Double-click on OK fires `close` twice with the same captured
+  //      `current` — the second call would `shift()` the queue again
+  //      and skip the next dialog entirely.
+  //   2) A close from the previous render (still bound to the old
+  //      `current`) could resolve the wrong promise if the user
+  //      interacts mid-render.
+  // The ref makes `close` deps-free and idempotent.
+  const currentRef = useRef<DialogRequest | null>(null);
 
   const enqueue = useCallback((req: DialogRequest) => {
     // Use a functional updater so two synchronous enqueues both observe
@@ -53,6 +64,7 @@ export function DialogProvider({ children }: { children: React.ReactNode }) {
         queueRef.current.push(req);
         return prev;
       }
+      currentRef.current = req;
       return req;
     });
   }, []);
@@ -68,12 +80,16 @@ export function DialogProvider({ children }: { children: React.ReactNode }) {
     }), [enqueue]);
 
   const close = useCallback((value: boolean) => {
-    if (current) current.resolve(value);
+    const active = currentRef.current;
+    if (!active) return; // idempotent: ignore double-click / backdrop while empty
+    currentRef.current = null;
+    active.resolve(value);
     // Drain the queue: if anything is waiting, show it next; otherwise
     // clear `current` so the dialog unmounts.
-    const next = queueRef.current.shift();
-    setCurrent(next ?? null);
-  }, [current]);
+    const next = queueRef.current.shift() ?? null;
+    currentRef.current = next;
+    setCurrent(next);
+  }, []);
 
   const value = useMemo(() => ({ confirm, alert }), [confirm, alert]);
 

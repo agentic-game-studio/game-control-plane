@@ -1180,10 +1180,20 @@ export function useCommandRoom() {
         // 11-H11: buffer for sessions that don't exist locally yet.
         // The next setAllSessions that includes this session will
         // drain the buffer (see below).
-        const pending = pendingMessagesBySessionRef.current.get(sessionRole) ?? [];
+        // 12-C5: cap the number of distinct buffered sessions. If
+        // many never-materializing sessions accumulate (server bug,
+        // network reorder, etc.), the map otherwise grows unbounded.
+        // FIFO-evict the oldest key on overflow.
+        const MAX_PENDING_SESSIONS = 20;
+        const pendingMap = pendingMessagesBySessionRef.current;
+        if (!pendingMap.has(sessionRole) && pendingMap.size >= MAX_PENDING_SESSIONS) {
+          const oldestKey = pendingMap.keys().next().value;
+          if (oldestKey !== undefined) pendingMap.delete(oldestKey);
+        }
+        const pending = pendingMap.get(sessionRole) ?? [];
         pending.push(msg);
         if (pending.length > MAX_PENDING_MESSAGES) pending.shift();
-        pendingMessagesBySessionRef.current.set(sessionRole, pending);
+        pendingMap.set(sessionRole, pending);
         return prev;
       }
 
@@ -1488,6 +1498,16 @@ export function useCommandRoom() {
         next.set(sid, pid);
         return next;
       });
+    }
+
+    // 12-C5: clear the pending-message buffer for any session that is
+    // explicitly deleted by the server. The buffer is keyed by sessionId
+    // and addSessionMessage uses it to stash events that arrive before
+    // the local session exists; without this cleanup, a session that
+    // gets deleted before its create event was ever applied leaks the
+    // buffered messages forever.
+    if (event.type === "chat:session:deleted") {
+      pendingMessagesBySessionRef.current.delete(event.sessionId);
     }
 
     setAllSessions((prevSessions) => {
@@ -2523,7 +2543,13 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
         "Close consultation failed",
         err instanceof Error ? err.message : "Unknown error",
       );
-      throw err;
+      // 12-C2: do NOT re-throw. Both call sites (handleCloseSession and
+      // the consultation banner button) invoke closeConsultation without
+      // an await/catch — re-throwing surfaces as an unhandled promise
+      // rejection that crashes the React error boundary. The toast above
+      // already tells the user. Return a failure shape so callers can
+      // opt-in to checking it later if needed.
+      return { success: false, summary: undefined };
     }
   }, []);
 

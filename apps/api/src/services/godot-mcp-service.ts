@@ -246,10 +246,23 @@ export class GodotMCPService {
     if (this.mode === "minimal") modeArgs.push("--minimal");
     else if (this.mode === "lite") modeArgs.push("--lite");
 
-    // Spawn MCP server with stdio transport
+    // Spawn MCP server with stdio transport.
+    // 12-C13: do NOT inherit the full parent env. The MCP server is a
+    // Godot-editor bridge — it only needs to resolve `node` and the
+    // Godot binary on PATH. Inheriting the full env leaks the parent
+    // process's secrets (ZAI_API_KEY, API_SECRET, DATABASE_URL, etc.)
+    // into a child process that, if compromised via the Godot plugin
+    // surface, would expose every backend credential. Pass only the
+    // minimal set the stdio transport actually needs.
+    const childEnv: NodeJS.ProcessEnv = {};
+    if (process.env.PATH) childEnv.PATH = process.env.PATH;
+    if (process.env.HOME) childEnv.HOME = process.env.HOME;
+    if (process.platform === "win32" && process.env.SYSTEMROOT) {
+      childEnv.SYSTEMROOT = process.env.SYSTEMROOT;
+    }
     this.process = spawn("node", [this.serverPath, ...modeArgs], {
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env },
+      env: childEnv,
     });
 
     // Handle stdout — read JSON-RPC responses
@@ -620,8 +633,16 @@ export class GodotMCPService {
       // whose callback fires and tries to kill a PID that's been reused.
       const forceKillTimer = setTimeout(() => {
         try {
-          if (proc.pid) {
-            process.kill(proc.pid, "SIGKILL");
+          // 12-C9: guard against PID reuse. Between SIGTERM and the 5s
+          // timer, the proc may have exited and the OS could have
+          // assigned the same PID to another process. Using
+          // `proc.kill(SIGKILL)` (instead of `process.kill(proc.pid, ...)`)
+          // is safer because Node tracks the proc handle's state — if
+          // the proc already exited, this is a no-op. We also check
+          // exitCode/killed defensively in case the exit listener
+          // hasn't run yet.
+          if (proc.exitCode !== null || proc.killed) return;
+          if (proc.kill("SIGKILL")) {
             logger.warn({ pid: proc.pid, event: "godot_mcp_force_kill" }, "Force-killed hung MCP server process");
           }
         } catch { /* already dead */ }

@@ -538,6 +538,27 @@ async function saveLoopState(state: LoopState): Promise<void> {
   // state and can react (e.g. skip the save if the iteration is stale).
   const prev = saveChains.get(state.sessionId) ?? Promise.resolve();
   const next = prev.then(async () => {
+    // 12-C10: re-read the on-disk state INSIDE the mutex. The
+    // pre-check in runIteration (loadLoopState → status check)
+    // happens outside the chain, so a /stop that lands between the
+    // pre-check and this write would have its "idle" save clobbered
+    // by the iteration's "running" save. Inside the mutex chain, we
+    // can safely refuse to demote a stop-state back to "running".
+    if (state.status === "running") {
+      try {
+        const diskRaw = await readFileAsync(path, "utf-8");
+        const disk = JSON.parse(diskRaw) as LoopState;
+        if (disk.status === "idle" || disk.status === "done" || disk.status === "error") {
+          logger.info(
+            { sessionId: state.sessionId, diskStatus: disk.status, event: "loop_state_save_refused_stop_race" },
+            "Refusing to overwrite stop-state with running — /stop or /done already landed",
+          );
+          return;
+        }
+      } catch {
+        // No on-disk state yet (first save) or unparseable — fall through to write.
+      }
+    }
     // Atomic write: write to .tmp + rename so a crash mid-write can't
     // leave a truncated loop-state.json that fails to parse on next read.
     // fs.promises.writeFile uses O_CREAT|O_TRUNC; the rename is atomic
@@ -1337,8 +1358,22 @@ autonomousRouter.post("/start", async (req: Request, res: Response) => {
   // `activeLoopSessions` on completion; `pendingStarts` no longer
   // holds the entry because the validation phase is done.
   pendingStarts.delete(sessionId);
-  activeLoopSessions.add(sessionId);
-  lockHandedOff = true;
+  try {
+    activeLoopSessions.add(sessionId);
+    lockHandedOff = true;
+  } catch (err) {
+    // 12-C15: defensive handover. If `activeLoopSessions.add` ever
+    // throws (frozen Set, OOM, etc.), the pendingStarts entry is
+    // already gone but the IIFE will not register. Re-add to
+    // pendingStarts so a subsequent /start can retry, and rethrow
+    // so the outer finally's `!lockHandedOff` branch cleans up too.
+    // Without this re-add, a thrown handover would leave the session
+    // permanently un-startable (no in pendingStarts, no in
+    // activeLoopSessions, persisted state still "running" → /stop
+    // can't find it either).
+    pendingStarts.add(sessionId);
+    throw err;
+  }
   // Per-session AbortController: /stop signals it to cancel the in-flight
   // invokeAgent (and the LLM fetch) so the loop exits immediately rather
   // than waiting for the current ticket to finish (up to 20 min).

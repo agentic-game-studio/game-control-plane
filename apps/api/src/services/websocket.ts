@@ -9,6 +9,15 @@ export const wss = new WebSocketServer({ noServer: true });
 // set from accumulating dead sockets that silently fail on every broadcast.
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const HEARTBEAT_TIMEOUT_MS = 10_000;
+// 12-C12: the "dead socket" timeout must be longer than the sweep interval.
+// Sweeps run every HEARTBEAT_INTERVAL_MS, so the *next* sweep after a ping
+// fires HEARTBEAT_INTERVAL_MS later. We then need up to HEARTBEAT_TIMEOUT_MS
+// for the pong to make it back. If we use HEARTBEAT_TIMEOUT_MS alone as the
+// grace threshold (the previous bug), the very next sweep — 30s after the
+// ping, well past the 10s grace — would always pass the grace check and
+// terminate the socket, killing every connection on its second sweep
+// regardless of whether a pong was in flight.
+const DEAD_TIMEOUT_MS = HEARTBEAT_INTERVAL_MS + HEARTBEAT_TIMEOUT_MS;
 
 export const heartbeatInterval = setInterval(() => {
   for (const client of wss.clients) {
@@ -21,7 +30,7 @@ export const heartbeatInterval = setInterval(() => {
     // (proxy wakeup, mobile backgrounded tab) loses its connection
     // before its first pong can land.
     if (ws.isAlive === false) {
-      if (ws.firstPingAt && Date.now() - ws.firstPingAt < HEARTBEAT_TIMEOUT_MS) {
+      if (ws.firstPingAt && Date.now() - ws.firstPingAt < DEAD_TIMEOUT_MS) {
         // First ping is still within its grace window — give it more
         // time. Without this, any connect-in-the-last-30s that hasn't
         // yet ponged gets killed on the very next sweep.

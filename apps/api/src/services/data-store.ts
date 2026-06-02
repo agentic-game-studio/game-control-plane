@@ -73,9 +73,23 @@ export async function updateData<T>(
 ): Promise<T> {
   // Wait for any in-flight update to this file to complete
   const prev = fileLocks.get(filename) ?? Promise.resolve();
-  let resolveLock: () => void;
+  // 12-C14: initialise resolveLock to a noop so the defensive catch
+  // below can call it before the Promise constructor has had a chance
+  // to assign the real resolver. Without this, an error between the
+  // `new Promise(...)` call and `fileLocks.set(...)` would publish a
+  // lockPromise with no resolver, permanently deadlocking every future
+  // caller that awaits `prev` (which is now this orphan promise).
+  let resolveLock: () => void = () => {};
   const lockPromise = new Promise<void>((r) => { resolveLock = r; });
-  fileLocks.set(filename, lockPromise);
+  try {
+    fileLocks.set(filename, lockPromise);
+  } catch (err) {
+    // fileLocks.set can only throw if the Map itself is broken (e.g.,
+    // someone passed a frozen Map or ran out of memory). Release the
+    // orphan lockPromise so any waiter doesn't deadlock, then rethrow.
+    resolveLock();
+    throw err;
+  }
 
   try {
     await prev;
@@ -137,9 +151,17 @@ export async function getOrCreateData<T>(
   defaultValue: () => T
 ): Promise<T> {
   const prev = fileLocks.get(filename) ?? Promise.resolve();
-  let resolveLock: () => void;
+  // 12-C14: see updateData. Initialise resolveLock to a noop so a throw
+  // between the Promise constructor and `fileLocks.set` cannot strand
+  // the published lockPromise.
+  let resolveLock: () => void = () => {};
   const lockPromise = new Promise<void>((r) => { resolveLock = r; });
-  fileLocks.set(filename, lockPromise);
+  try {
+    fileLocks.set(filename, lockPromise);
+  } catch (err) {
+    resolveLock();
+    throw err;
+  }
 
   try {
     await prev;

@@ -30,8 +30,8 @@ game-control-plane/
 │   └── web/              # Frontend: Next.js 15 (App Router)
 ├── packages/
 │   ├── types/            # Shared TypeScript interfaces (source of truth)
-│   ├── agents/           # 54 agent definitions (3-tier hierarchy)
-│   ├── skills/           # 92 skill definitions (12 team skills)
+│   ├── agents/           # 53 agent definitions (3-tier hierarchy)
+│   ├── skills/           # 94 skill definitions (12 team skills)
 │   ├── config/           # Zod schemas + GDD/ADR templates
 │   └── state/            # File-based session store
 ├── scripts/
@@ -447,8 +447,8 @@ GDD files use 8-section format: Overview, Player Fantasy, Detailed Rules, Formul
 ```bash
 pnpm typecheck         # TypeScript across all packages
 pnpm build             # Turbo build pipeline
-pnpm generate:agents    # Validate 54 agent definitions
-pnpm generate:skills   # Validate 92 skill definitions
+pnpm generate:agents    # Validate 53 agent definitions
+pnpm generate:skills   # Validate 94 skill definitions
 pnpm generate          # Both validations
 pnpm test:e2e          # Playwright E2E test suite (apps/web/e2e/)
 ```

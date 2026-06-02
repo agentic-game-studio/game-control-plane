@@ -730,17 +730,36 @@ assetsRouter.delete("/:id", async (req: Request, res: Response) => {
       try {
         const config = loadConfig();
         const workspaceDir = path.resolve(config.WORKSPACE_DIR);
-        const filePath = path.join(workspaceDir, assetPath);
-        // 10-C4: use path.sep (not "/") so the boundary check is correct
-        // on Windows. A literal "/" would let `C:\app\workspace-other`
-        // pass `startsWith("C:\app\workspace/")` if WORKSPACE_DIR is
-        // /-terminated.
-        const workspacePrefix = workspaceDir.endsWith(path.sep) ? workspaceDir : workspaceDir + path.sep;
+        // 12-C7: validate assetPath before any path arithmetic. The stored
+        // path could be absolute (path.join silently overrides on
+        // absolute), could start with `..`, or could contain NUL bytes —
+        // all of which let a manipulated asset record (e.g., set via a
+        // future code path or imported from a manifest) escape the
+        // workspace at delete time. Resolve and assert with path.relative
+        // so the boundary check is symlink-aware and cross-platform.
+        //
+        // `assetPath` is captured by the updateData closure above, so
+        // TS narrows it to `string` here but loses precision on some
+        // control-flow paths. Hoist into a local const so narrowing is
+        // unambiguous.
+        const assetPathStr: string = assetPath;
         if (
-          (filePath.startsWith(workspacePrefix) || filePath === workspaceDir) &&
-          filePath !== workspaceDir
+          assetPathStr.length > 0 &&
+          !assetPathStr.includes("\0") &&
+          !path.isAbsolute(assetPathStr)
         ) {
-          await fs.unlink(filePath);
+          const filePath = path.resolve(workspaceDir, assetPath);
+          const rel = path.relative(workspaceDir, filePath);
+          // `rel` empty = filePath === workspaceDir (refuse).
+          // `rel` starts with ".." or is absolute = escape (refuse).
+          if (
+            rel.length > 0 &&
+            !rel.startsWith("..") &&
+            !path.isAbsolute(rel) &&
+            filePath !== workspaceDir
+          ) {
+            await fs.unlink(filePath);
+          }
         }
       } catch {
         // File may not exist; continue
@@ -887,6 +906,50 @@ assetsRouter.post("/generate", async (req: Request, res: Response) => {
       error: "prompt and name are required",
     });
     return;
+  }
+
+  // 12-C6: sanitize all CLI-bound strings. execFile does NOT shell-interpret
+  // its args (no $(...), no `;`), but the Python pipeline parses them with
+  // argparse — a tag like "--seed=99999" would be silently absorbed as a
+  // flag override instead of a tag value. A name with embedded NUL or LF
+  // could land in a manifest path or filename. Reject early so the failure
+  // is a 400 instead of a confusing pipeline crash.
+  const MAX_STR = 2000;
+  const MAX_TAGS = 32;
+  const isSafe = (s: unknown): s is string =>
+    typeof s === "string" && s.length > 0 && s.length <= MAX_STR && !/[ -]/.test(s);
+  // Names are also used as filenames — restrict to a conservative charset.
+  if (!/^[A-Za-z0-9._\- ]{1,128}$/.test(body.name)) {
+    res.status(400).json({
+      success: false,
+      error: "name must be alphanumeric with -, _, ., space (max 128 chars)",
+    });
+    return;
+  }
+  if (!isSafe(body.prompt)) {
+    res.status(400).json({ success: false, error: "prompt is too long or contains control characters" });
+    return;
+  }
+  if (body.negativePrompt !== undefined && !isSafe(body.negativePrompt)) {
+    res.status(400).json({ success: false, error: "negativePrompt is invalid" });
+    return;
+  }
+  if (body.model !== undefined && !/^[A-Za-z0-9._\-]{1,64}$/.test(String(body.model))) {
+    res.status(400).json({ success: false, error: "model name is invalid" });
+    return;
+  }
+  if (body.tags !== undefined) {
+    if (!Array.isArray(body.tags) || body.tags.length > MAX_TAGS) {
+      res.status(400).json({ success: false, error: `tags must be an array of <=${MAX_TAGS} strings` });
+      return;
+    }
+    for (const t of body.tags) {
+      // Reject `--...` flags AND control chars. Also cap individual tag length.
+      if (typeof t !== "string" || t.length === 0 || t.length > 64 || t.startsWith("-") || /[ -]/.test(t)) {
+        res.status(400).json({ success: false, error: "tags contain an invalid entry" });
+        return;
+      }
+    }
   }
 
   const args = [

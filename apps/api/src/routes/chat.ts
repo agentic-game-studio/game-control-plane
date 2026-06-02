@@ -1283,6 +1283,25 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
     lockHeld = true;
   }
 
+  // 12-C8: define the lock release primitive IMMEDIATELY after the
+  // lock is acquired. The previous code defined it ~50 lines later
+  // (after `await saveChatState()` at line 1326). If that intermediate
+  // save threw (disk full, quota, fs permission), the lock leaked
+  // permanently — every future POST to this session would return 409
+  // until the API restarted.
+  const releaseLock = () => {
+    if (lockHeld) {
+      sessionsResponding.delete(id);
+      lockHeld = false;
+    }
+  };
+  const clientDisconnectHandler = () => {
+    logger.info({ sessionId: id, event: "chat_client_disconnected_pre_llm" },
+      "Client disconnected before LLM call — releasing per-session lock");
+    releaseLock();
+  };
+  req.on("close", clientDisconnectHandler);
+
   const userMessageId = newId("msg");
   const userMessage: ChatMessage = {
     id: userMessageId,
@@ -1323,27 +1342,13 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
   }
   session.conversationHistory.push(userHistoryMessage);
 
-  await saveChatState();
-
-  // The lock is now held; every path below must release it. The two
-  // pre-existing cleanup points (success at 1502, catch at 1510) only
-  // cover the LLM-call branch. A throw from the `saveChatState` call
-  // above, or from any of the awaits before we reach the LLM try block,
-  // would leave `sessionsResponding` holding `id` and lock the session
-  // permanently. Install a `req.on("close", ...)` handler so a client
-  // disconnect also fires the cleanup.
-  const releaseLock = () => {
-    if (lockHeld) {
-      sessionsResponding.delete(id);
-      lockHeld = false;
-    }
-  };
-  const clientDisconnectHandler = () => {
-    logger.info({ sessionId: id, event: "chat_client_disconnected_pre_llm" },
-      "Client disconnected before LLM call — releasing per-session lock");
+  try {
+    await saveChatState();
+  } catch (preLLMSaveErr) {
+    req.off("close", clientDisconnectHandler);
     releaseLock();
-  };
-  req.on("close", clientDisconnectHandler);
+    throw preLLMSaveErr;
+  }
 
   // Note: We do NOT broadcast the user message here because the frontend
   // already adds it optimistically. Broadcasting would create a duplicate.
@@ -1629,6 +1634,13 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
     // a generic "agent invocation failed" to the client and keep the
     // full text in the message transcript + logger for debugging.
     res.status(500).json({ success: false, error: "Agent invocation failed" });
+  } finally {
+    // 12-C11: belt-and-suspenders. Success and catch both clear
+    // `heartbeat` (lines 1494 + 1602), but any future maintainer adding
+    // a new return/throw path that skips the cleanup would leak a
+    // 2-second-tick interval per spawn. clearInterval(undefined) is a
+    // no-op, so this is idempotent with the explicit clears above.
+    if (heartbeat) clearInterval(heartbeat);
   }
 });
 
@@ -1819,7 +1831,6 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
           content: `${agentRole} is working... (${elapsed}s)`,
         } as WSEvent);
       }, 2000);
-
       const result = await invokeAgent(
         agentRole,
         task,
@@ -1979,6 +1990,15 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
       if (ticketId) {
         await moveQuestTicket(ticketId, "available", agentRole);
       }
+    } finally {
+      // 12-C11: belt-and-suspenders. The inner try/catch above already
+      // clears `heartbeat` on both the success path (line 1849) and the
+      // catch path (line 1947), but any future maintainer adding a code
+      // path that returns/throws without re-clearing would leak a
+      // 2-second-tick interval per spawn. A finally block makes the
+      // invariant unconditional and the cleanup idempotent
+      // (clearInterval(undefined) is a no-op).
+      if (heartbeat) clearInterval(heartbeat);
     }
   }
 

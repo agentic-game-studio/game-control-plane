@@ -195,9 +195,26 @@ const ActivityLog = memo(function ActivityLog({ toolCalls, logs, defaultExpanded
 
 const ImageGallery = memo(function ImageGallery({ images }: { images?: string[] }) {
   if (!images || images.length === 0) return null;
+  // 12-C3: only render allowlisted URL schemes. The producer chat lets
+  // users paste arbitrary content, and a malicious paste of e.g.
+  // `data:text/html,<script>...</script>` would otherwise render as an
+  // <img> whose `src` browsers may treat as a navigation target on
+  // right-click / drag-out. Allow only http(s), blob:, and data:image/*.
+  // Anything else is silently dropped so the chat keeps rendering.
+  const safe = images.filter((src) => {
+    if (typeof src !== "string" || src.length === 0) return false;
+    const trimmed = src.trim().toLowerCase();
+    if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) return true;
+    if (trimmed.startsWith("blob:") || trimmed.startsWith("/")) return true;
+    // data:image/png;base64,..., data:image/jpeg;..., data:image/webp;..., etc.
+    // Block data:text/html, data:application/*, etc.
+    if (trimmed.startsWith("data:image/")) return true;
+    return false;
+  });
+  if (safe.length === 0) return null;
   return (
       <div className="flex flex-col gap-2 mt-3 max-w-full min-w-0">
-        {images.map((src, i) => (
+        {safe.map((src, i) => (
           <div key={i} className="border-2 border-black shadow-[2px_2px_0_0_rgba(0,0,0,1)] overflow-hidden max-w-full">
           <img src={src} alt={`Attachment ${i + 1}`} className="max-w-full max-h-64 object-contain" loading="lazy" />
         </div>
