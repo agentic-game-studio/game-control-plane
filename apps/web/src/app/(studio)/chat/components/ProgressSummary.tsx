@@ -1,5 +1,5 @@
 "use client";
-
+import { createLogger } from "../../../../lib/logger";
 import { useEffect, useState, useRef } from "react";
 import type { ContextUsage } from "@game-studio/types";
 import { apiFetch } from "@/lib/api";
@@ -11,6 +11,8 @@ import {
   producerModelContextFillPercent,
   contextFillPercentFromUsage,
 } from "@/lib/chat-context";
+
+const logger = createLogger("ProgressSummary");
 
 interface TicketSummary {
   available: number;
@@ -99,7 +101,7 @@ export default function ProgressSummary({ activeAgents, producerSessionId, curre
           setTickets(summary);
         }
       } catch (err) {
-        console.error("[Progress] Failed to fetch tickets:", err);
+        logger.error("Failed to fetch tickets", { err: err });
       }
     };
 
@@ -140,7 +142,7 @@ export default function ProgressSummary({ activeAgents, producerSessionId, curre
         setContextEstTokens(estimateConversationTokensFromHistory(session.conversationHistory));
         setContextPct(producerModelContextFillPercent(session.conversationHistory));
       } catch (err) {
-        console.error("[Progress] Failed to fetch session context:", err);
+        logger.error("Failed to fetch session context", { err: err });
       }
     };
 

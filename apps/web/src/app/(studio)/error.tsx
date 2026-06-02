@@ -1,14 +1,15 @@
+import { createLogger } from "../../lib/logger";
 "use client";
-
 import { useEffect } from "react";
 import Link from "next/link";
-
 /**
  * Studio error boundary — catches any uncaught exception in the (studio) route
  * group and renders a recovery UI instead of a blank page. Without this, a
  * single bad render anywhere in /chat, /tickets, /assets, etc. would white-
  * screen the entire app with no way back.
  */
+const logger = createLogger("error");
+
 export default function StudioError({
   error,
   reset,
@@ -20,7 +21,7 @@ export default function StudioError({
     // Surface to the browser console so devs see the stack in dev tools.
     // In production, this is the only signal that a render error occurred.
     // eslint-disable-next-line no-console
-    console.error("[StudioErrorBoundary]", error);
+    logger.error("", { err: error });
   }, [error]);
 
   return (

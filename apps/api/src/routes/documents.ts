@@ -5,6 +5,7 @@ import { loadConfig } from "../config.js";
 import { broadcast } from "../services/websocket.js";
 import { readData } from "../services/data-store.js";
 import { resolveProjectWorkspace } from "../utils/workspace.js";
+import { logger } from "../utils/logger.js";
 import type { Project } from "@game-studio/types";
 
 export const documentsRouter: Router = Router();
@@ -88,7 +89,11 @@ documentsRouter.get("/graph/data", async (req: Request, res: Response) => {
     const graph = await store.getGraphData();
     res.json({ success: true, data: { graph } });
   } catch (err) {
-    res.status(500).json({ success: false, error: String(err) });
+    logger.error(
+      { err: err instanceof Error ? err.message : String(err), event: "documents_graph_failed" },
+      "Failed to fetch document graph data",
+    );
+    res.status(500).json({ success: false, error: "Failed to fetch document graph" });
   }
 });
 
@@ -100,7 +105,11 @@ documentsRouter.get("/", async (req: Request, res: Response) => {
     const categories = store.getCategories();
     res.json({ success: true, data: { documents, categories } });
   } catch (err) {
-    res.status(500).json({ success: false, error: String(err) });
+    logger.error(
+      { err: err instanceof Error ? err.message : String(err), event: "documents_list_failed" },
+      "Failed to list documents",
+    );
+    res.status(500).json({ success: false, error: "Failed to list documents" });
   }
 });
 
@@ -115,7 +124,11 @@ documentsRouter.get("/:slug", async (req: Request, res: Response) => {
     }
     res.json({ success: true, data: { document: doc } });
   } catch (err) {
-    res.status(500).json({ success: false, error: String(err) });
+    logger.error(
+      { err: err instanceof Error ? err.message : String(err), slug: req.params.slug, event: "documents_get_failed" },
+      "Failed to fetch document",
+    );
+    res.status(500).json({ success: false, error: "Failed to fetch document" });
   }
 });
 
@@ -130,6 +143,10 @@ documentsRouter.post("/refresh", async (req: Request, res: Response) => {
     }
     res.json({ success: true });
   } catch (err) {
-    res.status(500).json({ success: false, error: String(err) });
+    logger.error(
+      { err: err instanceof Error ? err.message : String(err), event: "documents_refresh_failed" },
+      "Failed to refresh document cache",
+    );
+    res.status(500).json({ success: false, error: "Failed to refresh documents" });
   }
 });

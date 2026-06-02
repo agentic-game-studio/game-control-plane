@@ -1,8 +1,9 @@
 "use client";
-
+import { createLogger } from "../../../lib/logger";
 import { useState, useEffect } from "react";
 import { apiFetch } from "@/lib/api";
 import type { AgentRole } from "@game-studio/types";
+const logger = createLogger("page");
 
 interface AgentPrompt {
   name: string;
@@ -47,7 +48,7 @@ export default function AgentsPage() {
         const data = await apiFetch<AgentPrompt[]>("/api/prompts/agents");
         setAgents(data);
       } catch (error) {
-        console.error("Failed to load agents:", error);
+        logger.error("Failed to load agents", { err: error });
       } finally {
         setLoading(false);
       }
@@ -78,7 +79,7 @@ export default function AgentsPage() {
       setSpawnSuccess(agent.name);
       setTimeout(() => setSpawnSuccess(null), 3000);
     } catch (error) {
-      console.error("Failed to spawn agent:", error);
+      logger.error("Failed to spawn agent", { err: error });
     } finally {
       setSpawning(null);
     }

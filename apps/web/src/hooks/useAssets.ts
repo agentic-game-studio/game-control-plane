@@ -1,5 +1,5 @@
 "use client";
-
+import { createLogger } from "../lib/logger";
 import { useState, useCallback, useEffect, useRef } from "react";
 import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "./useWebSocket";
@@ -11,6 +11,8 @@ import type {
   UpdateAssetRequest,
   WSEvent,
 } from "@game-studio/types";
+
+const logger = createLogger("useAssets");
 
 const DEFAULT_ASSETS: AssetsData = {
   assets: [],
@@ -51,7 +53,7 @@ export function useAssets(projectId?: string) {
         setData(result);
         setError(null);
       } catch (err) {
-        console.error("Failed to fetch assets:", err);
+        logger.error("Failed to fetch assets", { err: err });
         if (!mountedRef.current) return;
         setError(err instanceof Error ? err.message : "Failed to load assets");
         setData(DEFAULT_ASSETS);

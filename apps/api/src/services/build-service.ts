@@ -11,7 +11,7 @@ import { readData, writeData, broadcastEvent } from "./data-store.js";
 import { generateProjectChangelog } from "./changelog-service.js";
 import { resolveProjectWorkspace } from "../utils/workspace.js";
 import { resolveHomeDir } from "../utils/paths.js";
-import { loadConfig, resolvePipelinePython } from "../config.js";
+import { loadConfig, resolvePipelinePython, SUBPROCESS_MAX_BUFFER } from "../config.js";
 import { readProjectVersion, bumpProjectVersion } from "./qa-gate-service.js";
 import type { BuildPlatform, BuildsData, CreateBuildRequest, GameBuild, WSEvent } from "@game-studio/types";
 import { logger } from "../utils/logger.js";
@@ -117,7 +117,7 @@ export async function executeGodotExport(
     // freezing WS broadcasts and HTTP requests on the process. The
     // async version yields to the event loop so other clients can
     // proceed while the export runs.
-    await execFileAsync(pythonBin, args, { timeout: 240_000, maxBuffer: 10 * 1024 * 1024 });
+    await execFileAsync(pythonBin, args, { timeout: 240_000, maxBuffer: SUBPROCESS_MAX_BUFFER });
     build.status = "success";
     build.artifactPath = join("builds", artifactName);
     build.smokeTestPassed = existsSync(artifactAbs);

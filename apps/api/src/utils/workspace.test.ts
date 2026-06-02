@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { resolveProjectWorkspace } from "./workspace.js";
-import { loadConfig } from "../config.js";
+import { loadConfig, __resetConfigForTesting } from "../config.js";
 
 describe("resolveProjectWorkspace", () => {
   let workspaceDir: string;
@@ -22,18 +22,12 @@ describe("resolveProjectWorkspace", () => {
     workspaceDir = mkdtempSync(join(tmpdir(), "ws-traversal-ws-"));
     outsideDir = mkdtempSync(join(tmpdir(), "ws-traversal-out-"));
 
-    // loadConfig() is cached in module scope. The very first call here
-    // populates WORKSPACE_DIR from env. We can override that with a
-    // direct env write before the import runs — but since the module
-    // is already loaded by other tests, we just patch the env and
-    // force-reload via a config-state reset. The simplest portable
-    // approach: set process.env.WORKSPACE_DIR to our tempdir and let
-    // the cache pick it up on the next call.
+    // 11-M16: explicitly clear the cached config so the WORKSPACE_DIR
+    // mutation just above is actually observed by the next loadConfig()
+    // call. The previous `void loadConfig()` was a no-op when config
+    // was already cached from a prior import.
     process.env.WORKSPACE_DIR = workspaceDir;
-    // Re-load: loadConfig returns the cached state if already set. We
-    // bust the cache by deleting the module's module-level state via
-    // a re-import (vitest isolates module state per file, so this
-    // works for a single-file test run).
+    __resetConfigForTesting();
     void loadConfig();
   });
 

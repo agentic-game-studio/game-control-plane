@@ -16,7 +16,7 @@ import { Router } from "express";
 import type { Request, Response } from "express";
 import { existsSync, mkdirSync, openSync, writeFileSync, closeSync, readdirSync, statSync, unlinkSync, renameSync } from "fs";
 import { join, resolve, sep } from "path";
-import { loadConfig, resolvePipelinePython } from "../config.js";
+import { loadConfig, resolvePipelinePython, SUBPROCESS_MAX_BUFFER } from "../config.js";
 import { invokeAgent, detectEngineFromWorkspace, type ProjectContext } from "../services/llm-service.js";
 import { readData, writeData, broadcastEvent } from "../services/data-store.js";
 import { generateTickets, addTicketsToBoard } from "../services/ticket-generator.js";
@@ -133,18 +133,92 @@ function debugLog(msg: string): void {
  * spawns a godot subprocess. If the parent python3 is orphaned (agent timed out),
  * it keeps running indefinitely with its child godot process.
  *
- * Cross-platform: uses `pgrep` + `pkill` on POSIX, `taskkill` on Windows.
+ * Cross-platform: uses `pgrep` + `pkill` on POSIX, `tasklist` + `taskkill` on
+ * Windows.
  */
 function killOrphanedSubprocesses(): void {
   const platform = process.platform;
 
   try {
     if (platform === "win32") {
-      // /F = force, /T = tree (include child processes), /IM = image name match.
-      // Targets the `godot` child directly; the python parent is a separate
-      // process and would be killed by the tree walk.
-      execFileSync("taskkill", ["/F", "/T", "/IM", "godot.exe"], { timeout: 5000, stdio: "ignore" });
-      logger.info({ event: "kill_orphaned_subprocesses_win32" }, "Killed orphaned godot subprocess(es) via taskkill");
+      // 11-H2: the previous code used `taskkill /F /T /IM godot.exe` which
+      // kills EVERY godot.exe on the box — including the user's open
+      // Godot editor windows that have nothing to do with our runner.
+      // Build a targeted kill: enumerate godot.exe processes with
+      // `tasklist`, parse out their parent PIDs, and only kill the
+      // ones whose parent is python.exe running run_godot_headless.py.
+      // We then kill the child + the python parent, mirroring the
+      // POSIX `pgrep -P` walk below.
+      type WinProc = { pid: number; parentPid: number; name: string };
+      const listOut = execFileSync("tasklist", ["/FO", "CSV", "/NH"], { timeout: 5000, stdio: ["ignore", "pipe", "ignore"] })
+        .toString()
+        .trim();
+      const all: WinProc[] = [];
+      for (const line of listOut.split(/\r?\n/)) {
+        // Format: "Image Name","PID","Session Name","Session#","Mem Usage"
+        const m = /^"([^"]+)","(\d+)","[^"]*","\d+","[\d,]+ ?K?"/.exec(line);
+        if (!m) continue;
+        all.push({ name: m[1]!, pid: parseInt(m[2]!, 10), parentPid: 0 });
+      }
+      // WMI roundtrip to populate parent pids. `wmic` is deprecated but
+      // still shipped; `Get-CimInstance` is the modern equivalent. We
+      // use PowerShell because it's preinstalled on all supported
+      // Windows versions and doesn't need admin to read process info.
+      const psScript = `Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId | ConvertTo-Csv -NoTypeInformation`;
+      const psOut = execFileSync("powershell", ["-NoProfile", "-Command", psScript], {
+        timeout: 10000,
+        stdio: ["ignore", "pipe", "ignore"],
+      }).toString();
+      const parentByChild = new Map<number, number>();
+      for (const line of psOut.split(/\r?\n/).slice(1)) {
+        const m = /^"(\d+)","(\d+)"/.exec(line);
+        if (!m) continue;
+        parentByChild.set(parseInt(m[1]!, 10), parseInt(m[2]!, 10));
+      }
+      for (const p of all) p.parentPid = parentByChild.get(p.pid) ?? 0;
+
+      // Find godot.exe children whose parent is python.exe running our
+      // script. We don't have a portable way to read the parent's
+      // command line via tasklist, so we additionally check that the
+      // parent's parent is the API or one of our spawning shells by
+      // walking the tree to find a python.exe ancestor — if any
+      // ancestor is python.exe with run_godot_headless.py in its argv,
+      // it's ours. Practically, we just check that the direct parent
+      // is python.exe; the runner script always spawns godot directly.
+      const pythonPids = new Set(all.filter((p) => /^python(\d+)?\.exe$/i.test(p.name)).map((p) => p.pid));
+      const godotChildren: WinProc[] = [];
+      for (const p of all) {
+        if (!/^godot\.exe$/i.test(p.name)) continue;
+        if (!pythonPids.has(p.parentPid)) continue;
+        godotChildren.push(p);
+      }
+      if (godotChildren.length === 0) return;
+
+      const killedChildPids: number[] = [];
+      for (const child of godotChildren) {
+        try {
+          execFileSync("taskkill", ["/F", "/PID", String(child.pid)], { timeout: 5000, stdio: "ignore" });
+          killedChildPids.push(child.pid);
+        } catch {
+          // child may have already exited; keep going
+        }
+      }
+      // Walk up from each killed child and kill the python parent too,
+      // to release any pending I/O on the runner script.
+      const parentPids = new Set(godotChildren.map((c) => c.parentPid).filter((p) => p > 0));
+      const killedParentPids: number[] = [];
+      for (const parentPid of parentPids) {
+        try {
+          execFileSync("taskkill", ["/F", "/PID", String(parentPid)], { timeout: 5000, stdio: "ignore" });
+          killedParentPids.push(parentPid);
+        } catch {
+          // parent may have already exited
+        }
+      }
+      logger.info(
+        { killedChildPids, killedParentPids, event: "kill_orphaned_subprocesses_win32" },
+        `Killed ${killedChildPids.length} orphaned godot child + ${killedParentPids.length} python parent subprocess(es) on win32`,
+      );
       return;
     }
 
@@ -246,7 +320,7 @@ async function runBootCheck(projectPath: string): Promise<{ bootOk: boolean; err
     const { stdout } = await execFileAsyncLocal(
       pythonBin,
       [scriptPath, "--project", projectPath, "--command", "boot", "--godot-bin", godotBin, "--timeout", "45"],
-      { timeout: 90_000, maxBuffer: 10 * 1024 * 1024 }, // 90s max (boot is fast, 60s timeout inside script)
+      { timeout: 90_000, maxBuffer: SUBPROCESS_MAX_BUFFER }, // 90s max (boot is fast, 60s timeout inside script)
     );
 
     // Parse JSON output from run_godot_headless.py

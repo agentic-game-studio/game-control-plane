@@ -3,6 +3,7 @@ import type { Request, Response } from "express";
 import { agents } from "@game-studio/agents";
 import { broadcast } from "../services/websocket.js";
 import { getAgentSystemPrompt } from "../prompts/agent-prompt-loader.js";
+import { logger } from "../utils/logger.js";
 import type { AgentRole } from "@game-studio/types";
 
 export const agentsRouter: Router = Router();
@@ -29,6 +30,14 @@ agentsRouter.get("/:id/prompt", async (req: Request, res: Response) => {
     const prompt = await getAgentSystemPrompt(req.params.id as string);
     res.json({ success: true, data: { role: req.params.id as string, systemPrompt: prompt } });
   } catch (err) {
+    // Most paths here are the expected "no .md file for this agent" case.
+    // Log at debug to keep the 404 response shape consistent with how the
+    // prompt loader signals missing prompts; bump to warn if a non-ENOENT
+    // error path becomes common.
+    logger.debug(
+      { err: err instanceof Error ? err.message : String(err), agentId: req.params.id },
+      "Agent prompt not found",
+    );
     res.status(404).json({ success: false, error: `Prompt not found for agent: ${req.params.id}` });
   }
 });

@@ -1,5 +1,5 @@
 "use client";
-
+import { createLogger } from "../lib/logger";
 import { useState, useCallback, useEffect, useRef } from "react";
 import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "./useWebSocket";
@@ -9,6 +9,8 @@ import {
   type SubscriptionTier,
   type WSEvent,
 } from "@game-studio/types";
+
+const logger = createLogger("useSettings");
 
 export function useSettings() {
   const [data, setData] = useState<SettingsConfig>(DEFAULT_SETTINGS);
@@ -23,7 +25,7 @@ export function useSettings() {
       setData(result);
       setError(null);
     } catch (err) {
-      console.error("Failed to fetch settings:", err);
+      logger.error("Failed to fetch settings", { err: err });
       if (!mountedRef.current) return;
       setError(err instanceof Error ? err.message : "Failed to load settings");
       setData(DEFAULT_SETTINGS);

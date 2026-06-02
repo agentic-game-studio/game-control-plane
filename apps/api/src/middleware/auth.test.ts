@@ -18,7 +18,7 @@ import { describe, expect, it, beforeAll } from "vitest";
 import express from "express";
 import type { Request, Response, NextFunction } from "express";
 import { authMiddleware } from "./auth.js";
-import { loadConfig } from "../config.js";
+import { loadConfig, __resetConfigForTesting } from "../config.js";
 
 function buildApp() {
   const app = express();
@@ -48,6 +48,11 @@ describe("authMiddleware", () => {
 
   beforeAll(async () => {
     process.env.API_SECRET = validKey;
+    // 11-M16: explicitly clear the cached config so the API_SECRET
+    // mutation above is observed by the next loadConfig() call.
+    // `void loadConfig()` alone is a no-op when config was already
+    // cached from a prior import.
+    __resetConfigForTesting();
     void loadConfig();
     app = buildApp();
     server = app.listen(0);

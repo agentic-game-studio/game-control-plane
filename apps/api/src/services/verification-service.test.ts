@@ -57,18 +57,27 @@ describe("verifyTicket dead-letter", () => {
     // Track the ticket state as the mock invokes our updater fn.
     const ticket: Ticket = { ...baseTicket, consecutiveFailures: 0 };
     const seenCounts: number[] = [];
+    // The mock has to persist the bumped state across calls — the verify
+    // error path does TWO updateTicketsBoard calls (one to bump the
+    // counter, then moveQuestTicket → updateTicketsBoard to move the
+    // ticket back to `available`). A stateless mock would feed the same
+    // starting board to both updaters and report 1,1 instead of 1,2.
+    const liveBoard = {
+      projectId: "P-1",
+      sprint: "",
+      milestone: "",
+      columns: [
+        { id: "qa", label: "Verify", tickets: [{ ...ticket }] },
+        { id: "failed", label: "Failed", tickets: [] },
+      ],
+    };
 
     vi.mocked(ticketBoard.updateTicketsBoard).mockImplementation(
       async (_projectId, updater) => {
-        const result = updater({
-          projectId: "P-1",
-          sprint: "",
-          milestone: "",
-          columns: [
-            { id: "qa", label: "Verify", tickets: [ticket] },
-            { id: "failed", label: "Failed", tickets: [] },
-          ],
-        });
+        const result = updater(liveBoard);
+        // Persist the mutation in-place so the next call observes the
+        // bumped counter.
+        liveBoard.columns = result.columns;
         const updated = result.columns
           .flatMap((c) => c.tickets)
           .find((t) => t.id === ticket.id);
@@ -76,21 +85,20 @@ describe("verifyTicket dead-letter", () => {
         return result;
       },
     );
-    vi.mocked(ticketBoard.readTicketsBoard).mockResolvedValue({
-      projectId: "P-1",
-      sprint: "",
-      milestone: "",
-      columns: [
-        { id: "qa", label: "Verify", tickets: [ticket] },
-        { id: "failed", label: "Failed", tickets: [] },
-      ],
-    });
+    vi.mocked(ticketBoard.readTicketsBoard).mockResolvedValue(liveBoard);
     vi.mocked(llm.invokeAgent).mockRejectedValue(new Error("llm down"));
 
-    await triggerVerification(ticket, "output");
+    // 11-M15: call `verifyTicket` directly. `triggerVerification` is
+    // fire-and-forget — `await triggerVerification(...)` resolves to
+    // `undefined` immediately and the assertion below was racing the
+    // actual work. The dead-letter test (further down) already
+    // documents this with the same workaround.
+    await verifyTicket(ticket, "output");
 
-    // First error: counter should be 1.
-    expect(seenCounts).toEqual([1]);
+    // First error: counter is bumped to 1 in the first update, then the
+    // ticket is moved back to `available` (second update sees 1 because
+    // the move is a no-op for the counter). One error = one increment.
+    expect(seenCounts).toEqual([1, 1]);
   });
 
   it("dead-letters exactly once on the 3rd consecutive error", async () => {

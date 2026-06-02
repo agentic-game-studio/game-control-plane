@@ -1,8 +1,9 @@
 "use client";
-
+import { createLogger } from "../../../lib/logger";
 import { useState, useEffect } from "react";
 import { apiFetch } from "@/lib/api";
 import { useDialog } from "@/hooks/useDialog";
+const logger = createLogger("page");
 
 interface SkillPhase {
   order: number;
@@ -61,7 +62,7 @@ export default function TeamsPage() {
         const data = await apiFetch<TeamSkill[]>("/api/teams");
         setTeams(data);
       } catch (error) {
-        console.error("Failed to load teams:", error);
+        logger.error("Failed to load teams", { err: error });
       } finally {
         setLoading(false);
       }
@@ -74,7 +75,7 @@ export default function TeamsPage() {
         const sessions = await apiFetch<{ currentSessionId: string }>("/api/chat/sessions");
         setSessionId(sessions.currentSessionId);
       } catch (error) {
-        console.error("Failed to get session:", error);
+        logger.error("Failed to get session", { err: error });
       }
     };
     initSession();
@@ -97,7 +98,7 @@ export default function TeamsPage() {
       });
       await showAlert(`${team.name} workflow started!`);
     } catch (error) {
-      console.error("Failed to run team:", error);
+      logger.error("Failed to run team", { err: error });
       await showAlert(`Failed to run team: ${error}`);
     } finally {
       setRunning(false);

@@ -1,6 +1,7 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
 import { readData, writeData, updateData, broadcastEvent } from "../services/data-store.js";
+import { logger } from "../utils/logger.js";
 import type { SettingsConfig, SubscriptionTier } from "@game-studio/types";
 import { DEFAULT_SETTINGS, TIER_DEFINITIONS } from "@game-studio/types";
 import type { WSEvent } from "@game-studio/types";
@@ -133,6 +134,10 @@ settingsRouter.patch("/", async (req: Request, res: Response) => {
     broadcastEvent({ type: "settings:updated", settings: updatedSettings } as WSEvent);
     res.json({ success: true, data: updatedSettings });
   } catch (error) {
+    logger.error(
+      { err: error instanceof Error ? error.message : String(error), event: "settings_update_failed" },
+      "Failed to update settings",
+    );
     res.status(500).json({ success: false, error: "Failed to update settings" });
   }
 });
@@ -145,6 +150,10 @@ settingsRouter.post("/reset", async (_req: Request, res: Response) => {
     broadcastEvent({ type: "settings:updated", settings: fresh } as WSEvent);
     res.json({ success: true, data: fresh });
   } catch (error) {
+    logger.error(
+      { err: error instanceof Error ? error.message : String(error), event: "settings_reset_failed" },
+      "Failed to reset settings",
+    );
     res.status(500).json({ success: false, error: "Failed to reset settings" });
   }
 });
@@ -181,6 +190,10 @@ settingsRouter.post("/topup", async (req: Request, res: Response) => {
     broadcastEvent({ type: "settings:updated", settings: updated } as WSEvent);
     res.json({ success: true, data: updated });
   } catch (error) {
+    logger.error(
+      { err: error instanceof Error ? error.message : String(error), amount, event: "settings_topup_failed" },
+      "Failed to top up credits",
+    );
     res.status(500).json({ success: false, error: "Failed to top up credits" });
   }
 });
@@ -212,6 +225,10 @@ settingsRouter.post("/upgrade", async (req: Request, res: Response) => {
     broadcastEvent({ type: "settings:updated", settings: updated } as WSEvent);
     res.json({ success: true, data: updated });
   } catch (error) {
+    logger.error(
+      { err: error instanceof Error ? error.message : String(error), tier, event: "settings_upgrade_failed" },
+      "Failed to upgrade tier",
+    );
     res.status(500).json({ success: false, error: "Failed to upgrade tier" });
   }
 });
@@ -271,6 +288,10 @@ settingsRouter.post("/consume", async (req: Request, res: Response) => {
     broadcastEvent({ type: "settings:updated", settings: updated } as WSEvent);
     res.json({ success: true, data: updated });
   } catch (error) {
+    logger.error(
+      { err: error instanceof Error ? error.message : String(error), taskName, creditsUsed, event: "settings_consume_failed" },
+      "Failed to consume credits",
+    );
     res.status(500).json({ success: false, error: "Failed to consume credits" });
   }
 });

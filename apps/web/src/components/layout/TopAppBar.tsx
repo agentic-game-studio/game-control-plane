@@ -96,6 +96,11 @@ export default function TopAppBar() {
         <div className="border-2 border-black flex items-center px-2 py-1 bg-white hidden md:flex">
           <span className="material-symbols-outlined text-black mr-2 text-sm">search</span>
           <input
+            // 11-M11: aria-label for screen readers. The input is
+            // icon-only visually (a search icon sits next to the
+            // placeholder), so without an aria-label a screen reader
+            // announces only "edit text" with no purpose.
+            aria-label="Search"
             className="bg-transparent border-none outline-none text-black font-[var(--font-terminal)] text-sm p-0 w-32 focus:ring-0 placeholder:text-black"
             placeholder="SEARCH_"
             type="text"

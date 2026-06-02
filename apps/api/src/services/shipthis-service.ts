@@ -6,6 +6,7 @@ import { existsSync } from "fs";
 import { join } from "path";
 import { execFile } from "child_process";
 import { promisify } from "util";
+import { SUBPROCESS_MAX_BUFFER } from "../config.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -45,7 +46,7 @@ export async function runShipThisExport(
     const { stdout, stderr } = await execFileAsync(
       process.execPath,
       [cli, "game", "export", "--path", projectPath, "--platform", platform],
-      { timeout: 600_000, maxBuffer: 10 * 1024 * 1024 },
+      { timeout: 600_000, maxBuffer: SUBPROCESS_MAX_BUFFER },
     );
     return { success: true, output: stdout + stderr };
   } catch (err: unknown) {

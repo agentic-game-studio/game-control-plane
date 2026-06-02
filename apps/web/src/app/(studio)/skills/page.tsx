@@ -1,8 +1,9 @@
 "use client";
-
+import { createLogger } from "../../../lib/logger";
 import { useState, useEffect } from "react";
 import { apiFetch } from "@/lib/api";
 import { useDialog } from "@/hooks/useDialog";
+const logger = createLogger("page");
 
 interface SkillPhase {
   order: number;
@@ -54,7 +55,7 @@ export default function SkillsPage() {
         const data = await apiFetch<Skill[]>("/api/skills");
         setSkills(data);
       } catch (error) {
-        console.error("Failed to load skills:", error);
+        logger.error("Failed to load skills", { err: error });
       } finally {
         setLoading(false);
       }
@@ -69,7 +70,7 @@ export default function SkillsPage() {
         );
         setSessionId(sessions.currentSessionId);
       } catch (error) {
-        console.error("Failed to get session:", error);
+        logger.error("Failed to get session", { err: error });
       }
     };
     initSession();
@@ -140,7 +141,7 @@ export default function SkillsPage() {
       setInvokeSuccess(true);
       setTimeout(() => setInvokeSuccess(false), 3000);
     } catch (error) {
-      console.error("Failed to invoke skill:", error);
+      logger.error("Failed to invoke skill", { err: error });
       await showAlert(`Failed to invoke skill: ${error}`);
     } finally {
       setInvoking(false);

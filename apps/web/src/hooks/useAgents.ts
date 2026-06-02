@@ -1,10 +1,11 @@
 "use client";
-
+import { createLogger } from "../lib/logger";
 import { useState, useCallback, useEffect, useRef } from "react";
 import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "./useWebSocket";
 import type { AgentDefinition } from "@game-studio/types";
 import type { WSEvent } from "@game-studio/types";
+const logger = createLogger("useAgents");
 
 interface UseAgentsReturn {
   agents: AgentDefinition[];
@@ -27,7 +28,7 @@ export function useAgents(): UseAgentsReturn {
       setAgents(result);
       setError(null);
     } catch (err) {
-      console.error("Failed to fetch agents:", err);
+      logger.error("Failed to fetch agents", { err: err });
       if (!mountedRef.current) return;
       setError(err instanceof Error ? err.message : "Failed to load agents");
     } finally {

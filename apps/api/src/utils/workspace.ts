@@ -7,9 +7,8 @@
  * paths like `/etc/..` or `..foo`.
  */
 
-import { existsSync, mkdirSync } from "fs";
 import { promises as fs } from "fs";
-import { join, resolve, relative, sep } from "path";
+import { resolve, relative, sep } from "path";
 import { loadConfig } from "../config.js";
 
 /** Resolve a project's workspacePath to an absolute filesystem path.
@@ -136,9 +135,3 @@ export async function validateWorkspacePath(workspacePath: string): Promise<{
     };
   }
 }
-
-// Suppress unused-var warning: keep existsSync/mkdirSync/join re-exports for
-// back-compat with existing importers.
-void existsSync;
-void mkdirSync;
-void join;

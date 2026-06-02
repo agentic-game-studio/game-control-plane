@@ -1,10 +1,11 @@
 "use client";
-
+import { createLogger } from "../lib/logger";
 import { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "./useWebSocket";
 import { useProject } from "@/contexts/ProjectContext";
 import type { WSEvent, ContextUsage } from "@game-studio/types";
+const logger = createLogger("useCommandRoom");
 
 export interface DiffBlock {
   filePath: string;
@@ -626,7 +627,18 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, prod
             });
             return { sessions: next, messages };
           }
+          // 11-M9: line was parsed as a tool call, but it's a duplicate
+          // — drop silently. The previous code fell through to the log
+          // handler below and re-appended the same line to the progress
+          // logs, so a duplicate tool call ended up shown twice in the
+          // UI (once as a (collapsed) duplicate tool call, once as a
+          // raw log line).
+          return { sessions: null, messages };
         }
+        // toolMatch succeeded but no progress message exists yet. The
+        // tool call would have nowhere to land; falling through to the
+        // system-message path below is the right behavior, so don't
+        // return here.
       }
 
       // Fallback: append to progress message logs instead of creating system message
@@ -824,10 +836,36 @@ export function useCommandRoom() {
   const lastSpawnedRef = useRef<string | null>(null);
   const activityLogRef = useRef<string[]>([]);
   const addSessionMessageRef = useRef<(role: string, msg: Omit<ChatMessage, "id" | "timestamp">) => void | undefined>(undefined);
+  // 11-H11: buffer messages for sessions that don't exist yet in the
+  // local map. The WS handler can fire `chat:message` events for a
+  // session the UI hasn't yet seen (e.g. a sub-agent was just
+  // spawned by another tab, or a producer session was created in
+  // the background). Without this buffer, the event is silently
+  // dropped and the UI shows the session "spinning" forever even
+  // though the backend has produced output. We keep the most
+  // recent 50 events per session so the buffer doesn't grow without
+  // bound, and we drain it on the next setAllSessions that adds
+  // the session.
+  const pendingMessagesBySessionRef = useRef<Map<string, Array<Omit<ChatMessage, "id" | "timestamp">>>>(new Map());
+  const MAX_PENDING_MESSAGES = 50;
   const recentApiMessagesRef = useRef<Set<string>>(new Set());
   // Ref for latest sessions to flush cache on unmount / navigation
   const latestSessionsRef = useRef<Map<string, AgentSession>>(new Map());
   const latestSubagentsRef = useRef<Map<string, SubagentInfo>>(new Map());
+  // 11-H12: track the 5-minute safety timeout from executeCommand so
+  // we can clear it on unmount. Without this, navigating away while
+  // a request is in flight leaves the timer scheduled, and it fires
+  // after teardown — calling setIsLoading on a dead component and
+  // posting a system message into a session the user already left.
+  const loadingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 11-M10: AbortController for the in-flight chat POST so /stop can
+  // actually cancel it. The backend already cancels the LLM fetch
+  // when /api/autonomous/stop fires, but the chat message fetch on
+  // the frontend was fire-and-forget — clicking Stop just queued
+  // a /stop request alongside the in-flight POST, and the chat
+  // request kept running until completion. Wire signal through
+  // apiFetch and call abort() on /stop.
+  const chatAbortControllerRef = useRef<AbortController | null>(null);
   // F2: Ref for currentSession to avoid stale closures in async callbacks
   const currentSessionRef = useRef(currentSession);
   currentSessionRef.current = currentSession;
@@ -999,7 +1037,14 @@ export function useCommandRoom() {
         if (cachedForMerge?.threadId) {
           setThreadId(cachedForMerge.threadId);
         } else {
-          setThreadId(`#${Math.floor(Math.random() * 9000 + 1000)}`);
+          // 11-H15: use crypto.getRandomValues for thread id. The
+          // previous `Math.random() * 9000 + 1000` collided on the
+          // order of ~1 in 9000; with many threads in a session the
+          // user would see two with the same number. crypto is
+          // available in all modern browsers and in Node 19+.
+          const buf = new Uint32Array(1);
+          crypto.getRandomValues(buf);
+          setThreadId(`#${1000 + (buf[0]! % 9000)}`);
         }
         if (cachedForMerge?.threadTitle) {
           setThreadTitle(cachedForMerge.threadTitle);
@@ -1029,7 +1074,7 @@ export function useCommandRoom() {
         }
       } catch (error) {
         if (cancelled) return;
-        console.error("Failed to fetch chat sessions:", error);
+        logger.error("Failed to fetch chat sessions", { err: error });
         // If API fails and we have no cached data, we're already initialized with empty state
       } finally {
         if (!cancelled) setInitialized(true);
@@ -1119,21 +1164,63 @@ export function useCommandRoom() {
         clearTimeout(cacheSaveTimerRef.current);
         cacheSaveTimerRef.current = null;
       }
+      // 11-H12: clear the 5-minute safety timeout so it doesn't
+      // fire after the component unmounts.
+      if (loadingTimeoutRef.current) {
+        clearTimeout(loadingTimeoutRef.current);
+        loadingTimeoutRef.current = null;
+      }
     };
   }, []);
 
   const addSessionMessage = useCallback((sessionRole: string, msg: Omit<ChatMessage, "id" | "timestamp">) => {
     setAllSessions((prev) => {
-      const session = prev.get(sessionRole);
-      if (!session) return prev;
-
-      // Deduplicate: skip if same type+sender+content already exists as the last message
-      const lastMsg = session.messages[session.messages.length - 1];
-      if (lastMsg && lastMsg.type === msg.type && lastMsg.sender === msg.sender && (lastMsg.content ?? "").trim() === (msg.content ?? "").trim()) {
+      let session = prev.get(sessionRole);
+      if (!session) {
+        // 11-H11: buffer for sessions that don't exist locally yet.
+        // The next setAllSessions that includes this session will
+        // drain the buffer (see below).
+        const pending = pendingMessagesBySessionRef.current.get(sessionRole) ?? [];
+        pending.push(msg);
+        if (pending.length > MAX_PENDING_MESSAGES) pending.shift();
+        pendingMessagesBySessionRef.current.set(sessionRole, pending);
         return prev;
       }
 
       const next = new Map(prev);
+
+      // 11-H11: drain any messages that were buffered while this
+      // session was unborn. We append them before the new message
+      // (and after the dedupe check would have considered them
+      // already, but since they were never inserted we just push
+      // them all in order). Cap to MAX_PENDING_MESSAGES in case the
+      // buffer grew.
+      const pending = pendingMessagesBySessionRef.current.get(sessionRole);
+      if (pending && pending.length > 0) {
+        pendingMessagesBySessionRef.current.delete(sessionRole);
+        // Apply each buffered message in order (no dedupe — they're
+        // sequential events from the server that arrived out of
+        // order with respect to the local session list).
+        for (const buffered of pending) {
+          const sess = next.get(sessionRole)!;
+          const shouldCleanProgress = buffered.type !== "progress" && buffered.type !== "system";
+          next.set(sessionRole, {
+            ...sess,
+            messages: [
+              ...(shouldCleanProgress ? sess.messages.filter((m) => m.type !== "progress") : sess.messages),
+              { ...buffered, id: uid(), timestamp: timestamp() },
+            ],
+          });
+        }
+        session = next.get(sessionRole)!;
+      }
+
+      // Deduplicate: skip if same type+sender+content already exists as the last message
+      const lastMsg = session.messages[session.messages.length - 1];
+      if (lastMsg && lastMsg.type === msg.type && lastMsg.sender === msg.sender && (lastMsg.content ?? "").trim() === (msg.content ?? "").trim()) {
+        return next;
+      }
+
       const shouldCleanProgress = msg.type !== "progress" && msg.type !== "system";
       next.set(sessionRole, {
         ...session,
@@ -1511,7 +1598,7 @@ export function useCommandRoom() {
         showActions: false,
       });
     } catch (error) {
-      console.error("Failed to spawn agent via API:", error);
+      logger.error("Failed to spawn agent via API", { err: error });
       addSessionMessage(producerSessionIdRef.current, {
         type: "system",
         sender: "SYSTEM",
@@ -1544,21 +1631,27 @@ export function useCommandRoom() {
       return next;
     });
 
-    // Call API to approve
-    apiFetch<{ invocationId: string; status: string }>("/api/chat/approve", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ invocationId: role }),
-    }).catch((error) => {
-      console.error("Failed to approve agent via API:", error);
-      // Q9-11: surface to user. Approval is a high-stakes action; a silent
-      // failure would leave them wondering why the agent isn't progressing.
+    // 11-M12: await the approve call before sending the follow-up
+    // message. The previous code fire-and-forget'd the approve and
+    // immediately sent the messages POST, so a slow approve could lose
+    // its race with the message — the server would reject the message
+    // as "agent not approved yet." Surface failures via toast as
+    // before, but bail before sending the message if approve fails.
+    try {
+      await apiFetch<{ invocationId: string; status: string }>("/api/chat/approve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ invocationId: role }),
+      });
+    } catch (error) {
+      logger.error("Failed to approve agent via API", { err: error });
       pushToast(
         "failed",
         "Approval failed",
         error instanceof Error ? error.message : "Unknown error",
       );
-    });
+      return;
+    }
 
     // Now send a message to the agent session to continue
     try {
@@ -1630,7 +1723,7 @@ export function useCommandRoom() {
         });
       }
     } catch (error) {
-      console.error("Failed to continue agent task:", error);
+      logger.error("Failed to continue agent task", { err: error });
       setAllSessions((prev) => {
         const session = prev.get(role);
         if (!session) return prev;
@@ -1688,7 +1781,7 @@ export function useCommandRoom() {
           }).catch((err) => {
             // Silently ignore if session already gone
             if (err instanceof Error && err.message.includes("Session not found")) return;
-            console.error("Failed to clear session:", err);
+            logger.error("Failed to clear session", { err: err });
             // Q9-11: surface non-stale-clear failures. "Session not found"
             // is the expected race (cleared between fetch and delete), but
             // any other error means the backend rejected our request and
@@ -1904,6 +1997,13 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
           const sid = producerSessionIdRef.current;
           if (args.trim() === "stop") {
             addSessionMessage(sid, { type: "user", sender: "DIRECTOR", content: trimmed });
+            // 11-M10: abort any in-flight chat POST so the user sees
+            // an immediate "stopped" state instead of waiting for
+            // the LLM round-trip to complete.
+            if (chatAbortControllerRef.current) {
+              chatAbortControllerRef.current.abort();
+              chatAbortControllerRef.current = null;
+            }
             apiFetch<{ success: boolean; data?: { status: string } }>("/api/autonomous/stop", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
@@ -2178,11 +2278,22 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
 
     // If already processing, queue the message instead of sending immediately
     if (isLoadingRef.current) {
-      setMessageQueue((prev) => [...prev, { input: trimmed, images, targetSessionId }]);
+      // 11-M24: compute the post-add length from the same updater that
+      // mutates the queue. Reading `messageQueueRef.current.length` here
+      // races a second rapid Enter press — both calls would see the
+      // pre-add ref and report the same `+1` count, undercounting the
+      // queue. The updater callback runs after the latest state, so the
+      // length it sees is the actual new total.
+      let queuedCount = 0;
+      setMessageQueue((prev) => {
+        const next = [...prev, { input: trimmed, images, targetSessionId }];
+        queuedCount = next.length;
+        return next;
+      });
       addSessionMessage(session, {
         type: "system",
         sender: "SYSTEM",
-        content: `Queued (${messageQueueRef.current.length + 1}): "${trimmed.slice(0, 40)}${trimmed.length > 40 ? "..." : ""}"`,
+        content: `Queued (${queuedCount}): "${trimmed.slice(0, 40)}${trimmed.length > 40 ? "..." : ""}"`,
       });
       return;
     }
@@ -2192,7 +2303,13 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
     setIsLoading(true);
 
     // Safety timeout — unlock input after 5 minutes even if LLM loop hangs
-    const loadingTimeout = setTimeout(() => {
+    // 11-H12: store the timer in a ref so the unmount cleanup can
+    // clear it. Without this, navigating away while a request is in
+    // flight leaves the timer scheduled, and it fires after teardown
+    // — calling setIsLoading on a dead component and posting a system
+    // message into a session the user already left.
+    loadingTimeoutRef.current = setTimeout(() => {
+      loadingTimeoutRef.current = null;
       setIsLoading(false);
       addSessionMessage(session, {
         type: "system",
@@ -2213,11 +2330,16 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
     }, 5 * 60 * 1000);
 
     // Call real API for current session
+    // 11-M10: create a fresh AbortController and thread its signal
+    // through apiFetch so /stop can cancel this in-flight request.
+    const chatAbort = new AbortController();
+    chatAbortControllerRef.current = chatAbort;
     apiFetch<{ userMessage: ChatMessage; assistantMessage?: ChatMessage; errorMessage?: ChatMessage }>(
       `/api/chat/sessions/${session}/messages`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: chatAbort.signal,
         body: JSON.stringify({
           type: "user",
           sender: "DIRECTOR",
@@ -2227,7 +2349,17 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
       }
     )
       .then((result) => {
-        clearTimeout(loadingTimeout);
+        // 11-H12: clear via ref so the timeout ref is also nulled out
+        // (otherwise an in-flight response + a fresh request would race
+        // on the same ref).
+        if (loadingTimeoutRef.current) {
+          clearTimeout(loadingTimeoutRef.current);
+          loadingTimeoutRef.current = null;
+        }
+        // 11-M10: clear the abort controller on success
+        if (chatAbortControllerRef.current === chatAbort) {
+          chatAbortControllerRef.current = null;
+        }
         setIsLoading(false);
         if (result.assistantMessage) {
           const msgType = result.assistantMessage.type as ChatMessage["type"];
@@ -2270,10 +2402,27 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
         }
       })
       .catch((error) => {
-        clearTimeout(loadingTimeout);
+        // 11-H12: see success path
+        if (loadingTimeoutRef.current) {
+          clearTimeout(loadingTimeoutRef.current);
+          loadingTimeoutRef.current = null;
+        }
+        // 11-M10: clear the abort controller on error too. The
+        // AbortError thrown when /stop aborts is treated like a normal
+        // error by the catch; we don't surface it as "Failed to get
+        // response" because the user intentionally cancelled.
+        if (chatAbortControllerRef.current === chatAbort) {
+          chatAbortControllerRef.current = null;
+        }
+        if (chatAbort.signal.aborted) {
+          // User-initiated stop — clear loading and return without
+          // posting the "Failed to get response" system message.
+          setIsLoading(false);
+          return;
+        }
         setIsLoading(false);
         if (!(error instanceof Error && error.message.includes("Session not found"))) {
-          console.error("Failed to send message:", error);
+          logger.error("Failed to send message", { err: error });
         }
         addSessionMessage(session, {
           type: "system",
@@ -2312,14 +2461,14 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
     // request was visible in the network tab and could 500 on a
     // misconfigured router. Drop the call entirely if role is empty.
     if (!role || typeof role !== "string") {
-      console.warn("closeSession called with empty/non-string role — ignoring");
+      logger.warn("closeSession called with empty/non-string role — ignoring");
       return;
     }
     // Delete from backend so it doesn't reappear on refresh
     apiFetch(`/api/chat/sessions/${encodeURIComponent(role)}`, { method: "DELETE" }).catch((err) => {
       // Silently ignore if session already gone — stale cache or already closed
       if (err instanceof Error && err.message.includes("Session not found")) return;
-      console.error("Failed to delete session:", err);
+      logger.error("Failed to delete session", { err: err });
       // Q9-11: surface the non-stale-delete failure. Closing a tab while
       // the delete is in flight is fine; a backend rejection means the
       // session is still on disk and will resurface on next refresh.
@@ -2365,7 +2514,7 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
         );
         return { success: true, summary: "Already closed" };
       }
-      console.error("Failed to close consultation:", err);
+      logger.error("Failed to close consultation", { err: err });
       // Q9-11: surface — the caller (button onClick) propagates this as
       // a thrown error with no UI feedback. Toast so the user knows the
       // close didn't actually happen.

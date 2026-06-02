@@ -15,6 +15,9 @@ export const codeReviewerAgents: Partial<Record<AgentRole, AgentDefinition>> = {
     skills: [],
     memory: "session",
     reportsTo: [],
-    experimental: true,
+    // 11-M20: code-reviewer is fully wired (18+ references across
+    // department-leads, delegation-map, and coding agents) — not
+    // experimental. Removed `experimental: true` so the UI no longer
+    // shows the "experimental" badge.
   },
 };

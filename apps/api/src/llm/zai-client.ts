@@ -13,6 +13,7 @@ import { getAgentSystemPrompt, loadAgentPrompts } from "../prompts/agent-prompt-
 import { logger } from "../utils/logger.js";
 import { broadcast } from "../services/websocket.js";
 import { CHARS_PER_TOKEN_ESTIMATE, getModelForTier, getModelContextWindow } from "../config/model-mapping.js";
+import { createHash } from "node:crypto";
 
 /** Simple async semaphore for ZAI API concurrency control.
  *
@@ -238,6 +239,35 @@ function getFetchTimeoutMs(): number {
   }
 }
 
+/**
+ * Sleep for `ms` milliseconds, but bail out immediately if the
+ * external abort signal fires. Without this, an abort during a retry
+ * backoff would still wait the full delay before the next fetch call
+ * notices the abort — wasting wall time and (in the case of a
+ * sub-agent cancel) potentially letting the abort happen after the
+ * user already gave up.
+ *
+ * 11-H6: the three retry sites in fetchWithRetry previously called
+ * `setTimeout(r, delay)` with no abort awareness.
+ */
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException("Aborted", "AbortError"));
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 async function fetchWithRetry(url: string, options: RequestInit, retries = MAX_RETRIES, externalSignal?: AbortSignal): Promise<Response> {
   let lastError: Error | null = null;
   // Cap total wall time across all retries. Without this, the per-attempt
@@ -268,13 +298,14 @@ async function fetchWithRetry(url: string, options: RequestInit, retries = MAX_R
         const delay = 5000 * Math.pow(2, attempt) + Math.random() * 2000;
         if (Date.now() - startTime + delay > maxTotalMs) break;
         logger.warn({ status: 429, attempt, delayMs: Math.round(delay), event: "rate_limit_retry" }, "Rate limited — backing off");
-        await new Promise((r) => setTimeout(r, delay));
+        // 11-H6: respect the external abort signal during the backoff.
+        await abortableSleep(delay, externalSignal);
         continue;
       }
       if (response.status >= 500 && attempt < retries) {
         const delay = RETRY_DELAY_MS * Math.pow(2, attempt) + Math.random() * 1000;
         if (Date.now() - startTime + delay > maxTotalMs) break;
-        await new Promise((r) => setTimeout(r, delay));
+        await abortableSleep(delay, externalSignal);
         continue;
       }
       return response;
@@ -285,7 +316,7 @@ async function fetchWithRetry(url: string, options: RequestInit, retries = MAX_R
       if (attempt < retries) {
         const delay = RETRY_DELAY_MS * Math.pow(2, attempt);
         if (Date.now() - startTime + delay > maxTotalMs) break;
-        await new Promise((r) => setTimeout(r, delay));
+        await abortableSleep(delay, externalSignal);
       }
     }
   }
@@ -301,8 +332,14 @@ const MAX_CONSECUTIVE_SAME_TOOL_CALLS = 6;
 const MAX_REPETITION_WINDOW = 30;
 
 function hashToolInput(input: Record<string, unknown>): string {
+  // 11-M4: use a real hash. The previous implementation just
+  // stringified the input with sorted keys, which (a) produces
+  // unbounded-length keys (slow Map ops on long sessions), and (b)
+  // can be spoofed by any input shape that JSON-serializes to the
+  // same string. SHA-256 is 64 hex chars regardless of input size
+  // and has effectively zero collision rate for tool-input space.
   try {
-    return JSON.stringify(input, Object.keys(input).sort());
+    return createHash("sha256").update(JSON.stringify(input, Object.keys(input).sort())).digest("hex");
   } catch {
     return String(input);
   }
@@ -359,6 +396,14 @@ function estimateMessageTokens(messages: LLMMessage[]): number {
   return Math.ceil(countMessageChars(messages) / CHARS_PER_TOKEN_ESTIMATE);
 }
 
+// 11-M2: hard ceiling on the joined summarization input. Per-message
+// slice caps at 2000 chars (below), but a runaway 500-message
+// conversation could still produce a 1 MB summarization prompt — well
+// past the glm-4.7-flash 128k token (~400k char) context window. We
+// truncate to 200 000 chars (~50k tokens) here, preferring the tail
+// (most recent context is usually more relevant to the live agent state).
+const MAX_SUMMARIZATION_INPUT_CHARS = 200_000;
+
 /** Summarize old messages when context exceeds threshold */
 async function summarizeOldMessages(messages: LLMMessage[], summarizeThreshold: number): Promise<string | null> {
   if (estimateMessageTokens(messages) <= summarizeThreshold) return null;
@@ -372,7 +417,7 @@ async function summarizeOldMessages(messages: LLMMessage[], summarizeThreshold: 
   if (oldMsgs.length === 0) return null;
 
   // Build summary prompt
-  const conversationText = oldMsgs
+  const rawConversationText = oldMsgs
     .map(m => {
       if (typeof m.content === "string") return `${m.role}: ${m.content.slice(0, 2000)}`;
       const textParts = m.content.filter((c): c is TextContent => c.type === "text").map(c => c.text).join(" ");
@@ -380,6 +425,14 @@ async function summarizeOldMessages(messages: LLMMessage[], summarizeThreshold: 
       return `${m.role}: ${textParts.slice(0, 2000)}${hasImage ? " [image attached]" : ""}`;
     })
     .join("\n");
+
+  // 11-M2: bound the total length so the summarizer model's context
+  // window can't be blown by a runaway conversation. Prefer the tail
+  // (most recent old messages); prefix a truncation marker so the
+  // summary model knows context is incomplete.
+  const conversationText = rawConversationText.length > MAX_SUMMARIZATION_INPUT_CHARS
+    ? `[...truncated ${rawConversationText.length - MAX_SUMMARIZATION_INPUT_CHARS} chars from the head]\n${rawConversationText.slice(-MAX_SUMMARIZATION_INPUT_CHARS)}`
+    : rawConversationText;
 
   const summaryPrompt = `Summarize this conversation history concisely.
 Keep: key decisions, important facts, active tasks, code snippets.
@@ -503,6 +556,62 @@ function pruneMessages(messages: LLMMessage[], maxTokens: number): LLMMessage[] 
   let chrono = kept.slice().reverse();
   while (chrono.length > 0 && chrono[0].role === "user" && Array.isArray(chrono[0].content) && (chrono[0].content[0] as unknown as ToolResultContent | undefined)?.type === "tool_result") {
     chrono = chrono.slice(1);
+  }
+  // 11-H7: drop any tool_result that lost its preceding assistant
+  // AND any assistant-with-tool_calls that lost its following tool
+  // results. The Anthropic API rejects both directions of the broken
+  // pair, and the previous code only handled the leading-edge case
+  // (orphan at the very start of `chrono`). The token-budget loop
+  // above can now land a cut between an assistant message and its
+  // tool results, or between tool results and the next assistant.
+  for (let pass = 0; pass < 2; pass++) {
+    let changed = false;
+    for (let i = 0; i < chrono.length; i++) {
+      const m = chrono[i];
+      if (!m) continue;
+      // Orphan tool result at the start: handled by the leading-edge
+      // while-loop above, skip.
+      if (i === 0 && m.role === "user" && Array.isArray(m.content) && (m.content[0] as unknown as ToolResultContent | undefined)?.type === "tool_result") {
+        chrono.splice(i, 1);
+        i--;
+        changed = true;
+        continue;
+      }
+      // Mid-array orphan tool result: no preceding assistant with a
+      // matching tool_call_id.
+      if (m.role === "user" && Array.isArray(m.content)) {
+        const first = m.content[0] as unknown as ToolResultContent | undefined;
+        if (first?.type === "tool_result") {
+          const prev = chrono[i - 1];
+          const prevIsMatchingAssistant = prev?.role === "assistant"
+            && Array.isArray(prev.tool_calls)
+            && prev.tool_calls.some((tc) => tc.id === first.tool_use_id);
+          if (!prevIsMatchingAssistant) {
+            chrono.splice(i, 1);
+            i--;
+            changed = true;
+            continue;
+          }
+        }
+      }
+      // Orphan assistant with tool_calls: no following tool result
+      // for at least one of its tool_call ids.
+      if (m.role === "assistant" && m.tool_calls && m.tool_calls.length > 0) {
+        const next = chrono[i + 1];
+        const nextFirst = Array.isArray(next?.content) ? (next!.content[0] as unknown as ToolResultContent | undefined) : undefined;
+        const nextMatches = next?.role === "user"
+          && Array.isArray(next.content)
+          && nextFirst?.type === "tool_result"
+          && m.tool_calls.some((tc) => tc.id === nextFirst.tool_use_id);
+        if (!nextMatches) {
+          chrono.splice(i, 1);
+          i--;
+          changed = true;
+          continue;
+        }
+      }
+    }
+    if (!changed) break;
   }
   for (const m of chrono) result.push(m);
 

@@ -54,8 +54,15 @@ vi.mock("./ticket-board.js", async () => {
 
   return {
     readTicketsBoard: vi.fn(async (projectId: string) => boards.get(projectId) ?? makeBoard(projectId)),
-    writeTicketsBoard: vi.fn(async (projectId: string, board: unknown) => {
-      boards.set(projectId, board as ReturnType<typeof makeBoard>);
+    // 11-C4: real signature is `writeTicketsBoard(board, projectId?)`.
+    // The previous mock had the args reversed; tests passed only
+    // because the mock signature matched the call site, masking a
+    // latent bug. A refactor that drops this mock would surface
+    // the bug immediately at the first call site (writes the
+    // string "proj" as a board, then everything after breaks).
+    writeTicketsBoard: vi.fn(async (board: unknown, projectId?: string | null) => {
+      const key = projectId ?? "default";
+      boards.set(key, board as ReturnType<typeof makeBoard>);
     }),
     updateTicketsBoard: vi.fn(async (projectId: string, updater: (board: ReturnType<typeof makeBoard>) => ReturnType<typeof makeBoard>) => {
       const current = boards.get(projectId) ?? makeBoard(projectId);
@@ -246,7 +253,7 @@ describe("moveQuestTicket fromColumnId capture", () => {
 
   it("broadcasts a fromColumn distinct from toColumn", async () => {
     // Seed the board with a ticket in 'available'.
-    const { readTicketsBoard, writeTicketsBoard, updateTicketsBoard } = await import("./ticket-board.js");
+    const { readTicketsBoard, writeTicketsBoard } = await import("./ticket-board.js");
     const seeded = await readTicketsBoard("move-test");
     seeded.columns[0].tickets.push({
       id: "ticket-move-1",
@@ -254,9 +261,7 @@ describe("moveQuestTicket fromColumnId capture", () => {
       status: "available",
       updatedAt: new Date().toISOString(),
     });
-    await writeTicketsBoard("move-test", seeded);
-    // suppress the unused-import lint by referencing updateTicketsBoard
-    void updateTicketsBoard;
+    await writeTicketsBoard(seeded, "move-test");
 
     await moveQuestTicket("ticket-move-1", "in_progress", "gameplay-programmer", "move-test");
 

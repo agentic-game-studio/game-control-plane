@@ -1,7 +1,8 @@
 "use client";
-
+import { createLogger } from "../../../../lib/logger";
 import { useEffect, useCallback } from "react";
 import { useAutonomousLoop } from "@/hooks/useAutonomousLoop";
+const logger = createLogger("AutonomousControlBar");
 
 interface AutonomousControlBarProps {
   /** Current project ID — used as the loop's projectId */
@@ -32,7 +33,7 @@ export default function AutonomousControlBar({
       const sessionId = await startLoop(producerSessionId ?? "default", projectId ?? "default");
       onLoopStarted?.(sessionId);
     } catch (err) {
-      console.error("[Autonomous] Failed to start loop:", err);
+      logger.error("Failed to start loop", { err: err });
     }
   }, [producerSessionId, projectId, startLoop, onLoopStarted]);
 
@@ -41,7 +42,7 @@ export default function AutonomousControlBar({
     try {
       await stopLoop(status.sessionId);
     } catch (err) {
-      console.error("[Autonomous] Failed to stop loop:", err);
+      logger.error("Failed to stop loop", { err: err });
     }
   }, [status.sessionId, stopLoop]);
 

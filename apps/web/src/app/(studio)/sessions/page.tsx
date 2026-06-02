@@ -1,10 +1,11 @@
 "use client";
-
+import { createLogger } from "../../../lib/logger";
 import { useState, useEffect } from "react";
 import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { useDialog } from "@/hooks/useDialog";
 import type { WSEvent } from "@game-studio/types";
+const logger = createLogger("page");
 
 interface Session {
   id: string;
@@ -34,7 +35,7 @@ export default function SessionsPage() {
       const data = await apiFetch<Session[]>("/api/sessions");
       setSessions(data);
     } catch (error) {
-      console.error("Failed to load sessions:", error);
+      logger.error("Failed to load sessions", { err: error });
     } finally {
       setLoading(false);
     }
@@ -66,7 +67,7 @@ export default function SessionsPage() {
       setNewSessionName("");
       loadSessions();
     } catch (error) {
-      console.error("Failed to create session:", error);
+      logger.error("Failed to create session", { err: error });
     } finally {
       setCreating(false);
     }
@@ -84,7 +85,7 @@ export default function SessionsPage() {
         setLogs([]);
       }
     } catch (error) {
-      console.error("Failed to delete session:", error);
+      logger.error("Failed to delete session", { err: error });
     }
   };
 
@@ -97,7 +98,7 @@ export default function SessionsPage() {
       });
       loadSessions();
     } catch (error) {
-      console.error("Failed to create checkpoint:", error);
+      logger.error("Failed to create checkpoint", { err: error });
     }
   };
 
@@ -113,7 +114,7 @@ export default function SessionsPage() {
         setLogs(data.logs);
       }
     } catch (error) {
-      console.error("Failed to load logs:", error);
+      logger.error("Failed to load logs", { err: error });
     }
   };
 

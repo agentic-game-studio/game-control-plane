@@ -1,5 +1,5 @@
 "use client";
-
+import { createLogger } from "../lib/logger";
 import {
   createContext,
   useCallback,
@@ -12,6 +12,7 @@ import {
 import type { Project, WSEvent } from "@game-studio/types";
 import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "@/hooks/useWebSocket";
+const logger = createLogger("ProjectContext");
 
 const STORAGE_KEY = "studio:current-project-id";
 const CACHE_KEY = "studio:projects-cache";
@@ -50,7 +51,7 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
         localStorage.setItem(CACHE_KEY, JSON.stringify(result));
       } catch { /* localStorage unavailable */ }
     } catch (err) {
-      console.error("Failed to fetch projects:", err);
+      logger.error("Failed to fetch projects", { err: err });
       // Q9-14: fall back to cached projects first, then only surface the
       // error banner if cache is also empty. The previous order set the
       // banner unconditionally on API failure, which confuses offline

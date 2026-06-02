@@ -77,6 +77,24 @@ const config = loadConfig();
 const app = express();
 const server = createServer(app);
 
+// 11-M6: configure trust proxy so `req.ip` reflects the real client
+// address when running behind a load balancer / reverse proxy. Without
+// this, the rate limiter rate-limits the proxy itself (everyone shares
+// one IP). See config.ts for the security caveat — only enable when you
+// control the proxy chain.
+{
+  const raw = config.TRUST_PROXY.trim();
+  if (raw === "false" || raw === "") {
+    // default: don't trust X-Forwarded-For
+  } else if (raw === "true") {
+    app.set("trust proxy", true);
+  } else if (/^\d+$/.test(raw)) {
+    app.set("trust proxy", Number(raw));
+  } else {
+    app.set("trust proxy", raw);
+  }
+}
+
 // WebSocket server — attach wss from websocket.ts to the HTTP server
 server.on("upgrade", (request, socket, head) => {
   const { pathname, searchParams } = new URL(request.url ?? "/", "http://localhost");
@@ -274,24 +292,38 @@ app.get("/api/sessions/:sessionId/stream", (req, res) => {
     return;
   }
 
-  // R8: Send heartbeat comment every 15 seconds to keep connection alive
-  const SSE_HEARTBEAT_MS = 15_000;
-  const heartbeat = setInterval(() => {
-    res.write(": heartbeat\n\n");
-  }, SSE_HEARTBEAT_MS);
-
   // Cleanup runs on close AND on error. A socket that dies in a way that does
   // not emit `close` (NAT timeout, broken pipe with no RST, process-level
   // kill) would otherwise leak the client and its heartbeat interval. We also
   // guard the writes with a `destroyed` flag so a late `heartbeat` callback
   // after cleanup doesn't throw on the dead socket.
   let destroyed = false;
+  let heartbeat: ReturnType<typeof setInterval> | null = null;
   const cleanup = () => {
     if (destroyed) return;
     destroyed = true;
-    clearInterval(heartbeat);
+    if (heartbeat) clearInterval(heartbeat);
     sseClients.delete(client);
   };
+
+  // R8: Send heartbeat comment every 15 seconds to keep connection alive.
+  // 11-M3: guard the write — a heartbeat that fires in the small window
+  // between the socket dying and our cleanup handler firing would
+  // otherwise throw and leak the interval. Check `res.writableEnded`
+  // and `destroyed` before writing, and swallow EPIPE/ERR_STREAM_DESTROYED.
+  const SSE_HEARTBEAT_MS = 15_000;
+  heartbeat = setInterval(() => {
+    if (destroyed || res.writableEnded || res.destroyed) {
+      cleanup();
+      return;
+    }
+    try {
+      res.write(": heartbeat\n\n");
+    } catch {
+      cleanup();
+    }
+  }, SSE_HEARTBEAT_MS);
+
   req.on("close", cleanup);
   req.on("error", cleanup);
   res.on("error", cleanup);
@@ -320,7 +352,8 @@ server.listen(PORT, () => {
 // Prune old session state files on startup (older than 30 days)
 import { SessionStore } from "@game-studio/state";
 const sessionStore = new SessionStore(config.WORKSPACE_DIR);
-sessionStore.pruneOldSessions(30 * 24 * 60 * 60 * 1000).then((removed) => {
+const SESSION_PRUNE_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+sessionStore.pruneOldSessions(SESSION_PRUNE_AGE_MS).then((removed) => {
   if (removed > 0) logger.info({ removed, event: "session_prune" }, `Pruned ${removed} old session(s)`);
 }).catch(() => { /* non-critical */ });
 

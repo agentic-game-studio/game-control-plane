@@ -215,6 +215,10 @@ export class GodotMCPService {
   private initialized = false;
   private stdoutBuffer = "";
   private readonly MAX_STDOUT_BUFFER = 1024 * 1024; // 1MB cap to prevent OOM
+  /** 11-M7: set true by `stop()` so the child-process "exit" listener
+   * can distinguish a graceful shutdown from a crash and avoid emitting
+   * a misleading warning. */
+  private intentionalStop = false;
   /** Absolute path of the Godot project (detected from MCP responses) */
   private godotProjectDir: string | null = null;
   /** Workspace-relative path for rewriting Godot paths */
@@ -280,9 +284,18 @@ export class GodotMCPService {
       }
     });
 
-    // Handle process exit
+    // Handle process exit.
+    // 11-M7: distinguish an intentional `stop()` from an unexpected
+    // exit. `this.intentionalStop` is set to true at the top of
+    // `stop()`, so when SIGTERM fires this listener we log at info
+    // instead of warn. Without this, every graceful service shutdown
+    // emitted a misleading "MCP server exited" warning into the logs.
     this.process.on("exit", (code, signal) => {
-      logger.warn({ code, signal, event: "godot_mcp_exit" }, "MCP server exited");
+      if (this.intentionalStop) {
+        logger.info({ code, signal, event: "godot_mcp_exit_clean" }, "MCP server stopped cleanly");
+      } else {
+        logger.warn({ code, signal, event: "godot_mcp_exit" }, "MCP server exited unexpectedly");
+      }
       this.cleanup();
     });
 
@@ -584,6 +597,8 @@ export class GodotMCPService {
     if (!this.isRunning) return;
 
     logger.info({ event: "godot_mcp_stop" }, "Stopping service");
+    // 11-M7: tell the child-process "exit" listener this is graceful.
+    this.intentionalStop = true;
 
     // Clear pending requests
     for (const [, pending] of this.pendingRequests) {

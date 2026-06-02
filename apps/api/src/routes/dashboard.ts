@@ -21,6 +21,8 @@ import { resolveProjectWorkspace, validateWorkspacePath } from "../utils/workspa
 import { getTicketsBoardFile, writeTicketsBoard } from "../services/ticket-board.js";
 import { clearTicketProjectCacheForProject } from "../services/quest-bridge.js";
 import { loadConfig } from "../config.js";
+import { newId } from "../utils/ids.js";
+import { ProjectNotFoundError } from "../utils/errors.js";
 import path from "node:path";
 
 const DEFAULT_DATA: DashboardData = {
@@ -35,9 +37,10 @@ const DEFAULT_DATA: DashboardData = {
 
 function normalizeProject(project: Partial<Project>): Project {
   return {
-    // Append 4 chars of randomness so two projects created in the same
-    // millisecond don't collide on the same auto-generated id.
-    id: project.id ?? `proj-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    // 11-H13: use the shared 128-bit id helper instead of Date.now() +
+    // 4 chars of random. The old pattern collided on parallel project
+    // creation bursts; the new one uses a full UUID.
+    id: project.id ?? newId("proj"),
     name: project.name ?? "Untitled Project",
     description: project.description ?? "",
     engine: project.engine ?? null,
@@ -73,12 +76,18 @@ async function readDashboardOrDefault(): Promise<DashboardData> {
   }
 }
 
-function writeDemoGodotProject(projectDir: string): void {
-  fs.mkdirSync(path.join(projectDir, "scenes"), { recursive: true });
-  fs.mkdirSync(path.join(projectDir, "scripts"), { recursive: true });
-  fs.mkdirSync(path.join(projectDir, "design"), { recursive: true });
+async function writeDemoGodotProject(projectDir: string): Promise<void> {
+  // 11-M5: switched from sync to async fs. Originally `writeFileSync` /
+  // `mkdirSync` were used inside a callback passed to `updateData()` —
+  // an async-only path. On slow disks (Docker volumes, NFS) a 6-file
+  // sync write could block the event loop for tens of ms per call,
+  // serializing the entire Express server. `fs.promises` keeps the
+  // ergonomics and yields properly.
+  await fs.promises.mkdir(path.join(projectDir, "scenes"), { recursive: true });
+  await fs.promises.mkdir(path.join(projectDir, "scripts"), { recursive: true });
+  await fs.promises.mkdir(path.join(projectDir, "design"), { recursive: true });
 
-  fs.writeFileSync(
+  await fs.promises.writeFile(
     path.join(projectDir, "project.godot"),
     [
       "; Engine configuration file.",
@@ -96,7 +105,7 @@ function writeDemoGodotProject(projectDir: string): void {
     ].join("\n"),
   );
 
-  fs.writeFileSync(
+  await fs.promises.writeFile(
     path.join(projectDir, "scenes/main.tscn"),
     [
       '[gd_scene load_steps=2 format=3 uid="uid://railway-demo-main"]',
@@ -114,7 +123,7 @@ function writeDemoGodotProject(projectDir: string): void {
     ].join("\n"),
   );
 
-  fs.writeFileSync(
+  await fs.promises.writeFile(
     path.join(projectDir, "scripts/player.gd"),
     [
       "extends CharacterBody2D",
@@ -138,7 +147,7 @@ function writeDemoGodotProject(projectDir: string): void {
     ].join("\n"),
   );
 
-  fs.writeFileSync(
+  await fs.promises.writeFile(
     path.join(projectDir, "design/gdd.md"),
     [
       "# Railway Demo Platformer",
@@ -157,7 +166,7 @@ function writeDemoGodotProject(projectDir: string): void {
     ].join("\n"),
   );
 
-  fs.writeFileSync(
+  await fs.promises.writeFile(
     path.join(projectDir, "README.md"),
     [
       "# Railway Demo Platformer",
@@ -186,7 +195,7 @@ dashboardRouter.post("/demo-project", async (_req: Request, res: Response) => {
     let demoProject: Project | null = null;
     let created = false;
 
-    await updateData<DashboardData>("dashboard.json", (data) => {
+    await updateData<DashboardData>("dashboard.json", async (data) => {
       const existing = data.projects.find((p) => p.workspacePath === workspacePath);
       if (existing) {
         demoProject = existing;
@@ -196,7 +205,7 @@ dashboardRouter.post("/demo-project", async (_req: Request, res: Response) => {
 
       const projectId = `proj-demo-${Date.now()}`;
       const projectDir = resolveProjectWorkspace(workspacePath);
-      writeDemoGodotProject(projectDir);
+      await writeDemoGodotProject(projectDir);
 
       const newProject = normalizeProject({
         id: projectId,
@@ -358,8 +367,15 @@ dashboardRouter.post("/browse-directory", async (req: Request, res: Response) =>
     }
 
     const dirents = await fs.promises.readdir(resolved, { withFileTypes: true });
+    // 11-C1: filter dotfile/dotdir entries. The previous version
+    // returned every directory name in the listing, including
+    // `.ssh`, `.aws`, `.config/gh`, `.git`, `.env`, etc. The frontend
+    // then offered to "open" these paths and the editor would
+    // happily try to read them. Server-side blocklist so the leak
+    // is independent of the UI's filter (which the API shouldn't
+    // trust anyway).
     const directories = dirents
-      .filter((d) => d.isDirectory())
+      .filter((d) => d.isDirectory() && !d.name.startsWith("."))
       .map((d) => d.name)
       .sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
 
@@ -476,10 +492,10 @@ dashboardRouter.post("/projects", async (req: Request, res: Response) => {
 
     const now = new Date().toISOString();
     const newProject = normalizeProject({
-      // 10-H5: use the same id-collision guard as normalizeProject (random
-      // suffix) so two concurrent POST /projects calls landing on the same
-      // millisecond produce distinct ids even before they reach the lock.
-      id: `proj-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      // 11-H13: pre-assign a 128-bit id (from the same helper used by
+      // normalizeProject) so two concurrent POST /projects calls in the
+      // same millisecond don't collide before they reach the write lock.
+      id: newId("proj"),
       name: body.name,
       description: body.description ?? "",
       engine,
@@ -551,13 +567,16 @@ dashboardRouter.patch("/projects/:id", async (req: Request, res: Response) => {
 
     // 10-H5: serialize the PATCH through the per-file mutex so a concurrent
     // PATCH or DELETE cannot lose this update. The 404 path raises a
-    // sentinel error inside the callback so the writeData step is skipped.
+    // typed error inside the callback so the writeData step is skipped.
     let updatedProject: Project | null = null;
     try {
       await updateData<DashboardData>("dashboard.json", (data) => {
         const projectIndex = data.projects.findIndex((p) => p.id === id);
         if (projectIndex === -1) {
-          throw new Error("__PROJECT_NOT_FOUND__");
+          // 11-M17: typed error carrying the id (vs the previous
+          // string-sentinel "__PROJECT_NOT_FOUND__" which a typo
+          // would silently 500).
+          throw new ProjectNotFoundError(String(id));
         }
         updatedProject = normalizeProject({
           ...data.projects[projectIndex],
@@ -569,7 +588,7 @@ dashboardRouter.patch("/projects/:id", async (req: Request, res: Response) => {
         return data;
       });
     } catch (e) {
-      if (e instanceof Error && e.message === "__PROJECT_NOT_FOUND__") {
+      if (e instanceof ProjectNotFoundError) {
         res.status(404).json({ success: false, error: "Project not found" });
         return;
       }
@@ -598,13 +617,15 @@ dashboardRouter.delete("/projects/:id", async (req: Request, res: Response) => {
       await updateData<DashboardData>("dashboard.json", (data) => {
         const projectIndex = data.projects.findIndex((p) => p.id === id);
         if (projectIndex === -1) {
-          throw new Error("__PROJECT_NOT_FOUND__");
+          // 11-M17: typed error (see PATCH handler above)
+          throw new ProjectNotFoundError(String(id));
         }
         data.projects.splice(projectIndex, 1);
         return data;
       });
     } catch (e) {
-      if (e instanceof Error && e.message === "__PROJECT_NOT_FOUND__") {
+      // 11-M17: typed error (matches PATCH handler above)
+      if (e instanceof ProjectNotFoundError) {
         res.status(404).json({ success: false, error: "Project not found" });
         return;
       }

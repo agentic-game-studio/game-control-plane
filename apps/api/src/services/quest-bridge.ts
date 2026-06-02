@@ -36,6 +36,12 @@ interface WorkflowState {
 
 const activeWorkflows = new Map<string, WorkflowState>();
 
+// 11-M19: extract scheduling cadence to a named constant. 1 hour was
+// chosen because workflows are long-lived; sweeping more often wastes
+// CPU on a usually-empty Map, less often risks holding zombies past the
+// `WORKFLOW_TTL_MS` they're checked against.
+const WORKFLOW_CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+
 // Touch a workflow's lastActivityAt to keep it alive across the TTL cleanup
 // sweep. Called from every state-mutating site (stage advance, ticket add).
 function touchWorkflow(wf: WorkflowState): void {
@@ -58,7 +64,7 @@ export const workflowCleanupInterval = setInterval(() => {
       activeWorkflows.delete(sessionId);
     }
   }
-}, 60 * 60 * 1000);
+}, WORKFLOW_CLEANUP_INTERVAL_MS);
 workflowCleanupInterval.unref(); // don't keep process alive on its own
 
 export function startWorkflow(sessionId: string): string {

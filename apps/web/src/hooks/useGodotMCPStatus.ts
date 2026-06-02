@@ -1,7 +1,8 @@
 "use client";
-
+import { createLogger } from "../lib/logger";
 import { useState, useCallback, useEffect, useRef } from "react";
 import { apiFetch } from "@/lib/api";
+const logger = createLogger("useGodotMCPStatus");
 
 interface MCPHealthStatus {
   status: "not_running" | "connected" | "disconnected";
@@ -58,7 +59,7 @@ export function useGodotMCPStatus(
         setLastChecked(new Date());
       }
     } catch (err) {
-      console.error("Failed to check MCP health:", err);
+      logger.error("Failed to check MCP health", { err: err });
       if (mountedRef.current) {
         setStatus({
           status: "disconnected",

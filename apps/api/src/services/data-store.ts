@@ -69,7 +69,7 @@ export async function writeData<T>(filename: string, data: T): Promise<void> {
  */
 export async function updateData<T>(
   filename: string,
-  updater: (data: T) => T
+  updater: (data: T) => T | Promise<T>
 ): Promise<T> {
   // Wait for any in-flight update to this file to complete
   const prev = fileLocks.get(filename) ?? Promise.resolve();
@@ -80,7 +80,10 @@ export async function updateData<T>(
   try {
     await prev;
     const data = await readData<T>(filename);
-    const updated = updater(data);
+    // 11-M5: support async updaters. Some callers (writeDemoGodotProject)
+    // need to do disk I/O inside the mutex so concurrent demo-project
+    // POSTs don't both write the same files at once.
+    const updated = await updater(data);
     await writeData(filename, updated);
     return updated;
   } finally {

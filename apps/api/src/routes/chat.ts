@@ -17,6 +17,7 @@ import { logger } from "../utils/logger.js";
 import { resolveProjectWorkspace } from "../utils/workspace.js";
 import { loadConfig } from "../config.js";
 import { getModelContextWindow, getModelForTier, MAX_CONTEXT_TOKENS, CHARS_PER_TOKEN_ESTIMATE } from "../config/model-mapping.js";
+import { newId } from "../utils/ids.js";
 
 export const chatRouter: Router = Router();
 
@@ -588,7 +589,7 @@ chatRouter.get("/sessions/producer/:projectId", async (req: Request, res: Respon
     projectId,
     messages: [
       {
-        id: `msg-${crypto.randomUUID().slice(0, 8)}`,
+        id: newId("msg"),
         type: "welcome",
         sender: "Producer",
         content: `Welcome to ${project.name}. I'm the Producer, orchestrating our studio's multi-agent game development pipeline for this project.`,
@@ -596,7 +597,7 @@ chatRouter.get("/sessions/producer/:projectId", async (req: Request, res: Respon
         showActions: false,
       },
       {
-        id: `msg-${crypto.randomUUID().slice(0, 8)}`,
+        id: newId("msg"),
         type: "system",
         sender: "SYSTEM",
         content: `Active project: ${project.name}${project.engine ? ` (${project.engine})` : ""}. Type a command to spawn an agent or request a task. Use /spawn <role> to bring in a specialist.`,
@@ -673,7 +674,7 @@ chatRouter.post("/sessions", async (req: Request, res: Response) => {
     return;
   }
 
-  const sessionId = `session-${crypto.randomUUID().slice(0, 8)}`;
+  const sessionId = newId("session");
   const now = new Date().toISOString();
 
   // Load the agent's system prompt for the welcome message
@@ -691,7 +692,7 @@ chatRouter.post("/sessions", async (req: Request, res: Response) => {
     projectId: body.projectId,
     messages: [
       {
-        id: `msg-${crypto.randomUUID().slice(0, 8)}`,
+        id: newId("msg"),
         type: "system",
         sender: "SYSTEM",
         content: welcomeContent,
@@ -824,7 +825,7 @@ chatRouter.post("/sessions/:id/close", async (req: Request, res: Response) => {
   // Post summary to producer session
   const roleDisplay = session.role.replace(/-/g, " ").toUpperCase();
   await appendMessage(pid, {
-    id: `msg-${crypto.randomUUID().slice(0, 8)}`,
+    id: newId("msg"),
     type: "agent",
     sender: session.role,
     content: `[${roleDisplay} CONSULTATION COMPLETE]\n\n${finalSummary}`,
@@ -854,7 +855,15 @@ chatRouter.post("/sessions/:id/close", async (req: Request, res: Response) => {
 // POST /api/chat/sessions/consultation/test-create — Test helper: create a consultation session
 // Only available when ENABLE_TEST_ENDPOINTS is set. Used by E2E tests to create
 // consultation sessions without invoking the LLM.
-if (process.env.ENABLE_TEST_ENDPOINTS === "true") {
+// 11-C2: read the validated, type-coerced boolean from the config
+// schema instead of the raw env string. The Zod schema transforms
+// "true"/"false" into a boolean, and the chat route is the only
+// consumer; reading the raw env bypasses the validation and means a
+// future env mutation without re-running loadConfig() would silently
+// re-enable the test endpoint. Fall back to the env string for
+// pre-config module-load callers (loadConfig() is a memoized singleton,
+// so this is safe to call on every request).
+if (loadConfig().ENABLE_TEST_ENDPOINTS) {
   chatRouter.post("/sessions/consultation/test-create", async (req: Request, res: Response) => {
     const { role, projectId, brief } = req.body as { role?: string; projectId?: string; brief?: string };
 
@@ -883,7 +892,7 @@ if (process.env.ENABLE_TEST_ENDPOINTS === "true") {
       projectId,
       messages: [
         {
-          id: `msg-${crypto.randomUUID().slice(0, 8)}`,
+          id: newId("msg"),
           type: "system" as const,
           sender: "SYSTEM",
           content: brief ? `${role} consultation session initialized.\n\n**Brief:** ${brief}` : `${role} consultation session initialized.`,
@@ -957,7 +966,7 @@ chatRouter.post("/sessions/:id/clear", async (req: Request, res: Response) => {
   if (id === "producer" || id.startsWith("producer-")) {
     session.messages = [
       {
-        id: `msg-welcome-${crypto.randomUUID().slice(0, 8)}`,
+        id: newId("msg-welcome"),
         type: "welcome" as const,
         sender: "Producer",
         content:
@@ -966,7 +975,7 @@ chatRouter.post("/sessions/:id/clear", async (req: Request, res: Response) => {
         showActions: false,
       },
       {
-        id: `msg-prompt-${crypto.randomUUID().slice(0, 8)}`,
+        id: newId("msg-prompt"),
         type: "system" as const,
         sender: "SYSTEM",
         content:
@@ -983,7 +992,7 @@ chatRouter.post("/sessions/:id/clear", async (req: Request, res: Response) => {
     type: "chat:message",
     sessionId: id,
     message: {
-      id: `msg-${crypto.randomUUID().slice(0, 8)}`,
+      id: newId("msg"),
       type: "system" as const,
       sender: "SYSTEM",
       content: "Session cleared.",
@@ -1015,9 +1024,18 @@ chatRouter.post("/sessions/:id/compact", async (req: Request, res: Response) => 
     }
 
     // Build summary from conversation history
-    const conversationText = session.conversationHistory
+    const rawConversationText = session.conversationHistory
       .map((m: LLMMessage) => `${m.role}: ${typeof m.content === "string" ? m.content.slice(0, 3000) : JSON.stringify(m.content).slice(0, 3000)}`)
       .join("\n\n");
+
+    // 11-M2: cap the joined string so the summarizer model can't be
+    // overflowed. 200k chars ≈ 50k tokens — well below the glm-4.7-flash
+    // 128k window. Keep the tail; prefix a marker so the summary
+    // signals it had to be truncated.
+    const MAX_COMPACT_INPUT_CHARS = 200_000;
+    const conversationText = rawConversationText.length > MAX_COMPACT_INPUT_CHARS
+      ? `[...truncated ${rawConversationText.length - MAX_COMPACT_INPUT_CHARS} chars from the head]\n${rawConversationText.slice(-MAX_COMPACT_INPUT_CHARS)}`
+      : rawConversationText;
 
     const summaryPrompt = `Summarize this agent conversation session concisely.
 Structure your summary with these sections:
@@ -1098,10 +1116,17 @@ Max 4000 characters. Respond ONLY with the summary.`;
 
     const oldGeneration = session.generation ?? 1;
     const newGeneration = oldGeneration + 1;
-    const newId = `${id}-g${newGeneration}`;
+    // 11-H14: rename local `newId` variable to `newSessionId` so it
+    // doesn't shadow the imported `newId(prefix)` id helper from
+    // utils/ids.ts. The shadow caused the newSession block below to
+    // call the string variable as a function, which TypeScript
+    // rejected with "Type 'String' has no call signatures" once we
+    // migrated the inner `id: \`session-${...}\`` sites to call
+    // `newId("session")`.
+    const newSessionId = `${id}-g${newGeneration}`;
 
     // Check new session doesn't already exist
-    if (chatStore.sessions[newId]) {
+    if (chatStore.sessions[newSessionId]) {
       res.status(409).json({ error: "Compacted session already exists" });
       return;
     }
@@ -1111,10 +1136,13 @@ Max 4000 characters. Respond ONLY with the summary.`;
     // Create new session inheriting from old
     const newSession: ExtendedChatSession = {
       ...session,
-      id: newId,
+      // 11-H14: was `id: newId` (passing the function reference as the
+      // value, which would stringify the function source as the id).
+      // Use a properly-typed 128-bit session id.
+      id: newSessionId,
       messages: [
         {
-          id: `msg-${crypto.randomUUID().slice(0, 8)}`,
+          id: newId("msg"),
           type: "system",
           sender: "SYSTEM",
           content: `Session compacted from generation ${oldGeneration}. Previous context summarized below.`,
@@ -1122,7 +1150,7 @@ Max 4000 characters. Respond ONLY with the summary.`;
           showActions: false,
         },
         {
-          id: `msg-${crypto.randomUUID().slice(0, 8)}`,
+          id: newId("msg"),
           type: "agent",
           sender: session.role,
           content: `[Previous Context Summary]\n\n${summaryText}`,
@@ -1152,7 +1180,7 @@ Max 4000 characters. Respond ONLY with the summary.`;
     // generation traversal forever. Now: stage the critical mutations,
     // save, then perform the (re-runnable) cleanup.
     session.status = "compacted";
-    chatStore.sessions[newId] = newSession;
+    chatStore.sessions[newSessionId] = newSession;
     sessionsResponding.delete(id);
 
     await saveChatState();
@@ -1164,7 +1192,7 @@ Max 4000 characters. Respond ONLY with the summary.`;
     const baseSessionId = id.replace(/-g\d+$/, "");
     const ancestorPattern = new RegExp(`^${escapeRegExp(baseSessionId)}-g\\d+$`);
     for (const [sid, sess] of Object.entries(chatStore.sessions)) {
-      if (sid === id || sid === newId) continue;
+      if (sid === id || sid === newSessionId) continue;
       if (sess.status === "compacted" && ancestorPattern.test(sid)) {
         const genMatch = sid.match(/-g(\d+)$/);
         if (genMatch) {
@@ -1184,12 +1212,12 @@ Max 4000 characters. Respond ONLY with the summary.`;
       await saveChatState();
     } catch (cleanupSaveErr) {
       logger.warn(
-        { err: cleanupSaveErr, oldSessionId: id, newSessionId: newId, event: "compaction_cleanup_save_failed" },
+        { err: cleanupSaveErr, oldSessionId: id, newSessionId: newSessionId, event: "compaction_cleanup_save_failed" },
         "Compaction cleanup save failed; stale compacted sessions may persist on disk",
       );
     }
 
-    logger.info({ oldSessionId: id, newSessionId: newId, generation: newGeneration, summaryChars: summaryText.length }, "Session compacted");
+    logger.info({ oldSessionId: id, newSessionId: newSessionId, generation: newGeneration, summaryChars: summaryText.length }, "Session compacted");
 
     broadcast({
       type: "chat:session:compacted",
@@ -1255,7 +1283,7 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
     lockHeld = true;
   }
 
-  const userMessageId = `msg-${crypto.randomUUID().slice(0, 8)}`;
+  const userMessageId = newId("msg");
   const userMessage: ChatMessage = {
     id: userMessageId,
     type: body.type ?? "user",
@@ -1335,7 +1363,7 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
   const agentRole = session.role as AgentRole;
 
   // Add thinking/progress message
-  const progressMsgId = `msg-${crypto.randomUUID().slice(0, 8)}`;
+  const progressMsgId = newId("msg");
   const progressMessage: ChatMessage = {
     id: progressMsgId,
     type: "progress",
@@ -1520,7 +1548,7 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
     }
 
     const assistantMessage: ChatMessage = {
-      id: `msg-${crypto.randomUUID().slice(0, 8)}`,
+      id: newId("msg"),
       type: messageType,
       sender: agentRole,
       content: messageContent,
@@ -1579,7 +1607,7 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
     }
 
     const errorMessage: ChatMessage = {
-      id: `msg-${crypto.randomUUID().slice(0, 8)}`,
+      id: newId("msg"),
       type: "system",
       sender: "SYSTEM",
       content: `Error: ${error.message}`,
@@ -1624,7 +1652,7 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
     return;
   }
 
-  const invocationId = `invoke-${crypto.randomUUID().slice(0, 8)}`;
+  const invocationId = newId("invoke");
   const sessionId = role.toLowerCase().replace(/\s+/g, "-");
   const now = new Date().toISOString();
   const agentRole = role as AgentRole;
@@ -1674,7 +1702,7 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
     projectId,
     messages: [
       {
-        id: `msg-${crypto.randomUUID().slice(0, 8)}`,
+        id: newId("msg"),
         type: "system",
         sender: "SYSTEM",
         content: `${role.toUpperCase()} session initialized.`,
@@ -1722,7 +1750,7 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
   // survives page navigation (frontend was previously holding this
   // message in local state only).
   await appendMessage(producerSessionId(projectId), {
-    id: `msg-${crypto.randomUUID().slice(0, 8)}`,
+    id: newId("msg"),
     type: "system",
     sender: "SYSTEM",
     content: `${agentRole.toUpperCase()} spawned at ${now} UTC`,
@@ -1741,7 +1769,7 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
   let spawnStatus: "completed" | "failed" | "ready" = "ready";
   if (task) {
     // Create a progress message for this invocation
-    const progressMsgId = `msg-${crypto.randomUUID().slice(0, 8)}`;
+    const progressMsgId = newId("msg");
     newSession.messages.push({
       id: progressMsgId,
       type: "progress",
@@ -1835,7 +1863,7 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
         : `${agentRole} completed task but returned no content. Please check the agent's output.`;
 
       const responseMessage: ChatMessage = {
-        id: `msg-${crypto.randomUUID().slice(0, 8)}`,
+        id: newId("msg"),
         type: "agent",
         sender: role,
         content: effectiveContent,
@@ -1873,7 +1901,7 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
 
       // Persist completion notice on the producer session.
       await appendMessage(producerSessionId(projectId), {
-        id: `msg-${crypto.randomUUID().slice(0, 8)}`,
+        id: newId("msg"),
         type: "agent",
         sender: "producer",
         content: `${agentRole.replace(/-/g, " ")} reports task complete. Session awaiting closure.`,
@@ -1932,7 +1960,7 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
 
       // Persist failure notice on the producer session.
       await appendMessage(producerSessionId(projectId), {
-        id: `msg-${crypto.randomUUID().slice(0, 8)}`,
+        id: newId("msg"),
         type: "system",
         sender: "SYSTEM",
         content: `${agentRole.toUpperCase()} failed: ${error.message}`,
@@ -1995,7 +2023,7 @@ chatRouter.post("/approve", (req: Request, res: Response) => {
 chatRouter.post("/diff", (req: Request, res: Response) => {
   const { sessionId, diffBlocks } = req.body as { sessionId?: string; diffBlocks?: unknown[] };
 
-  const diffId = `diff-${crypto.randomUUID().slice(0, 8)}`;
+  const diffId = newId("diff");
 
   broadcast({
     type: "chat:message",

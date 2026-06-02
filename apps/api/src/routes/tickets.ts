@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { broadcastEvent } from "../services/data-store.js";
 import { DEFAULT_TICKETS_BOARD, readTicketsBoard, writeTicketsBoard, updateTicketsBoard } from "../services/ticket-board.js";
 import { triggerVerification } from "../services/verification-service.js";
+import { logger } from "../utils/logger.js";
 import type {
   TicketsBoard,
   Ticket,
@@ -110,6 +111,10 @@ ticketsRouter.post("/", async (req: Request, res: Response) => {
 
     res.status(201).json({ success: true, data: newTicket });
   } catch (error) {
+    logger.error(
+      { err: error instanceof Error ? error.message : String(error), event: "ticket_create_failed" },
+      "Failed to create ticket",
+    );
     res.status(500).json({ success: false, error: "Failed to create ticket" });
   }
 });
@@ -164,6 +169,10 @@ ticketsRouter.patch("/:id", async (req: Request, res: Response) => {
 
     res.json({ success: true, data: updatedTicket });
   } catch (error) {
+    logger.error(
+      { err: error instanceof Error ? error.message : String(error), ticketId: id, projectId, event: "ticket_update_failed" },
+      "Failed to update ticket",
+    );
     res.status(500).json({ success: false, error: "Failed to update ticket" });
   }
 });
@@ -290,6 +299,10 @@ ticketsRouter.delete("/:id", async (req: Request, res: Response) => {
 
     res.json({ success: true });
   } catch (error) {
+    logger.error(
+      { err: error instanceof Error ? error.message : String(error), ticketId: id, projectId, event: "ticket_delete_failed" },
+      "Failed to delete ticket",
+    );
     res.status(500).json({ success: false, error: "Failed to delete ticket" });
   }
 });

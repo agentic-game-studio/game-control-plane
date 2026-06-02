@@ -637,11 +637,32 @@ export default function ChatThread({ messages, sessions, threadId, threadTitle, 
   const bottomRef = useRef<HTMLDivElement>(null);
   const prevMsgCountRef = useRef(0);
 
-  // Only scroll when new messages are added (not on progress updates)
+  // 11-M13: only auto-scroll when the user is already near the bottom.
+  // If they've scrolled up to read history, yanking them back to the
+  // bottom on every incoming message is hostile. Use the scroll
+  // container of `bottomRef.current` and treat "within 150px of bottom"
+  // as "follow the tail."
   const msgCount = messages.length;
   useEffect(() => {
     if (msgCount > prevMsgCountRef.current) {
-      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+      const el = bottomRef.current;
+      if (el) {
+        // The nearest scrollable ancestor — walk up until we find one.
+        let scrollContainer: HTMLElement | null = el.parentElement;
+        while (scrollContainer && scrollContainer !== document.body) {
+          const style = window.getComputedStyle(scrollContainer);
+          if (/auto|scroll/.test(style.overflowY)) break;
+          scrollContainer = scrollContainer.parentElement;
+        }
+        const FOLLOW_TAIL_THRESHOLD_PX = 150;
+        const isFirstMessage = prevMsgCountRef.current === 0;
+        const isAtBottom = scrollContainer
+          ? scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight < FOLLOW_TAIL_THRESHOLD_PX
+          : true;
+        if (isFirstMessage || isAtBottom) {
+          el.scrollIntoView({ behavior: "smooth" });
+        }
+      }
     }
     prevMsgCountRef.current = msgCount;
   }, [msgCount]);

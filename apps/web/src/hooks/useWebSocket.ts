@@ -73,11 +73,21 @@ function connect(): void {
     };
 
     ws.onclose = () => {
+      // 11-H9: guard every shared-state mutation with `sharedSocket === ws`
+      // so a late onclose from the OLD socket can't clobber the NEW
+      // socket's ping interval and reconnect state. Without this check,
+      // when the network blip dropped socket A while reconnect was in
+      // flight, A's onclose would fire *after* B's onopen had already
+      // (re)set pingInterval, and A's stale callback would null out
+      // B's interval — leaving the live socket with no keepalive and
+      // getting disconnected by the server 60s later.
+      const stillCurrent = sharedSocket === ws;
       notifyConnected(false);
-      if (pingInterval) {
+      if (stillCurrent && pingInterval) {
         clearInterval(pingInterval);
         pingInterval = null;
       }
+      if (!stillCurrent) return;
       // Only reconnect if there are still active subscribers — otherwise
       // we'd loop forever on a page that's been unmounted.
       if (eventListeners.size === 0 && stateListeners.size === 0) {

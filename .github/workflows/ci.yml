@@ -61,6 +61,14 @@ jobs:
         run: pnpm --filter @game-studio/web exec playwright install --with-deps chromium
 
       - name: Run E2E tests
+        # 11-C3: pass ENABLE_TEST_ENDPOINTS=true so the test-create
+        # consultation endpoint is mounted, and E2E_API_KEY so the
+        # bearer auth header resolves against the API_SECRET the
+        # playwright config sets. Without these the e2e suite runs
+        # but every test that needs the consultation helper returns
+        # 404, and auth-gated tests return 401.
         run: pnpm --filter @game-studio/web test:e2e
         env:
           CI: true
+          ENABLE_TEST_ENDPOINTS: "true"
+          E2E_API_KEY: change_this_to_a_random_secret

@@ -1,7 +1,6 @@
 "use client";
-
+import { createLogger } from "../lib/logger";
 import { createContext, useCallback, useContext, useMemo, useRef, useState } from "react";
-
 /**
  * Promise-based dialog API.
  *
@@ -22,6 +21,8 @@ import { createContext, useCallback, useContext, useMemo, useRef, useState } fro
  *   const { confirm, alert } = useDialog();
  *   if (await confirm("Delete this session?")) { ... }
  */
+const logger = createLogger("useDialog");
+
 interface DialogRequest {
   kind: "alert" | "confirm";
   message: string;
@@ -141,14 +142,14 @@ export function useDialog(): DialogContextValue {
     // page is safe-by-default for destructive operations.
     const nativeConfirm = (msg: string): boolean => {
       if (typeof window === "undefined") {
-        console.warn("useDialog: no provider in scope; defaulting confirm to false");
+        logger.warn("useDialog: no provider in scope; defaulting confirm to false");
         return false;
       }
       return window.confirm(msg);
     };
     const nativeAlert = (msg: string): void => {
       if (typeof window === "undefined") {
-        console.warn("useDialog: no provider in scope; alert suppressed");
+        logger.warn("useDialog: no provider in scope; alert suppressed");
         return;
       }
       window.alert(msg);

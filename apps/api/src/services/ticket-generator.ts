@@ -12,6 +12,7 @@
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { newId } from "../utils/ids.js";
 import { readData } from "./data-store.js";
 import { readTicketsBoard, writeTicketsBoard, updateTicketsBoard } from "./ticket-board.js";
 import type { TicketsBoard, Ticket } from "@game-studio/types";
@@ -761,7 +762,10 @@ ACCEPTANCE: Player selects units on grid, issues move; enemy takes a basic turn.
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function generateId(prefix: string): string {
-  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  // 11-H13: 128-bit id. Previously this was `Date.now() + 4 base36 chars`,
+  // which collided when a GDD's ingestion produced many tickets in the
+  // same millisecond (e.g. 50 quests from a single breakdown).
+  return newId(prefix);
 }
 
 /**

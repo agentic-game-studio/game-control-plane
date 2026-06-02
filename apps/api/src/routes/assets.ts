@@ -6,6 +6,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import { watch } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { readData, writeData, updateData, broadcastEvent } from "../services/data-store.js";
 import { logger } from "../utils/logger.js";
 import { resolveProjectWorkspace } from "../utils/workspace.js";
@@ -19,7 +20,7 @@ import type {
   Project,
 } from "@game-studio/types";
 import type { WSEvent } from "@game-studio/types";
-import { loadConfig, resolvePipelinePython } from "../config.js";
+import { loadConfig, resolvePipelinePython, SUBPROCESS_MAX_BUFFER } from "../config.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -259,8 +260,29 @@ async function scanAssetsDir(
  *  is read from config so it can be tuned per deployment. */
 const assetWatchers = new Map<string, ReturnType<typeof watch>>();
 
+/**
+ * Per-project debounce timer for asset watcher broadcasts. A single
+ * editor save can fire 5-20 fs.watch events (open, write, write-end,
+ * attribute change, rename, etc.) within milliseconds. Without
+ * debouncing the WS broadcast every event, the studio hook processes
+ * 20× the work and the LLM-side redraw handler is overwhelmed.
+ *
+ * 11-H3: 100ms window — long enough to coalesce a single save into
+ * one broadcast, short enough to feel instant in the UI.
+ */
+const assetWatcherDebounceTimers = new Map<string, NodeJS.Timeout>();
+const ASSET_WATCHER_DEBOUNCE_MS = 100;
+
 /** Stop watching a project's assets directory */
 export function unwatchProjectAssets(projectId: string): void {
+  // 11-H3: also clear any pending debounce timer so it doesn't fire
+  // after the project is gone (and so the Map doesn't accumulate
+  // dead entries).
+  const pendingTimer = assetWatcherDebounceTimers.get(projectId);
+  if (pendingTimer) {
+    clearTimeout(pendingTimer);
+    assetWatcherDebounceTimers.delete(projectId);
+  }
   const watcher = assetWatchers.get(projectId);
   if (watcher) {
     watcher.close();
@@ -295,14 +317,25 @@ function watchProjectAssets(projectId: string, assetsDir: string): void {
     try {
       watcher = watch(assetsDir, { recursive: true }, (eventType, filename) => {
         if (!filename) return;
-        // Debounce: broadcast after a short delay to batch rapid changes
-        broadcastEvent({
-          type: "asset:updated",
-          asset: { id: `scan-${projectId}`, filename: String(filename) } as GameAsset,
-          // 10-L5: tag the file-watcher event with the project so the
-          // studio hook can ignore events for other projects' assets.
-          projectId,
-        } as WSEvent);
+        // 11-H3: debounce. A single editor save fires 5-20 fs.watch
+        // events; broadcasting on each one overwhelmed the studio
+        // hook. Coalesce into one broadcast per ~100ms quiet window
+        // per project. The debounce timer is also cleared in
+        // unwatchProjectAssets() so we don't leak pending timers
+        // when the project is torn down.
+        const existing = assetWatcherDebounceTimers.get(projectId);
+        if (existing) clearTimeout(existing);
+        const timer = setTimeout(() => {
+          assetWatcherDebounceTimers.delete(projectId);
+          broadcastEvent({
+            type: "asset:updated",
+            asset: { id: `scan-${projectId}`, filename: String(filename) } as GameAsset,
+            // 10-L5: tag the file-watcher event with the project so the
+            // studio hook can ignore events for other projects' assets.
+            projectId,
+          } as WSEvent);
+        }, ASSET_WATCHER_DEBOUNCE_MS);
+        assetWatcherDebounceTimers.set(projectId, timer);
       });
     } catch (err) {
       // 10-H10: `fs.watch` with `recursive: true` is unsupported on Linux
@@ -617,7 +650,7 @@ assetsRouter.patch("/:id", async (req: Request, res: Response) => {
     let isNew = false;
     let updatedAsset: GameAsset | null = null;
 
-    const data = await updateData<AssetsData>("assets.json", (d) => {
+    await updateData<AssetsData>("assets.json", (d) => {
       const assetIndex = d.assets.findIndex((a) => a.id === id);
       if (assetIndex === -1) {
         const now = new Date().toISOString();
@@ -653,7 +686,6 @@ assetsRouter.patch("/:id", async (req: Request, res: Response) => {
       res.status(500).json({ success: false, error: "Failed to update asset" });
       return;
     }
-    void data; // lock released; reference preserved for any future reads
 
     broadcastEvent({
       type: "asset:updated",
@@ -732,7 +764,17 @@ assetsRouter.delete("/:id", async (req: Request, res: Response) => {
 assetsRouter.post("/generate", async (req: Request, res: Response) => {
   const body = req.body as GenerateAssetRequest;
   const config = loadConfig();
-  const scriptDir = path.resolve(process.cwd(), "..", "..", "scripts", "asset-pipeline");
+  // 11-H4: resolve the asset-pipeline script directory relative to
+  // THIS file's location instead of process.cwd(). The previous
+  // `path.resolve(process.cwd(), "..", "..", "scripts", "...")`
+  // assumed the server was started from apps/api/ — fine for `pnpm
+  // dev`, but the production start (`pnpm start:api` inside the
+  // container) runs from /app, breaking the path and the pipeline
+  // silently fell through to "python: command not found".
+  const here = fileURLToPath(import.meta.url);
+  // this file is apps/api/src/routes/assets.ts; the script dir is
+  // ../../../scripts/asset-pipeline from here.
+  const scriptDir = path.resolve(path.dirname(here), "..", "..", "..", "scripts", "asset-pipeline");
   const projectDir = body.workspacePath
     ? resolveProjectWorkspace(body.workspacePath)
     : config.WORKSPACE_DIR;
@@ -775,7 +817,7 @@ assetsRouter.post("/generate", async (req: Request, res: Response) => {
       const { stdout, stderr } = await execFileAsync(PYTHON_BIN, args, {
         cwd: scriptDir,
         timeout: 600_000,
-        maxBuffer: 10 * 1024 * 1024,
+        maxBuffer: SUBPROCESS_MAX_BUFFER,
       });
 
       const manifestPath = path.join(projectAssetsDir, "asset-manifest.json");
@@ -874,7 +916,7 @@ assetsRouter.post("/generate", async (req: Request, res: Response) => {
     const { stdout } = await execFileAsync(PYTHON_BIN, args, {
       cwd: scriptDir,
       timeout: 600_000,
-      maxBuffer: 10 * 1024 * 1024,
+      maxBuffer: SUBPROCESS_MAX_BUFFER,
     });
 
     const manifestPath = path.join(projectAssetsDir, "asset-manifest.json");

@@ -1,5 +1,5 @@
 "use client";
-
+import { createLogger } from "../../../lib/logger";
 import { useState, useEffect, useCallback } from "react";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useProject } from "@/contexts/ProjectContext";
@@ -9,6 +9,7 @@ import { ProjectGrid } from "./components/ProjectGrid";
 import { ActivityLog } from "./components/ActivityLog";
 import { NewProjectModal } from "./components/NewProjectModal";
 import { apiFetch } from "@/lib/api";
+const logger = createLogger("page");
 
 interface MCPStatus {
   status: "not_running" | "connected" | "disconnected";
@@ -55,7 +56,7 @@ export default function DashboardPage() {
       );
       await checkServerStatus();
     } catch (err) {
-      console.error("Server setup failed:", err);
+      logger.error("Server setup failed", { err: err });
     } finally {
       setSettingUp(false);
     }
@@ -68,7 +69,7 @@ export default function DashboardPage() {
         method: "POST",
       });
     } catch (err) {
-      console.error("Failed to launch Godot editor:", err);
+      logger.error("Failed to launch Godot editor", { err: err });
     }
   };
 
@@ -82,7 +83,7 @@ export default function DashboardPage() {
       const project = await createDemoProject();
       selectProject(project.id);
     } catch (err) {
-      console.error("Failed to create demo project:", err);
+      logger.error("Failed to create demo project", { err: err });
     } finally {
       setCreatingDemo(false);
     }

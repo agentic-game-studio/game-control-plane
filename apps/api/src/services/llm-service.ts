@@ -12,7 +12,7 @@ import { realpathSync as realpathSyncCb, readFileSync as readFileSyncCb } from "
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
-import { loadConfig, resolvePipelinePython } from "../config.js";
+import { loadConfig, resolvePipelinePython, SUBPROCESS_MAX_BUFFER } from "../config.js";
 
 // 10-C6: __dirname is undefined in ESM. The GodotCLI default-bin path
 // (below) used `path.resolve(__dirname, ...)` and threw ReferenceError
@@ -60,6 +60,7 @@ import {
 import { triggerVerification } from "./verification-service.js";
 import { consumeCreditsForAgent } from "./credit-service.js";
 import { logger } from "../utils/logger.js";
+import { newId } from "../utils/ids.js";
 
 // 10-M5: hoist the static Godot-binary allowlist to module scope. The
 // previous version rebuilt the array on every Bash tool call — that's
@@ -648,7 +649,7 @@ async function executeTool(
           const { stdout, stderr } = await execFileAsync(argv[0], argv.slice(1), {
             cwd: workspaceDir,
             timeout,
-            maxBuffer: 10 * 1024 * 1024,
+            maxBuffer: SUBPROCESS_MAX_BUFFER,
             // Don't go through a shell — this is the point. execFile uses
             // direct execve(2) with argv; the OS is responsible for finding
             // the binary on PATH.
@@ -876,7 +877,7 @@ async function executeTool(
           const { stdout, stderr } = await execFileAsyncTool(PYTHON_BIN, genArgs, {
             cwd: scriptDir,
             timeout: 600_000,
-            maxBuffer: 10 * 1024 * 1024,
+            maxBuffer: SUBPROCESS_MAX_BUFFER,
           });
 
           // Parse the manifest to get result details
@@ -980,7 +981,7 @@ async function executeTool(
           const { stdout, stderr } = await execFileAsyncTool(pythonBin, args, {
             cwd: scriptDir,
             timeout: 120_000,
-            maxBuffer: 10 * 1024 * 1024,
+            maxBuffer: SUBPROCESS_MAX_BUFFER,
           });
           const summary = stdout.slice(-300);
           logEntry(sessionId, "info", `[${agentRole}] TilemapSplit: ${_input} -> ${_outputDir}`, agentRole);
@@ -1020,7 +1021,7 @@ async function executeTool(
           const { stdout, stderr } = await execFileAsyncTool(pythonBin, args, {
             cwd: scriptDir,
             timeout: 120_000,
-            maxBuffer: 10 * 1024 * 1024,
+            maxBuffer: SUBPROCESS_MAX_BUFFER,
           });
           const summary = stdout.slice(-300);
           logEntry(sessionId, "info", `[${agentRole}] SpritePack: ${_inputDir} -> ${_output}`, agentRole);
@@ -1056,7 +1057,7 @@ async function executeTool(
           const { stdout, stderr } = await execFileAsyncTool(pythonBin, args, {
             cwd: scriptDir,
             timeout: 60_000,
-            maxBuffer: 10 * 1024 * 1024,
+            maxBuffer: SUBPROCESS_MAX_BUFFER,
           });
           const summary = stdout.slice(-200);
           logEntry(sessionId, "info", `[${agentRole}] GenerateAudio: ${_sfxType} -> ${_outputPath}`, agentRole);
@@ -1168,7 +1169,7 @@ loop_offset=0
             projectId,
             messages: [
               {
-                id: `msg-${crypto.randomUUID().slice(0, 8)}`,
+                id: newId("msg"),
                 type: "system" as const,
                 sender: "SYSTEM",
                 content: brief ? `${welcomeContent}\n\n**Brief:** ${brief}` : welcomeContent,
@@ -1289,7 +1290,7 @@ loop_offset=0
           const { stdout, stderr } = await execFileAsyncTool(pythonBin, args, {
             cwd: scriptDir,
             timeout: 360_000, // 6 min for export
-            maxBuffer: 10 * 1024 * 1024,
+            maxBuffer: SUBPROCESS_MAX_BUFFER,
           });
 
           // The script outputs JSON — try to parse it for a structured result
@@ -1404,7 +1405,7 @@ loop_offset=0
           const { stdout, stderr } = await execFileAsyncTool("node", [shipthisBin, ...args], {
             cwd,
             timeout: 600_000,
-            maxBuffer: 10 * 1024 * 1024,
+            maxBuffer: SUBPROCESS_MAX_BUFFER,
           });
           logEntry(sessionId, "info", `[${agentRole}] GodotCLI ${command}: ${projectPath}`, agentRole);
           return (stdout as string)?.trim() || "GodotCLI completed";
@@ -1672,7 +1673,7 @@ export async function invokeAgent(
   onTokenUsage?: import("../llm/zai-client.js").TokenUsageCallback,
   signal?: AbortSignal,
 ): Promise<InvokeResult> {
-  const invocationId = `invoke-${crypto.randomUUID().slice(0, 8)}`;
+  const invocationId = newId("invoke");
 
   if (broadcastEvents) {
     broadcast({
