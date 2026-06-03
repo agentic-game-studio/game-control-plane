@@ -10,7 +10,8 @@
  * The agent reads project state to figure out paths and conventions.
  */
 
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
+import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { newId } from "../utils/ids.js";
 import { readData } from "./data-store.js";
@@ -771,39 +772,51 @@ function generateId(prefix: string): string {
 /**
  * Scan project directory for existing files matching a set of patterns.
  * Returns relative paths of found files.
+ *
+ * 15-CR-async-walk: converted from readdirSync to readdir (async). The
+ * sync version was called once per TICKET_TEMPLATE per generateTickets
+ * invocation, and the autonomous loop invokes generateTickets on every
+ * empty-queue iteration — on a 1000-file project that was 60+ blocking
+ * readdir calls per iteration, freezing WS broadcasts for hundreds of ms
+ * on slow filesystems. Recursive walks are also bounded by a depth cap
+ * so a symlink loop can't make this hang.
  */
-function findProjectFiles(projectPath: string, patterns: string[]): string[] {
+async function findProjectFiles(projectPath: string, patterns: string[]): Promise<string[]> {
   const found: string[] = [];
-  const search = (dir: string, root: string) => {
+  const search = async (dir: string, root: string, depth: number): Promise<void> => {
+    if (depth > 16) return; // 16 levels is plenty for any sane Godot project
+    let entries;
     try {
-      const entries = readdirSync(dir, { withFileTypes: true });
-      for (const entry of entries) {
-        if (entry.name.startsWith(".") || entry.name === "node_modules" || entry.name.toLowerCase() === "addons") continue;
-        const full = join(dir, entry.name);
-        if (entry.isDirectory()) {
-          search(full, root);
-        } else if (patterns.some((p) =>
-          entry.name === p ||                    // exact filename match (e.g. "player.gd")
-          entry.name.endsWith(p) ||              // extension match (e.g. ".gd", ".tscn")
-          full.endsWith(`/${p}`)                 // path suffix match
-        )) {
-          found.push(full.replace(root + "/", ""));
-        }
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.name.startsWith(".") || entry.name === "node_modules" || entry.name.toLowerCase() === "addons") continue;
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await search(full, root, depth + 1);
+      } else if (entry.isFile() && patterns.some((p) =>
+        entry.name === p ||                    // exact filename match (e.g. "player.gd")
+        entry.name.endsWith(p) ||              // extension match (e.g. ".gd", ".tscn")
+        full.endsWith(`/${p}`)                 // path suffix match
+      )) {
+        found.push(full.replace(root + "/", ""));
       }
-    } catch { /* skip */ }
+    }
   };
-  if (existsSync(projectPath)) search(projectPath, projectPath);
+  if (existsSync(projectPath)) await search(projectPath, projectPath, 0);
   return found;
 }
 
-function anyFileExists(projectPath: string, files: string[]): boolean {
+async function anyFileExists(projectPath: string, files: string[]): Promise<boolean> {
   // Fast path: exact match
   if (files.some((f) => existsSync(join(projectPath, f)))) return true;
   // Fuzzy fallback: match by basename stem (exact or with separator suffix)
   // e.g. "player.gd" matches "player.gd", "player_controller.gd", "player-character.gd"
   // but NOT "player_died.gd", "player_anim.gd" (those aren't the main player script)
   const requiredStems = files.map((f) => (f.split("/").pop() ?? f).replace(/\.\w+$/, "").toLowerCase());
-  const allFiles = findProjectFiles(projectPath, [".gd", ".tscn"]);
+  const allFiles = await findProjectFiles(projectPath, [".gd", ".tscn"]);
   return allFiles.some((found) => {
     const foundStem = (found.split("/").pop() ?? "").replace(/\.\w+$/, "").toLowerCase();
     return requiredStems.some((stem) =>
@@ -821,7 +834,7 @@ function anyFileExists(projectPath: string, files: string[]): boolean {
  * Groups entries by basename stem — entries sharing the same stem are alternatives.
  * Each unique stem group must have at least one match on disk.
  */
-function allRequiredFilesExist(projectPath: string, files: string[]): boolean {
+async function allRequiredFilesExist(projectPath: string, files: string[]): Promise<boolean> {
   // Group by basename stem. Within a stem group, any file is sufficient (OR logic).
   // Across stem groups, ALL groups must be satisfied (AND logic).
   // Example: ["autoloads/game_manager.gd", "scripts/game_manager.gd"] → stem "game_manager", either path works.
@@ -836,7 +849,7 @@ function allRequiredFilesExist(projectPath: string, files: string[]): boolean {
     stemGroups.get(stem)!.push(f);
   }
 
-  const allFiles = findProjectFiles(projectPath, [".gd", ".tscn"]);
+  const allFiles = await findProjectFiles(projectPath, [".gd", ".tscn"]);
 
   for (const [stem, alternatives] of stemGroups) {
     // Check if any alternative path exists (exact match)
@@ -913,12 +926,12 @@ export async function generateTickets(projectId: string, workspacePath?: string,
     }
 
     // Skip if the files this ticket would create already exist
-    if (template.skipIfFilesExist && anyFileExists(projectPath, template.skipIfFilesExist)) {
+    if (template.skipIfFilesExist && (await anyFileExists(projectPath, template.skipIfFilesExist))) {
       continue;
     }
 
     // Skip if required dependency files don't exist yet (all stem groups must be satisfied)
-    if (template.requireFilesExist && !allRequiredFilesExist(projectPath, template.requireFilesExist)) {
+    if (template.requireFilesExist && !(await allRequiredFilesExist(projectPath, template.requireFilesExist))) {
       continue;
     }
 
@@ -974,7 +987,7 @@ export async function addTicketsToBoard(projectId: string, tickets: Ticket[]): P
  * scanProjectState — Build a manifest of existing project files for agent context.
  * Called by the autonomous loop to inject into agent prompts.
  */
-export function scanProjectState(projectPath: string): string {
+export async function scanProjectState(projectPath: string): Promise<string> {
   const lines: string[] = [];
   lines.push("=== PROJECT STATE ===");
 
@@ -987,7 +1000,7 @@ export function scanProjectState(projectPath: string): string {
   // Check project.godot
   const projectGodot = join(projectPath, "project.godot");
   if (existsSync(projectGodot)) {
-    const content = readFileSync(projectGodot, "utf8");
+    const content = await readFile(projectGodot, "utf8");
     const nameMatch = content.match(/config\/name="([^"]+)"/);
     const versionMatch = content.match(/config\/features=PackedStringArray\("([^"]+)"/);
     const mainSceneMatch = content.match(/run\/main_scene="([^"]+)"/);
@@ -1007,9 +1020,9 @@ export function scanProjectState(projectPath: string): string {
   }
 
   // List all scenes and scripts
-  const scenes = findProjectFiles(projectPath, [".tscn"]);
-  const scripts = findProjectFiles(projectPath, [".gd"]);
-  const assets = findProjectFiles(projectPath, [".png", ".svg", ".wav", ".ogg"]);
+  const scenes = await findProjectFiles(projectPath, [".tscn"]);
+  const scripts = await findProjectFiles(projectPath, [".gd"]);
+  const assets = await findProjectFiles(projectPath, [".png", ".svg", ".wav", ".ogg"]);
 
   if (scenes.length > 0) {
     lines.push(`\nScenes (${scenes.length}):`);

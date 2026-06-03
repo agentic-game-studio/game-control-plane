@@ -103,9 +103,18 @@ server.on("upgrade", (request, socket, head) => {
   // an Origin header on the upgrade request; we reject any origin not in
   // the CORS allowlist. Same-origin requests have an Origin header that
   // matches the server's own URL — we also accept those.
+  //
+  // 15-CR-ws-origin-gap: the previous `if (origin && !corsOrigins.includes("*"))`
+  // short-circuited the entire check when the Origin header was absent.
+  // Browsers always send Origin on WS upgrades, but non-browser clients
+  // (curl, wscat, custom fetch) never do. A leaked API_SECRET on a
+  // CORS-locked deployment (CORS_ORIGIN set to a specific origin) could
+  // still be used by any non-browser client because the origin check
+  // was bypassed. Invert so missing-Origin requests are rejected when
+  // CORS is configured to a specific allowlist.
   const origin = request.headers.origin;
-  if (origin && !corsOrigins.includes("*")) {
-    const allowed = corsOrigins.some((o) => o === origin || (o !== "*" && new URL(o).origin === new URL(origin).origin));
+  if (!corsOrigins.includes("*")) {
+    const allowed = !!origin && corsOrigins.some((o) => o === origin || (o !== "*" && new URL(o).origin === new URL(origin).origin));
     if (!allowed) {
       socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
       socket.destroy();
@@ -241,6 +250,15 @@ app.use("/api/gates/:gateId/run", rateLimiter);
 // an attacker could drain subscription+onTop in a tight loop. Same rate
 // bucket as the other LLM-burning endpoints.
 app.use("/api/settings/consume", rateLimiter);
+// 15-CR-settings-mutation: /topup and /upgrade mutate the user's own
+// balance/tier, but they're also reachable from any API key holder —
+// a leaked API_SECRET could be used to top up credits infinitely or
+// switch the deployment to the highest-paid tier for free. Mirror the
+// consume rate limit so the worst case is "one topup per 10s" instead
+// of unbounded mutation. The amount/tier caps inside the route are a
+// second line of defense.
+app.use("/api/settings/topup", rateLimiter);
+app.use("/api/settings/upgrade", rateLimiter);
 
 app.use("/api/chat", chatRouter);
 app.use("/api/tickets", ticketsRouter);

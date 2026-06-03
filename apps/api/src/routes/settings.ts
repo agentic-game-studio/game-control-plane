@@ -163,8 +163,13 @@ settingsRouter.post("/reset", async (_req: Request, res: Response) => {
 settingsRouter.post("/topup", async (req: Request, res: Response) => {
   const { amount } = req.body as { amount?: number };
 
-  if (!amount || amount <= 0 || !Number.isFinite(amount)) {
-    res.status(400).json({ success: false, error: "Invalid amount" });
+  // 15-CR-settings-topup-cap: clamp each topup to 100,000 credits.
+  // A leaked API_SECRET could otherwise add a billion credits in one
+  // request and overflow the persisted JSON. The rate limiter caps the
+  // number of topups per minute; this caps the magnitude of each one.
+  const MAX_TOPUP = 100_000;
+  if (!amount || amount <= 0 || !Number.isFinite(amount) || amount > MAX_TOPUP) {
+    res.status(400).json({ success: false, error: `Invalid amount (max ${MAX_TOPUP})` });
     return;
   }
 

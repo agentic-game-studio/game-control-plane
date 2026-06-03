@@ -8,8 +8,34 @@
  */
 
 import { promises as fs } from "fs";
+import { realpathSync } from "node:fs";
 import { resolve, relative, sep } from "path";
 import { loadConfig } from "../config.js";
+
+// 15-CR-realpath-cache: memoize realpathSync results so the sync
+// syscall (which blocks the event loop for tens of ms on NFS / Docker
+// bind-mounts / CIFS volumes) only runs once per path. resolveProjectWorkspace
+// is called on every LLM Read/Write/Edit (via safePath), every asset
+// scan, every /api/dashboard/* route, and at agent-prompt load — under
+// a 60-tool-call turn that was 60+ blocking stat calls. The cache is
+// process-local, has a hard size cap, and uses FIFO eviction so it
+// can't grow unbounded.
+const realpathCache = new Map<string, string>();
+const REALPATH_CACHE_MAX = 1_000;
+
+function cachedRealpathSync(p: string): string {
+  const cached = realpathCache.get(p);
+  if (cached !== undefined) return cached;
+  const result = realpathSync(p);
+  // FIFO eviction: delete oldest entry once we exceed the cap. Maps
+  // preserve insertion order, so the first key is the oldest.
+  if (realpathCache.size >= REALPATH_CACHE_MAX) {
+    const firstKey = realpathCache.keys().next().value;
+    if (firstKey !== undefined) realpathCache.delete(firstKey);
+  }
+  realpathCache.set(p, result);
+  return result;
+}
 
 /** Resolve a project's workspacePath to an absolute filesystem path.
  *
@@ -73,14 +99,11 @@ export function resolveProjectWorkspace(workspacePath: string): string {
   return resolved;
 }
 
-/** Tiny wrapper around `realpathSync` so we don't have to import the sync
- * API in a function that otherwise uses async fs only. */
+/** Tiny wrapper around the memoized realpath helper. The cache is
+ * process-local and FIFO-bounded, so a sustained workload of N distinct
+ * project paths stays under REALPATH_CACHE_MAX entries. */
 function fsSyncRealpath(p: string): string {
-  // node:fs.realpathSync is sync, throws on ENOENT. Fine to use here —
-  // this is only called from a path validation step, not a hot path.
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { realpathSync } = require("node:fs") as typeof import("node:fs");
-  return realpathSync(p);
+  return cachedRealpathSync(p);
 }
 
 function pathIsAbsolute(p: string): boolean {

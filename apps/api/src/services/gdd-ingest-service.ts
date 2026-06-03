@@ -11,6 +11,7 @@ import { createQuestTicket } from "./quest-bridge.js";
 import { readTicketsBoard } from "./ticket-board.js";
 import { broadcast } from "./websocket.js";
 import { logger } from "../utils/logger.js";
+import { resolveProjectWorkspace } from "../utils/workspace.js";
 import type { AgentRole, TicketsBoard, WSEvent } from "@game-studio/types";
 
 const AREA_MAP: Record<string, { area: string; subarea: string; assignee: AgentRole }> = {
@@ -160,13 +161,25 @@ export function parseGDDSections(content: string): Map<string, ParsedGDDItem[]> 
 }
 
 export function findGDDPath(projectSlug: string): string | null {
+  // 15-CR-gdd-traversal: projectSlug arrives raw from the request body
+  // (POST /api/gdd/ingest and autonomous.ts startup). Without
+  // containment, `projectSlug = "../../etc"` resolves to
+  // `/etc/gdd/game.md` and reads from outside the workspace.
+  // resolveProjectWorkspace throws on escape — catch and return null
+  // so the route returns 404 (no GDD found) instead of 500.
+  let projectRoot: string;
+  try {
+    projectRoot = resolveProjectWorkspace(projectSlug);
+  } catch {
+    return null;
+  }
   const config = loadConfig();
   const altPaths = [
-    join(config.WORKSPACE_DIR, projectSlug, "gdd", "game.md"),
-    join(config.WORKSPACE_DIR, projectSlug, "docs", "gdd.md"),
-    join(config.WORKSPACE_DIR, projectSlug, "docs", "game.md"),
-    join(config.WORKSPACE_DIR, projectSlug, "GDD.md"),
-    join(config.WORKSPACE_DIR, projectSlug, "game-design.md"),
+    join(projectRoot, "gdd", "game.md"),
+    join(projectRoot, "docs", "gdd.md"),
+    join(projectRoot, "docs", "game.md"),
+    join(projectRoot, "GDD.md"),
+    join(projectRoot, "game-design.md"),
     join(config.WORKSPACE_DIR, "design", "gdd", `${projectSlug}.md`),
   ];
   for (const p of altPaths) {
