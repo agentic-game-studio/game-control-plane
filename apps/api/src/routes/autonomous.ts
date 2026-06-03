@@ -85,12 +85,13 @@ const DEBUG_FILE = join(loadConfig().WORKSPACE_DIR, "production", "logs", "auton
 const DEBUG_FILE_MAX_BYTES = 5 * 1024 * 1024; // 5MB before rotation
 const DEBUG_FILE_BACKUP = `${DEBUG_FILE}.1`;
 
-// Lazily opened write stream. The previous implementation opened, wrote,
-// fsynced, and closed a file descriptor on EVERY iteration (up to 200× per
-// loop) — burning I/O and growing the file without bound. This version
-// keeps a single stream open for the lifetime of the process and rotates
-// when the file exceeds 5MB. The whole thing is gated on
-// `DEBUG_AUTONOMOUS=1` so it's a no-op in production.
+// Lazily opened file descriptor. The previous implementation opened,
+// wrote, fsynced, and closed a file descriptor on EVERY iteration (up
+// to 200× per loop) — burning I/O and growing the file without bound.
+// This version keeps a single fd open for the lifetime of the process
+// (writeFileSync/closeSync take an fd number) and rotates when the
+// file exceeds 5MB. The whole thing is gated on `DEBUG_AUTONOMOUS=1`
+// so it's a no-op in production.
 let debugStream: ReturnType<typeof openSync> | null = null;
 let debugBytesWritten = 0;
 

@@ -246,8 +246,14 @@ async function flushEmitProducerUpdate(projectId: string): Promise<void> {
   snap.lastEmittedAt = now;
   snap.lastEmittedContentHash = h;
 
+  // 17-L-msg-id-collision: use the same `newId("msg")` helper as the
+  // rest of chat.ts instead of `producer-update-${now}`. Two emits
+  // landing in the same millisecond would produce identical ids, and
+  // the frontend dedupes on `msg.id` so the second emit would be
+  // silently dropped.
+  const { newId } = await import("../utils/ids.js");
   await mod.appendMessage(session.id, {
-    id: `producer-update-${now}`,
+    id: newId("msg"),
     type: "producer_update",
     sender: "Producer",
     content: md,

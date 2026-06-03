@@ -29,9 +29,13 @@ import { requestLogger } from "./middleware/request-logger.js";
 
 const START_TIME = Date.now();
 
-// Q2: Simple in-memory rate limiter (per-IP, sliding window).
-// Limits come from env config so operators can tune for their workload
-// without redeploying code.
+// Q2: Simple in-memory rate limiter (per-IP, fixed window).
+// The window resets on the first request after `resetAt` expires, so a
+// client can theoretically burst 2× the limit across a window boundary
+// (last second of window N + first second of window N+1). For a
+// web-facing API this is acceptable — sliding-window would need a
+// per-request log per IP. Limits come from env config so operators
+// can tune for their workload without redeploying code.
 const rateBuckets = new Map<string, { count: number; resetAt: number }>();
 
 // Evict expired rate bucket entries every 5 minutes to prevent unbounded
