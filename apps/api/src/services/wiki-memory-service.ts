@@ -90,8 +90,17 @@ export async function externalizeProductionNote(
   // we don't throw — we just log the first rejection.
   for (const result of results) {
     if (result.status === "rejected") {
+      // 23-M-wiki-memory-event-convention: add the `event:`
+      // discriminator used by the rest of the codebase. An operator
+      // grepping for `event:"wiki_memory_append_failed"` (the
+      // natural namespace) would have found nothing — they had to
+      // grep the literal log message, which is fragile across
+      // refactors of the message string.
       logger.warn(
-        { err: result.reason instanceof Error ? result.reason.message : String(result.reason) },
+        {
+          err: result.reason instanceof Error ? result.reason.message : String(result.reason),
+          event: "wiki_memory_append_failed",
+        },
         "wiki-memory appendFile failed — note partially persisted",
       );
     }

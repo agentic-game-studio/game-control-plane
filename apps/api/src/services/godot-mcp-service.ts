@@ -413,7 +413,15 @@ export class GodotMCPService {
    * This replaces the previous "sleep 1s and hope" pattern. */
   private sendInitializeHandshake(): Promise<unknown> {
     return new Promise((resolve, reject) => {
-      const id = `init-${Date.now()}`;
+      // 23-M-init-handshake-id: use randomUUID() (already imported at
+      // line 16) for the JSON-RPC request id instead of
+      // `init-${Date.now()}`. Low real-world risk — there's only one
+      // initialize per process lifetime, the response is matched by
+      // the `pendingRequests` Map — but the pattern was wrong and
+      // easy to copy into other call sites. Line 488 already uses
+      // `randomUUID()` for the other MCP requests; this was the
+      // leftover.
+      const id = randomUUID();
       const timer = setTimeout(
         () => reject(new Error("MCP initialize handshake timed out after 5s")),
         5000,

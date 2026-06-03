@@ -111,7 +111,7 @@ export async function resolveAndValidateWebhookTarget(parsed: URL): Promise<bool
   }
 }
 
-export async function fireWebhook(event: string, payload: Record<string, unknown>): Promise<void> {
+export async function fireWebhook(eventName: string, payload: Record<string, unknown>): Promise<void> {
   let webhookUrl: string | undefined;
   try {
     const settings = await readData<SettingsConfig>("settings.json");
@@ -124,8 +124,15 @@ export async function fireWebhook(event: string, payload: Record<string, unknown
 
   const parsed = validateWebhookUrl(webhookUrl);
   if (!parsed) {
+    // 23-M-webhook-event-convention: rename the function parameter
+    // from `event` to `eventName` so the standard `event:` log
+    // discriminator (used by every other service — credit-service,
+    // producer-summary, etc.) doesn't shadow it. The previous
+    // `event_type:` key was the workaround, but a `rg "event:"` over
+    // the logs returned nothing for the webhook subsystem, hiding
+    // failures from alert pipelines that key on the convention.
     logger.warn(
-      { event, webhookUrl, event_type: "webhook_rejected" },
+      { event: "webhook_rejected", eventName, webhookUrl },
       "Webhook URL rejected by SSRF guard (must be http(s) and not point at private/loopback addresses)",
     );
     return;
@@ -136,7 +143,7 @@ export async function fireWebhook(event: string, payload: Record<string, unknown
   const dnsSafe = await resolveAndValidateWebhookTarget(parsed);
   if (!dnsSafe) {
     logger.warn(
-      { event, webhookUrl, hostname: parsed.hostname, event_type: "webhook_rejected_dns" },
+      { event: "webhook_rejected_dns", eventName, webhookUrl, hostname: parsed.hostname },
       "Webhook URL rejected by SSRF guard (hostname resolves to private/loopback IP)",
     );
     return;
@@ -146,12 +153,12 @@ export async function fireWebhook(event: string, payload: Record<string, unknown
     await fetch(parsed.toString(), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ event, timestamp: new Date().toISOString(), ...payload }),
+      body: JSON.stringify({ event: eventName, timestamp: new Date().toISOString(), ...payload }),
       signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS),
     });
   } catch (err) {
     logger.warn(
-      { event, error: err instanceof Error ? err.message : String(err), event_type: "webhook_failed" },
+      { event: "webhook_failed", eventName, error: err instanceof Error ? err.message : String(err) },
       "Webhook delivery failed",
     );
   }

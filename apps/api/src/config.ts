@@ -46,6 +46,23 @@ const envSchema = z
       .union([z.literal("true"), z.literal("false")])
       .default("false")
       .transform((v) => v === "true"),
+    // 23-M-env-var-zod-coverage: 6 env vars were read directly via
+    // `process.env.X` in 5 services (qa-gate-service, build-service,
+    // llm-service, shipthis-service, godot-mcp-service, utils/logger)
+    // with no Zod validation. Bad values (typo, empty string,
+    // non-existent path) would silently fail at the exec site 30+
+    // minutes into a run with a generic "spawn ENOENT" error. Add
+    // them to the schema with sensible defaults and have the
+    // services consume the validated `config.X` instead.
+    GODOT_BIN: z.string().optional().default(""),
+    SHIPTHIS_BIN: z.string().optional().default(""),
+    SHIPTHIS_CLI_PATH: z.string().optional().default(""),
+    GODOT_MCP_SERVER_PATH: z.string().optional().default(""),
+    LOG_TO_FILE: z
+      .union([z.literal("true"), z.literal("false")])
+      .default("true")
+      .transform((v) => v === "true"),
+    RAILWAY_ENVIRONMENT_ID: z.string().optional().default(""),
   })
   .superRefine((data, ctx) => {
     const hasZai = data.ZAI_API_KEY.trim().length > 0;
@@ -91,6 +108,12 @@ export function loadConfig() {
     MAX_DEAD_LETTERED_PER_PROJECT: process.env.MAX_DEAD_LETTERED_PER_PROJECT,
     TRUST_PROXY: process.env.TRUST_PROXY,
     ENABLE_TEST_ENDPOINTS: process.env.ENABLE_TEST_ENDPOINTS,
+    GODOT_BIN: process.env.GODOT_BIN,
+    SHIPTHIS_BIN: process.env.SHIPTHIS_BIN,
+    SHIPTHIS_CLI_PATH: process.env.SHIPTHIS_CLI_PATH,
+    GODOT_MCP_SERVER_PATH: process.env.GODOT_MCP_SERVER_PATH,
+    LOG_TO_FILE: process.env.LOG_TO_FILE,
+    RAILWAY_ENVIRONMENT_ID: process.env.RAILWAY_ENVIRONMENT_ID,
   };
 
   const result = envSchema.safeParse(raw);

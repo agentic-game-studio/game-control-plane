@@ -345,8 +345,14 @@ function watchProjectAssets(projectId: string, assetsDir: string): void {
       // polling refresh path (refetch on /api/assets every N seconds).
       const code = (err as NodeJS.ErrnoException)?.code;
       if (code === "ENOSYS" || code === "ERR_FEATURE_UNAVAILABLE_ON_PLATFORM") {
+        // 23-M-asset-watcher-event-convention: add the `event:`
+        // discriminator so alert pipelines keying on the convention
+        // (e.g. `event:"asset_watcher_unsupported"`) find these
+        // lines. The project-level asset watcher is a long-lived
+        // resource; a silent failure here means assets stop
+        // updating for a project without any alert.
         logger.warn(
-          { projectId, assetsDir, code },
+          { projectId, assetsDir, code, event: "asset_watcher_unsupported" },
           "fs.watch recursive unsupported on this platform — asset updates will rely on the UI's poll refresh",
         );
         return;
@@ -355,10 +361,24 @@ function watchProjectAssets(projectId: string, assetsDir: string): void {
     }
 
     assetWatchers.set(projectId, watcher);
-    logger.info({ projectId, assetsDir }, "Started watching project assets");
+    // 23-M-asset-watcher-event-convention: paired with the
+    // `asset_watcher_unsupported` key above, the success path also
+    // gets a discriminator so operators can correlate the "watcher
+    // started" and "watcher errored" lifecycle.
+    logger.info(
+      { projectId, assetsDir, event: "asset_watcher_started" },
+      "Started watching project assets",
+    );
 
     watcher.on("error", (err) => {
-      logger.error({ projectId, err }, "Asset watcher error");
+      // 23-M-asset-watcher-event-convention: the watcher-error path
+      // is the most important to be alertable — a single silent
+      // failure here means the project loses its push-update channel
+      // and only the UI poll keeps the inventory fresh.
+      logger.error(
+        { projectId, err, event: "asset_watcher_error" },
+        "Asset watcher error",
+      );
       unwatchProjectAssets(projectId);
     });
   } catch {
