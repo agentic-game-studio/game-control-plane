@@ -97,12 +97,65 @@ export default function CommandInput({ onSend, isLoading, queueCount = 0, status
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
+      // 18-C-hints-dead: if the hints dropdown is open and the user
+      // hits Enter, prefer selecting the highlighted command over
+      // sending raw text. This matches the visual affordance of the
+      // highlighted item and prevents the user from having to mouse
+      // over to confirm a pick.
+      if (showHints && filteredCommands.length > 0) {
+        const pick = filteredCommands[selectedIndex] ?? filteredCommands[0];
+        if (pick) {
+          handleSelectCommand(pick.cmd);
+          return;
+        }
+      }
       handleSend();
+      return;
+    }
+    // 18-C-hints-dead: arrow-key navigation through the hints list.
+    if (showHints && filteredCommands.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setSelectedIndex((i) => (i + 1) % filteredCommands.length);
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setSelectedIndex((i) => (i - 1 + filteredCommands.length) % filteredCommands.length);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setShowHints(false);
+        return;
+      }
     }
   };
 
   const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setValue(e.target.value);
+    const next = e.target.value;
+    setValue(next);
+    // 18-C-hints-dead: show the slash-command autocomplete dropdown
+    // whenever the input starts with "/" and could match at least one
+    // command. Previously `showHints` was initialized to `false` and
+    // only ever set to `false` (on send / on select), so the dropdown
+    // never appeared — typing `/spawn`, `/help`, etc. silently
+    // matched nothing visible. Reset selectedIndex so keyboard
+    // navigation always starts at the first match.
+    const hasLeadingSlash = next.trimStart().startsWith("/");
+    if (!hasLeadingSlash) {
+      if (showHints) setShowHints(false);
+    } else {
+      const matches = COMMANDS.filter((cmd) =>
+        cmd.cmd.toLowerCase().startsWith(next.trimStart().toLowerCase()),
+      );
+      if (matches.length === 0) {
+        if (showHints) setShowHints(false);
+      } else if (!showHints) {
+        setShowHints(true);
+        setSelectedIndex(0);
+      }
+    }
   };
 
   const handleSelectCommand = (cmd: string) => {

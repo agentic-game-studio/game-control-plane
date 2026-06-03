@@ -361,6 +361,22 @@ const SESSIONS_RESPONDING_CAP = 1000;
 // prevents a corrupted `compacted → compacted` chain from looping forever.
 const MAX_COMPACTION_CHAIN_DEPTH = 20;
 
+// 18-C-compact-race: per-session compaction lock. The /compact handler
+// yields to I/O while building the summary (an LLM call that can run
+// 30-60s), and the new-session id is derived deterministically from
+// the old session's generation. Two concurrent /compact calls on the
+// same base session could both pass the `if (chatStore.sessions[new])`
+// existence check, race on the in-memory mutations, and silently
+// overwrite each other. The set is checked-and-added synchronously
+// at the top of the handler (no await between the check and the add),
+// so the second caller observes the first's set entry and gets a 409.
+// The cap is a defensive upper bound — the set should only ever hold
+// a handful of sessionIds mid-compaction. A leak would 409-out the
+// entire /compact endpoint, which is the right behavior (refuse rather
+// than corrupt).
+const PENDING_COMPACTIONS_CAP = 1000;
+const pendingCompactions = new Set<string>();
+
 /**
  * Per-session AbortController for the in-flight LLM call. Registered when the
  * LLM fetch starts and unregistered when it settles, so external events
@@ -1113,8 +1129,8 @@ chatRouter.post("/sessions/:id/clear", async (req: Request, res: Response) => {
 
 // POST /api/chat/sessions/:id/compact — Compact session into new generation
 chatRouter.post("/sessions/:id/compact", async (req: Request, res: Response) => {
+  const id = req.params.id as string;
   try {
-    const id = req.params.id as string;
     const session = chatStore.sessions[id];
 
     if (!session) {
@@ -1122,6 +1138,27 @@ chatRouter.post("/sessions/:id/compact", async (req: Request, res: Response) => 
       res.status(404).json({ error: "Session not found" });
       return;
     }
+
+    // 18-C-compact-race: acquire the per-session compaction lock
+    // synchronously. The check+add below is one synchronous step
+    // (no await between them) so two concurrent /compact calls
+    // cannot both observe an absent entry. The second caller gets
+    // a 409 and the client can retry once the first compaction
+    // finishes. The set is unregistered in the `finally` block so
+    // a thrown error in the summary LLM call doesn't strand the
+    // sessionId. The cap is a defensive upper bound — refuse a new
+    // request rather than OOM the process on a leak.
+    if (pendingCompactions.size >= PENDING_COMPACTIONS_CAP) {
+      logger.warn({ pendingCompactions: pendingCompactions.size, cap: PENDING_COMPACTIONS_CAP, event: "compact_lock_cap_hit" },
+        "Pending-compactions set at cap — refusing new compaction");
+      res.status(429).json({ error: "Too many compactions in flight — try again shortly" });
+      return;
+    }
+    if (pendingCompactions.has(id)) {
+      res.status(409).json({ error: "Compaction already in progress for this session" });
+      return;
+    }
+    pendingCompactions.add(id);
 
     if (session.conversationHistory.length < 4) {
       res.status(400).json({ error: "Not enough history to compact" });
@@ -1340,6 +1377,16 @@ Max 4000 characters. Respond ONLY with the summary.`;
   } catch (err) {
     logger.error({ err }, "Compact endpoint error");
     res.status(500).json({ error: "Compaction failed" });
+  } finally {
+    // 18-C-compact-race: release the per-session compaction lock
+    // on every async exit path. We always release here so a thrown
+    // error in the LLM call (or anywhere else) cannot strand the
+    // sessionId and permanently 409-out the endpoint for that
+    // session. The 404 / 400 / 409 / 429 paths return before the
+    // lock is added (the `pendingCompactions.add(id)` line above
+    // sits after those early returns), so there's no double-free
+    // risk for those responses.
+    pendingCompactions.delete(id);
   }
 });
 
