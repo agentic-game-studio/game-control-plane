@@ -20,7 +20,7 @@ import { loadConfig, resolvePipelinePython, SUBPROCESS_MAX_BUFFER } from "../con
 import { invokeAgent, detectEngineFromWorkspace, type ProjectContext } from "../services/llm-service.js";
 import { readData, writeData, broadcastEvent } from "../services/data-store.js";
 import { generateTickets, addTicketsToBoard } from "../services/ticket-generator.js";
-import { readTicketsBoard, writeTicketsBoard, updateTicketsBoard } from "../services/ticket-board.js";
+import { readTicketsBoard, updateTicketsBoard } from "../services/ticket-board.js";
 import { broadcast } from "../services/websocket.js";
 import { logger } from "../utils/logger.js";
 import { resolveProjectWorkspace } from "../utils/workspace.js";
@@ -663,46 +663,67 @@ const STALE_IN_PROGRESS_THRESHOLD_MS = 30 * 60 * 1000; // 30 minutes
 
 /**
  * Archive tickets stuck in in_progress for too long (crashed/timed-out iterations).
- * Returns a fresh copy of the board with stale tickets moved to completed.
+ * Returns the (possibly mutated) board plus the number of tickets archived.
+ *
+ * 23-C-cleanup-stale-rmw: routes the read-mutate-write through
+ * updateTicketsBoard so the per-file mutex serializes concurrent
+ * callers. The previous shape (mutate the passed-in `board` then
+ * `writeTicketsBoard`) bypassed the per-file mutex that
+ * `updateTicketsBoard` holds — a concurrent `moveQuestTicket` (which
+ * does go through the mutex) could read the same baseline, mutate its
+ * local copy, and write it *around* the cleanup, clobbering a
+ * simultaneously moved ticket. Same fix shape as 22-H-create-build-rmw,
+ * 21-C-update-project-engine-rmw, 21-C-dashboard-read-toctou.
  */
-async function cleanupStaleInProgress(board: TicketsBoard, projectId: string): Promise<TicketsBoard> {
-  const now = Date.now();
-  let changed = false;
+async function cleanupStaleInProgress(
+  projectId: string,
+): Promise<{ board: TicketsBoard; archived: number }> {
+  let archived = 0;
+  const board = await updateTicketsBoard(projectId, (board) => {
+    const now = Date.now();
+    let changed = false;
 
-  const inProgressCol = board.columns.find((c) => c.id === "in_progress");
-  if (!inProgressCol || inProgressCol.tickets.length === 0) return board;
-
-  const stillValid: Ticket[] = [];
-  const toArchive: Ticket[] = [];
-
-  for (const ticket of inProgressCol.tickets) {
-    const age = now - new Date(ticket.updatedAt).getTime();
-    if (age > STALE_IN_PROGRESS_THRESHOLD_MS) {
-      toArchive.push(ticket);
-      changed = true;
-    } else {
-      stillValid.push(ticket);
+    const inProgressCol = board.columns.find((c) => c.id === "in_progress");
+    if (!inProgressCol || inProgressCol.tickets.length === 0) {
+      return board;
     }
-  }
 
-  if (!changed) return board;
+    const stillValid: Ticket[] = [];
+    const toArchive: Ticket[] = [];
 
-  inProgressCol.tickets = stillValid;
-
-  // Move stale tickets to qa column for review (not directly to completed —
-  // an agent crash can leave the project in a broken state; reviewer checks the diff)
-  const qaCol = board.columns.find((c) => c.id === "qa");
-  if (qaCol) {
-    for (const t of toArchive) {
-      t.status = "qa";
-      t.updatedAt = new Date().toISOString();
-      qaCol.tickets.push(t);
+    for (const ticket of inProgressCol.tickets) {
+      const age = now - new Date(ticket.updatedAt).getTime();
+      if (age > STALE_IN_PROGRESS_THRESHOLD_MS) {
+        toArchive.push(ticket);
+        changed = true;
+      } else {
+        stillValid.push(ticket);
+      }
     }
-  }
 
-  await writeTicketsBoard(board, projectId);
-  logger.info(`Archived ${toArchive.length} stale in_progress tickets`);
-  return board;
+    if (!changed) return board;
+
+    inProgressCol.tickets = stillValid;
+
+    // Move stale tickets to qa column for review (not directly to completed —
+    // an agent crash can leave the project in a broken state; reviewer checks the diff)
+    const qaCol = board.columns.find((c) => c.id === "qa");
+    if (qaCol) {
+      for (const t of toArchive) {
+        t.status = "qa";
+        t.updatedAt = new Date().toISOString();
+        qaCol.tickets.push(t);
+      }
+    }
+
+    archived = toArchive.length;
+    return board;
+  });
+
+  if (archived > 0) {
+    logger.info({ projectId, archived, event: "stale_in_progress_archived" }, `Archived ${archived} stale in_progress tickets`);
+  }
+  return { board, archived };
 }
 
 function getNextAvailableTicket(board: TicketsBoard): Ticket | null {
@@ -850,7 +871,8 @@ async function runIteration(state: LoopState, board: TicketsBoard, projectContex
   debugLog(`runIteration ENTRY iter=${state.currentIteration}, projectContext.engine=${projectContext.engine}, workspacePath=${projectContext.workspacePath}`);
 
   // Clean up stale in_progress tickets (from crashed/timed-out iterations)
-  board = await cleanupStaleInProgress(board, state.projectId);
+  const cleanup = await cleanupStaleInProgress(state.projectId);
+  board = cleanup.board;
 
   let ticket = getNextAvailableTicket(board);
   debugLog(`getNextAvailableTicket result: ${ticket ? `ticket.id=${ticket.id}, title=${ticket.title}` : "null (queue empty)"}`);

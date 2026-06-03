@@ -344,6 +344,36 @@ let chatStore: ChatState;
 const chatStoreReady = loadChatState().then((state) => { chatStore = state; });
 export { chatStoreReady };
 
+// 23-C-producer-session-race: per-projectId async lock around the
+// read-check-write of the producer session. Two concurrent first-visit
+// requests for the same projectId both passed the "no active session"
+// check, both created a new session, and the second `saveChatState()`
+// clobbered the first — one of the two clients then saw
+// "producer session not found" or duplicated state on the next
+// request. V8 single-thread guarantee: the `get ?? Promise.resolve() +
+// set` pair runs in one synchronous microtask — no `await` between
+// them — so two callers cannot both observe an absent entry.
+const producerSessionLocks = new Map<string, Promise<unknown>>();
+function withProducerSessionLock<T>(projectId: string, fn: () => Promise<T>): Promise<T> {
+  const prev = producerSessionLocks.get(projectId) ?? Promise.resolve();
+  let resolveLock!: () => void;
+  const lockPromise = new Promise<void>((r) => { resolveLock = r; });
+  try {
+    producerSessionLocks.set(projectId, lockPromise);
+  } catch {
+    resolveLock();
+    throw new Error("producerSessionLocks.set failed");
+  }
+  return prev
+    .then(() => fn())
+    .finally(() => {
+      resolveLock();
+      if (producerSessionLocks.get(projectId) === lockPromise) {
+        producerSessionLocks.delete(projectId);
+      }
+    });
+}
+
 /** Per-session lock to prevent concurrent agent responses for the same session */
 const sessionsResponding = new Set<string>();
 // 12-H21: per-session token-usage mutex. The
@@ -743,91 +773,93 @@ chatRouter.get("/sessions/producer/:projectId", async (req: Request, res: Respon
     }
   }
 
-  const sessionId = producerSessionId(projectId);
-  const existing = chatStore.sessions[sessionId];
+  const result = await withProducerSessionLock(projectId, async () => {
+    const sessionId = producerSessionId(projectId);
+    const existing = chatStore.sessions[sessionId];
 
-  // Resolve latest generation if the base session was compacted
-  let activeSession = existing;
-  if (activeSession && activeSession.status === "compacted") {
-    let gen = activeSession.generation ?? 1;
-    let depth = 0;
-    while (depth < MAX_COMPACTION_CHAIN_DEPTH) {
-      const nextGen = gen + 1;
-      const nextId = `${sessionId}-g${nextGen}`;
-      const next = chatStore.sessions[nextId];
-      if (!next) break;
-      activeSession = next;
-      gen = nextGen; // Always increment consistently, don't read from session
-      depth++;
-      if (activeSession.status !== "compacted") break;
+    // Resolve latest generation if the base session was compacted
+    let activeSession = existing;
+    if (activeSession && activeSession.status === "compacted") {
+      let gen = activeSession.generation ?? 1;
+      let depth = 0;
+      while (depth < MAX_COMPACTION_CHAIN_DEPTH) {
+        const nextGen = gen + 1;
+        const nextId = `${sessionId}-g${nextGen}`;
+        const next = chatStore.sessions[nextId];
+        if (!next) break;
+        activeSession = next;
+        gen = nextGen; // Always increment consistently, don't read from session
+        depth++;
+        if (activeSession.status !== "compacted") break;
+      }
     }
-  }
 
-  if (activeSession && activeSession.status !== "compacted") {
-    res.json({ success: true, data: activeSession });
-    return;
-  }
+    if (activeSession && activeSession.status !== "compacted") {
+      return { status: 200 as const, data: activeSession };
+    }
 
-  // If the base session exists but was compacted and no generation found,
-  // return it anyway — the frontend should handle compacted status by triggering a new compaction
-  if (activeSession) {
-    res.json({ success: true, data: activeSession });
-    return;
-  }
+    // If the base session exists but was compacted and no generation found,
+    // return it anyway — the frontend should handle compacted status by triggering a new compaction
+    if (activeSession) {
+      return { status: 200 as const, data: activeSession };
+    }
 
-  const now = new Date().toISOString();
-  const newSession: ExtendedChatSession = {
-    id: sessionId,
-    role: "producer",
-    projectId,
-    messages: [
-      {
-        id: newId("msg"),
-        type: "welcome",
-        sender: "Producer",
-        content: `Welcome to ${project.name}. I'm the Producer, orchestrating our studio's multi-agent game development pipeline for this project.`,
-        timestamp: now,
-        showActions: false,
+    const now = new Date().toISOString();
+    const newSession: ExtendedChatSession = {
+      id: sessionId,
+      role: "producer",
+      projectId,
+      messages: [
+        {
+          id: newId("msg"),
+          type: "welcome",
+          sender: "Producer",
+          content: `Welcome to ${project.name}. I'm the Producer, orchestrating our studio's multi-agent game development pipeline for this project.`,
+          timestamp: now,
+          showActions: false,
+        },
+        {
+          id: newId("msg"),
+          type: "system",
+          sender: "SYSTEM",
+          content: `Active project: ${project.name}${project.engine ? ` (${project.engine})` : ""}. Type a command to spawn an agent or request a task. Use /spawn <role> to bring in a specialist.`,
+          timestamp: now,
+          showActions: false,
+        },
+      ],
+      status: "active",
+      progress: 0,
+      spawnedAt: now,
+      conversationHistory: [],
+      fileOperations: [],
+      completedPhases: [],
+      currentTask: "",
+      cumulativeInputTokens: 0,
+      cumulativeOutputTokens: 0,
+      generation: 1,
+      producerSummary: emptyProducerSummarySnapshot(),
+    };
+
+    chatStore.sessions[sessionId] = newSession;
+
+    broadcast({
+      type: "chat:session:created",
+      session: {
+        id: newSession.id,
+        role: newSession.role,
+        projectId: newSession.projectId,
+        messages: newSession.messages,
+        status: newSession.status,
+        progress: newSession.progress,
+        spawnedAt: newSession.spawnedAt,
       },
-      {
-        id: newId("msg"),
-        type: "system",
-        sender: "SYSTEM",
-        content: `Active project: ${project.name}${project.engine ? ` (${project.engine})` : ""}. Type a command to spawn an agent or request a task. Use /spawn <role> to bring in a specialist.`,
-        timestamp: now,
-        showActions: false,
-      },
-    ],
-    status: "active",
-    progress: 0,
-    spawnedAt: now,
-    conversationHistory: [],
-    fileOperations: [],
-    completedPhases: [],
-    currentTask: "",
-    cumulativeInputTokens: 0,
-    cumulativeOutputTokens: 0,
-    generation: 1,
-    producerSummary: emptyProducerSummarySnapshot(),
-  };
+    } as WSEvent);
 
-  chatStore.sessions[sessionId] = newSession;
+    await saveChatState();
+    return { status: 201 as const, data: newSession };
+  });
 
-  broadcast({
-    type: "chat:session:created",
-    session: {
-      id: newSession.id,
-      role: newSession.role,
-      projectId: newSession.projectId,
-      messages: newSession.messages,
-      status: newSession.status,
-      progress: newSession.progress,
-      spawnedAt: newSession.spawnedAt,
-    },
-  } as WSEvent);
-
-  await saveChatState();
-  res.status(201).json({ success: true, data: newSession });
+  res.status(result.status).json({ success: true, data: result.data });
 });
 
 // GET /api/chat/sessions/:id — Get session by ID
