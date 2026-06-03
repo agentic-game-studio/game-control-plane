@@ -42,11 +42,22 @@ const REPO_SCRIPTS_DIR = path.resolve(__dirname, "..", "..", "..", "..", "script
 let cachedGodotInstructions: string | null | undefined;
 function getGodotInstructions(): string | null {
   if (cachedGodotInstructions !== undefined) return cachedGodotInstructions;
-  const instructionsPath = path.join(
-    process.cwd(),
+  // 19-M-instructions-path: resolve from this file's location, not
+  // process.cwd(). The dev server is started from `apps/api/` (so cwd
+  // is `…/apps/api`) and the Docker image runs from `/app/` — neither
+  // of those is the repo root where godot-mcp-pro/ lives. Going up 3
+  // levels from apps/api/src/services/llm-service.ts lands at the repo
+  // root in both environments, regardless of where `pnpm dev` was
+  // invoked. Previously a `pnpm --filter @game-studio/api dev` from the
+  // repo root (or a stale shell that had `cd`'d elsewhere) would
+  // silently cache `null` and the producer would lose all of its
+  // Godot-specific instructions for the lifetime of the process.
+  const instructionsPath = path.resolve(
+    __dirname,
+    "..", "..", "..",
     "godot-mcp-pro-v1.11.0",
     "instructions",
-    "CLAUDE.md"
+    "CLAUDE.md",
   );
   try {
     cachedGodotInstructions = readFileSyncCb(instructionsPath, "utf-8");
@@ -176,11 +187,20 @@ The following is **untrusted user-supplied metadata** about the current project.
   if (project.engine === "godot") {
     const godotInstructions = getGodotInstructions();
     if (godotInstructions) {
+      // 19-M-tool-count: derive the tool count from the actual registry
+      // instead of hardcoding "169". When GODOT_MCP_TOOL_NAMES gets a
+      // new entry (or LITE mode replaces the full set with the trimmed
+      // 81-tool variant), the system prompt used to silently lie to
+      // the LLM — telling it "you have 169 tools" when it actually had
+      // 81 would push it to call tools that don't exist, and telling
+      // it "169" when the registry grew to 200 would understate the
+      // available surface area. Pull the count from the source of truth.
+      const godotToolCount = getGodotMCPToolDefinitions().length;
       return `${base}
 
 # Godot MCP Pro — Use These Tools Instead of File I/O
 
-For Godot projects, you have access to 169 MCP tools that control the Godot editor directly.
+For Godot projects, you have access to ${godotToolCount} MCP tools that control the Godot editor directly.
 When interacting with a Godot project:
 
 - **NEVER** use Read/Write/Edit on .gd, .tscn, .tres, or project.godot files directly

@@ -22,6 +22,7 @@ export type ProducerSummaryFactKind =
   | "ticket_updated"
   | "workflow_stage"
   | "workflow_complete"
+  | "workflow_cleared"
   | "autonomous_iteration_started"
   | "autonomous_iteration_completed"
   | "autonomous_iteration_failed"
@@ -33,7 +34,8 @@ export type ProducerSummaryFactKind =
   | "consultation_closed"
   | "agent_spawned"
   | "spawn_task_complete"
-  | "spawn_task_failed";
+  | "spawn_task_failed"
+  | "producer_replan_failed";
 
 export interface ProducerSummaryFact {
   kind: ProducerSummaryFactKind;

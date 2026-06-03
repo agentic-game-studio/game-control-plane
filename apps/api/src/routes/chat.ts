@@ -852,7 +852,15 @@ chatRouter.post("/sessions", async (req: Request, res: Response) => {
   let welcomeContent = `${role} session initialized.`;
   try {
     const systemPrompt = await getAgentSystemPrompt(role);
-    welcomeContent = systemPrompt.split("\n")[0]; // First line as welcome
+    // 19-M-welcome-coalesce: TS noUncheckedIndexedAccess widens
+    // `split("\n")[0]` to `string | undefined`. The previous code
+    // assigned `undefined` to a `string` binding, which typed fine
+    // but rendered as the literal string "undefined" in the welcome
+    // banner when an agent's system prompt happened to start with a
+    // blank line. Coalesce to the role default so an empty/whitespace-
+    // leading prompt falls back gracefully.
+    const firstLine = systemPrompt.split("\n")[0];
+    if (firstLine) welcomeContent = firstLine;
   } catch {
     // Use default
   }
@@ -929,7 +937,7 @@ chatRouter.delete("/sessions/:id", async (req: Request, res: Response) => {
     try { controller.abort(); } catch { /* already aborted */ }
   }
   sessionAbortControllers.delete(id);
-  cleanupWorkflow(id);
+  await cleanupWorkflow(id);
   // Note: Godot MCP service is keyed by projectId, not sessionId.
   // It will be cleaned up when the project is deleted or session ends.
   // We don't stop it here because other sessions (producer) may still need it.
@@ -1025,7 +1033,7 @@ chatRouter.post("/sessions/:id/close", async (req: Request, res: Response) => {
     try { controller.abort(); } catch { /* already aborted */ }
   }
   sessionAbortControllers.delete(id);
-  cleanupWorkflow(id);
+  await cleanupWorkflow(id);
 
   // Delete the consultation session after forwarding summary
   delete chatStore.sessions[id];

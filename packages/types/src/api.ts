@@ -51,6 +51,7 @@ export type WSEvent =
   | { type: "chat:session:compacted"; oldSessionId: string; newSession: ChatSession }
   | { type: "workflow:stage"; sessionId: string; workflowId: string; stage: WorkflowStage; ticketId?: string; agentRole?: string }
   | { type: "workflow:complete"; sessionId: string; workflowId: string; success: boolean }
+  | { type: "workflow:cleared"; sessionId: string; projectId: string }
   | { type: "quest:linked"; sessionId: string; ticketId: string; agentRole: string }
   | { type: "subagent:spawned"; agentRole: AgentRole; parentSessionId: string; ticketId: string; task: string }
   | { type: "subagent:completed"; agentRole: AgentRole; parentSessionId: string; ticketId: string; output: string }

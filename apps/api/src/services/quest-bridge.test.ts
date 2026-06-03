@@ -169,7 +169,7 @@ describe("quest-bridge workflow locks", () => {
     const sessionId = `s-${Date.now()}-d`;
     const first = startWorkflow(sessionId);
 
-    cleanupWorkflow(sessionId);
+    await cleanupWorkflow(sessionId);
     expect(getWorkflow(sessionId)).toBeUndefined();
 
     // startWorkflow keys its id on `Date.now()`. The two calls run in

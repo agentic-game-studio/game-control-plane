@@ -235,8 +235,31 @@ export function completeWorkflow(sessionId: string, success: boolean): void {
     "ingestProducerSummary rejected in workflow_complete"));
 }
 
-export function cleanupWorkflow(sessionId: string): void {
+export async function cleanupWorkflow(sessionId: string): Promise<void> {
+  // 19-M-cleanup-no-broadcast: previously cleanupWorkflow silently
+  // removed the workflow from the in-memory map without any
+  // websocket event or producer-summary fact. Compared to
+  // completeWorkflow (L216-235) which broadcasts workflow:complete
+  // and ingests a summary fact, a user watching a workflow UI
+  // wouldn't see the cleanup until the next poll — the workflow
+  // appeared "active" indefinitely. Resolve the projectId from the
+  // session index so the broadcast carries it; bail cheaply if
+  // the session was never indexed. The function is now async to
+  // match resolveProjectIdForSession's signature, but the in-memory
+  // map mutation is still synchronous and runs before the await so
+  // concurrent callers can't double-cleanup.
+  const wf = activeWorkflows.get(sessionId);
   activeWorkflows.delete(sessionId);
+  if (!wf) return;
+  const projectId = await resolveProjectIdForSession(sessionId);
+  if (!projectId) return;
+  broadcastEvent({ type: "workflow:cleared", sessionId, projectId } as WSEvent);
+  safeIngestProducerSummaryFact(projectId, {
+    kind: "workflow_cleared",
+    at: new Date().toISOString(),
+    title: "workflow cleared",
+    sessionId,
+  });
 }
 
 // ─── Ticket CRUD (direct file access, same as REST routes) ───

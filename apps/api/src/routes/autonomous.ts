@@ -749,8 +749,27 @@ async function producerSprintReplan(
       "sprint-replan",
       `Autonomous producer replan at iteration ${state.currentIteration}`,
     );
-  } catch {
-    logger.warn({ projectId: state.projectId, event: "producer_replan_skipped" }, "Sprint replan skipped");
+  } catch (err) {
+    // 19-M-replan-error: capture the failure into the producer summary
+    // so the next replan attempt (or the producer session's next
+    // message) sees the prior failure, instead of silently swallowing
+    // it. Previously the catch logged `producer_replan_skipped` with
+    // no reason, so a persistent LLM outage during replan would burn
+    // every 5th iteration's worth of `generateTickets` invocations
+    // while the operator had no way to tell from logs whether the
+    // replan was skipped on purpose (board was healthy) or because
+    // the LLM call was 500ing. The producer summary fact is the
+    // canonical "what happened" feed for the next producer prompt.
+    logger.warn(
+      { projectId: state.projectId, event: "producer_replan_failed", err: err instanceof Error ? err.message : String(err) },
+      "Sprint replan failed",
+    );
+    safeIngestProducerSummaryFact(state.projectId, {
+      kind: "producer_replan_failed",
+      at: new Date().toISOString(),
+      title: `Sprint replan failed at iteration ${state.currentIteration}`,
+      detail: err instanceof Error ? err.message : String(err),
+    });
   }
 }
 
