@@ -58,6 +58,31 @@ export function runRegressionCheck(
   };
 
   if (!existsSync(path)) {
+    // 23-H-regression-first-run: only seed a baseline when the
+    // current run actually passed all gates. The previous shape
+    // wrote the baseline unconditionally and returned
+    // `passed: true, isBaseline: true` — even if `bootOk: false`.
+    // On the *next* run, the fingerprint comparison (line 75) would
+    // match the failure-state fingerprint and return
+    // `passed: true` again, re-establishing a baseline of
+    // failures and effectively silencing the regression check
+    // forever. Now: if any gate failed, do NOT write the baseline
+    // and return `passed: false` so the operator sees the failure
+    // and the next run gets a clean re-evaluation once the bug is
+    // fixed.
+    const firstRunAllPass = Boolean(
+      evidence.bootCheck?.passed &&
+      evidence.gut?.passed !== false &&
+      evidence.smokePlaytest?.passed !== false,
+    );
+    if (!firstRunAllPass) {
+      return {
+        passed: false,
+        isBaseline: true,
+        baseline: current,
+        diff: "first-run baseline cannot be seeded with failures",
+      };
+    }
     const dir = join(projectPath, "production");
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
     writeFileSync(path, JSON.stringify(current, null, 2), "utf-8");

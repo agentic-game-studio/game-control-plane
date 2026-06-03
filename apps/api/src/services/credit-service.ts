@@ -5,6 +5,7 @@
 import { updateData, broadcastEvent } from "./data-store.js";
 import type { AgentRole, SettingsConfig, WSEvent } from "@game-studio/types";
 import { logger } from "../utils/logger.js";
+import { newId } from "../utils/ids.js";
 
 const AGENT_CREDIT_COST: Partial<Record<AgentRole, number>> = {
   producer: 50,
@@ -53,7 +54,17 @@ export async function consumeCreditsForAgent(
         usageLog: [
           ...data.usageLog.slice(-499),
           {
-            id: `use-${Date.now()}`,
+            // 23-H-predictable-use-id: use newId("use") (128 bits of
+            // crypto.randomUUID() entropy, prefixed) instead of
+            // `use-${Date.now()}` (timestamp-only, guessable within a
+            // millisecond window). Two `consume` calls in the same
+            // millisecond for the same agent produced identical IDs —
+            // usageLog entries deduplicate by ID, so the second entry
+            // overwrote the first. The companion endpoint
+            // `settings.ts:308` was already migrated in a prior pass
+            // but this file was missed. Mirrors the Q4-6th (tickets),
+            // Q5-6th (assets), and 22-M-predictable-build-id fix shape.
+            id: newId("use"),
             taskName: `${agentRole}: ${taskLabel.slice(0, 80)}`,
             creditsUsed,
             timestamp: new Date().toISOString(),

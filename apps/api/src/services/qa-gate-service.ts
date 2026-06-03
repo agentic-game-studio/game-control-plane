@@ -18,6 +18,13 @@ export interface QAGateStepResult {
   passed: boolean;
   output?: string;
   errors?: string[];
+  // 23-H-gut-skip-fail-open: a step that was *not run* (vs. one that
+  // ran and failed) needs a separate signal so the chain can decide
+  // pass-vs-fail based on review mode. Without this, a GUT-less
+  // project returned `passed: true` for the GUT step, which the chain
+  // then counted as a pass — silently dropping the test gate in
+  // `lean`/`full` review modes.
+  skipped?: boolean;
 }
 
 export interface QAGateResult {
@@ -116,7 +123,14 @@ export function runGUTGate(projectPath: string): QAGateStepResult {
   const testsDir = join(projectPath, "tests");
   const hasGut = existsSync(join(projectPath, "addons", "gut")) || existsSync(testsDir);
   if (!hasGut) {
-    return { name: "gut", passed: true, output: "GUT not installed — skipped" };
+    // 23-H-gut-skip-fail-open: the previous return set
+    // `passed: true` for a GUT-less project, so the chain at
+    // `runQAGateChain` counted it as a pass and the ticket moved
+    // toward completion. The fail-closed shape (21-C-qa-gate-parse-
+    // fail-open) treats unrun gates as failed by default. The chain
+    // inspects `skipped` to relax this in `solo` review mode (where
+    // the user explicitly opted into "AI only, no enforcement").
+    return { name: "gut", passed: false, skipped: true, output: "GUT not installed — skipped" };
   }
   const result = runGodotHeadlessCommand(projectPath, "gut", [], 120);
   const errors = extractFatalErrors(result.stderr);
@@ -182,12 +196,24 @@ export function runQAGateChain(workspacePath: string, projectId?: string): QAGat
   const gut = runGUTGate(projectPath);
   evidence.gut = { passed: gut.passed, output: gut.output, at: now };
   if (!gut.passed) {
-    return {
-      passed: false,
-      evidence,
-      failureStep: "gut",
-      summary: `GUT failed: ${gut.errors?.slice(0, 2).join("; ") ?? "test failures"}`,
-    };
+    // 23-H-gut-skip-fail-open: a GUT-less project returns
+    // `passed: false, skipped: true`. Fail-closed in `lean` and
+    // `full` review modes (the default + enforced modes); only
+    // `solo` (AI-only, no enforcement) lets the gate pass when
+    // skipped. The user explicitly opted into solo, so we don't
+    // surprise them with a "GUT not installed" failure.
+    if (gut.skipped && loadConfig().REVIEW_MODE === "solo") {
+      // Allow the chain to continue.
+    } else {
+      return {
+        passed: false,
+        evidence,
+        failureStep: "gut",
+        summary: gut.skipped
+          ? `GUT not installed — required in ${loadConfig().REVIEW_MODE} review mode`
+          : `GUT failed: ${gut.errors?.slice(0, 2).join("; ") ?? "test failures"}`,
+      };
+    }
   }
 
   const smoke = runSmokePlaytestGate(projectPath);

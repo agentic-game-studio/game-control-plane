@@ -60,15 +60,27 @@ export const settingsRouter: Router = Router();
 // GET /api/settings - Get settings (with auto weekly reset check)
 settingsRouter.get("/", async (_req: Request, res: Response) => {
   try {
-    const data = await readData<SettingsConfig>("settings.json");
-    const originalResetAt = data.credits.subscription.resetAt;
-    const resetData = checkWeeklyReset(data);
-    // Only write back if reset actually happened
-    if (resetData.credits.subscription.resetAt !== originalResetAt) {
-      await writeData("settings.json", resetData);
-      broadcastEvent({ type: "settings:updated", settings: resetData } as WSEvent);
-    }
-    res.json({ success: true, data: resetData });
+    // 23-H-weekly-reset-rmw: route the read-check-reset-write through
+    // updateData so the per-file mutex serializes against a concurrent
+    // PATCH /api/settings (which already uses updateData properly). The
+    // previous shape (readData → checkWeeklyReset → writeData if
+    // changed) bypassed the mutex — a concurrent PATCH that read the
+    // pre-reset snapshot could be clobbered by the reset's writeData,
+    // silently reverting the user's edit, or vice-versa. The
+    // `checkWeeklyReset` is now an in-place mutation inside the
+    // callback so the reset decision is atomic with the write.
+    const data = await updateData<SettingsConfig>("settings.json", (current) => {
+      const originalResetAt = current.credits.subscription.resetAt;
+      const reset = checkWeeklyReset(current);
+      if (reset.credits.subscription.resetAt !== originalResetAt) {
+        // Reset happened this call. Broadcast the updated state from
+        // the same atomic op so subscribers don't see a half-updated
+        // view.
+        broadcastEvent({ type: "settings:updated", settings: reset } as WSEvent);
+      }
+      return reset;
+    });
+    res.json({ success: true, data });
   } catch {
     const fresh = createDefaultSettings();
     await writeData("settings.json", fresh);

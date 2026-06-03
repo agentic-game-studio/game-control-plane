@@ -353,6 +353,12 @@ export { chatStoreReady };
 // request. V8 single-thread guarantee: the `get ?? Promise.resolve() +
 // set` pair runs in one synchronous microtask — no `await` between
 // them — so two callers cannot both observe an absent entry.
+// 23-H-post-sessions-race: also used by `POST /api/chat/sessions` so a
+// concurrent POST and producer-create for the same projectId can't
+// both read the in-memory `chatStore` ref, both mutate, and the second
+// `saveChatState()` clobber the first. The whole-blob write means the
+// lock is keyed by projectId (the projectId partitions which writers
+// can race).
 const producerSessionLocks = new Map<string, Promise<unknown>>();
 function withProducerSessionLock<T>(projectId: string, fn: () => Promise<T>): Promise<T> {
   const prev = producerSessionLocks.get(projectId) ?? Promise.resolve();
@@ -893,74 +899,79 @@ chatRouter.post("/sessions", async (req: Request, res: Response) => {
     return;
   }
 
-  const project = await getProjectById(body.projectId);
+  const projectId = body.projectId;
+  const project = await getProjectById(projectId);
   if (!project) {
     res.status(404).json({ success: false, error: "Project not found" });
     return;
   }
 
-  const sessionId = newId("session");
-  const now = new Date().toISOString();
+  const result = await withProducerSessionLock(projectId, async () => {
+    const sessionId = newId("session");
+    const now = new Date().toISOString();
 
-  // Load the agent's system prompt for the welcome message
-  let welcomeContent = `${role} session initialized.`;
-  try {
-    const systemPrompt = await getAgentSystemPrompt(role);
-    // 19-M-welcome-coalesce: TS noUncheckedIndexedAccess widens
-    // `split("\n")[0]` to `string | undefined`. The previous code
-    // assigned `undefined` to a `string` binding, which typed fine
-    // but rendered as the literal string "undefined" in the welcome
-    // banner when an agent's system prompt happened to start with a
-    // blank line. Coalesce to the role default so an empty/whitespace-
-    // leading prompt falls back gracefully.
-    const firstLine = systemPrompt.split("\n")[0];
-    if (firstLine) welcomeContent = firstLine;
-  } catch {
-    // Use default
-  }
+    // Load the agent's system prompt for the welcome message
+    let welcomeContent = `${role} session initialized.`;
+    try {
+      const systemPrompt = await getAgentSystemPrompt(role);
+      // 19-M-welcome-coalesce: TS noUncheckedIndexedAccess widens
+      // `split("\n")[0]` to `string | undefined`. The previous code
+      // assigned `undefined` to a `string` binding, which typed fine
+      // but rendered as the literal string "undefined" in the welcome
+      // banner when an agent's system prompt happened to start with a
+      // blank line. Coalesce to the role default so an empty/whitespace-
+      // leading prompt falls back gracefully.
+      const firstLine = systemPrompt.split("\n")[0];
+      if (firstLine) welcomeContent = firstLine;
+    } catch {
+      // Use default
+    }
 
-  const newSession: ExtendedChatSession = {
-    id: sessionId,
-    role,
-    projectId: body.projectId,
-    messages: [
-      {
-        id: newId("msg"),
-        type: "system",
-        sender: "SYSTEM",
-        content: welcomeContent,
-        timestamp: now,
-        showActions: false,
+    const newSession: ExtendedChatSession = {
+      id: sessionId,
+      role,
+      projectId,
+      messages: [
+        {
+          id: newId("msg"),
+          type: "system",
+          sender: "SYSTEM",
+          content: welcomeContent,
+          timestamp: now,
+          showActions: false,
+        },
+      ],
+      status: "active",
+      progress: 0,
+      spawnedAt: now,
+      conversationHistory: [],
+      fileOperations: [],
+      completedPhases: [],
+      currentTask: "",
+      cumulativeInputTokens: 0,
+      cumulativeOutputTokens: 0,
+    };
+
+    chatStore.sessions[sessionId] = newSession;
+
+    broadcast({
+      type: "chat:session:created",
+      session: {
+        id: newSession.id,
+        role: newSession.role,
+        projectId: newSession.projectId,
+        messages: newSession.messages,
+        status: newSession.status,
+        progress: newSession.progress,
+        spawnedAt: newSession.spawnedAt,
       },
-    ],
-    status: "active",
-    progress: 0,
-    spawnedAt: now,
-    conversationHistory: [],
-    fileOperations: [],
-    completedPhases: [],
-    currentTask: "",
-    cumulativeInputTokens: 0,
-    cumulativeOutputTokens: 0,
-  };
+    } as WSEvent);
 
-  chatStore.sessions[sessionId] = newSession;
+    await saveChatState();
+    return { status: 201 as const, data: newSession };
+  });
 
-  broadcast({
-    type: "chat:session:created",
-    session: {
-      id: newSession.id,
-      role: newSession.role,
-      projectId: newSession.projectId,
-      messages: newSession.messages,
-      status: newSession.status,
-      progress: newSession.progress,
-      spawnedAt: newSession.spawnedAt,
-    },
-  } as WSEvent);
-
-  await saveChatState();
-  res.status(201).json({ success: true, data: newSession });
+  res.status(result.status).json({ success: true, data: result.data });
 });
 
 // DELETE /api/chat/sessions/:id — Delete session
