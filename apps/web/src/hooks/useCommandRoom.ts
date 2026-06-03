@@ -253,6 +253,18 @@ const GREETINGS: Record<string, string> = {
 
 const DEFAULT_GREETING = "Agent spawned and ready. Awaiting your instructions.";
 
+// 18-M-threadtitle-drift: single source of truth for the default
+// board-room title. The previous code had three literals:
+//   L830  useState("Board Room")
+//   L1094 setThreadTitle("BOARD_ROOM")
+//   L1629 if (threadTitle === "Board Room")
+// The init effect overwrites "Board Room" with "BOARD_ROOM" and
+// the spawn-agent renaming heuristic at L1629 only matches the
+// Title-Case form, so on a fresh session the title stays
+// "BOARD_ROOM" forever instead of being renamed to the agent's
+// role.
+const DEFAULT_THREAD_TITLE = "Board Room";
+
 function timestamp(): string {
   return new Date().toISOString();
 }
@@ -827,7 +839,7 @@ export function useCommandRoom() {
   const [allSessionProjectIds, setAllSessionProjectIds] = useState<Map<string, string | null>>(new Map());
   const [currentSession, setCurrentSession] = useState("");
   const [threadId, setThreadId] = useState("");
-  const [threadTitle, setThreadTitle] = useState("Board Room");
+  const [threadTitle, setThreadTitle] = useState(DEFAULT_THREAD_TITLE);
   const [initialized, setInitialized] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [messageQueue, setMessageQueue] = useState<QueuedMessage[]>([]);
@@ -1091,7 +1103,7 @@ export function useCommandRoom() {
         if (cachedForMerge?.threadTitle) {
           setThreadTitle(cachedForMerge.threadTitle);
         } else {
-          setThreadTitle("BOARD_ROOM");
+          setThreadTitle(DEFAULT_THREAD_TITLE);
         }
 
         if (cachedForMerge?.subagents?.length) {
@@ -1626,7 +1638,7 @@ export function useCommandRoom() {
     // arrives over the WebSocket. We do NOT add it locally here, so it
     // survives page navigation.
 
-    if (threadTitle === "Board Room") {
+    if (threadTitle === DEFAULT_THREAD_TITLE) {
       setThreadTitle(`Session: ${r.replace(/-/g, " ")}`);
     }
 

@@ -285,7 +285,18 @@ async function loadChatState(): Promise<ChatState> {
       sessions: {},
       currentSessionId: "",
       threadId: "thread-001",
-      threadTitle: "Producer Session",
+      // 18-M-threadtitle-mismatch: align the backend default with
+      // the frontend's DEFAULT_THREAD_TITLE ("Board Room") in
+      // useCommandRoom.ts. Two sources of truth for the same field
+      // produced a flicker on the first paint: the user's local
+      // cached state won, but if cache was empty the backend
+      // response overrode it. The frontend default is the one
+      // the user actually sees first; the backend default is only
+      // shown for a freshly-created chat-state.json (e.g. on a
+      // brand-new machine) and is rendered after a fetch round-
+      // trip, so matching the frontend constant is the lower-
+      // surprise choice.
+      threadTitle: "Board Room",
     };
   }
 }

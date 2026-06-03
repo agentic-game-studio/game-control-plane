@@ -1061,7 +1061,13 @@ assetsRouter.post("/generate", async (req: Request, res: Response) => {
 // GET /api/assets/generate/presets - List available preset files
 assetsRouter.get("/generate/presets", async (_req: Request, res: Response) => {
   try {
-    const scriptDir = path.resolve(process.cwd(), "..", "..", "scripts", "asset-pipeline");
+    // 18-M-presets-cwd: same `import.meta.url`-based resolution as
+    // the POST /generate handler (L819-822). The previous
+    // `process.cwd()` is wrong inside the Docker container (cwd
+    // is /app), so this endpoint silently returned `[]` in
+    // production and the preset dropdown was empty.
+    const here = fileURLToPath(import.meta.url);
+    const scriptDir = path.resolve(path.dirname(here), "..", "..", "..", "scripts", "asset-pipeline");
     const files = await fs.readdir(scriptDir);
     const yamlFiles = files.filter(
       (f) => f.endsWith(".yaml") || f.endsWith(".yml")

@@ -157,7 +157,12 @@ export class SessionStore {
     });
   }
 
-  async delete(sessionId: string): Promise<void> {
+  async delete(sessionId: string): Promise<boolean> {
+    // 18-M-delete-returns-bool: return whether anything was
+    // actually removed, so the route handler can 404 on a missing
+    // session instead of returning 200 for a no-op. Previously
+    // returned void, and the route always returned 200 even when
+    // nothing existed — inconsistent with GET /:id which 404s.
     // Route the delete through withSessionLock so a concurrent
     // createCheckpoint / addLog running for the same sessionId can't
     // observe the file deletion mid-flight and orphan-write a .tmp
@@ -173,10 +178,29 @@ export class SessionStore {
     // delete would clobber the new lock's entry, leaving the new
     // caller waiting on `await prev` (a resolved promise) forever
     // inside withSessionLock. Don't double-clean.
+    let removed = false;
     await withSessionLock(sessionId, async () => {
-      await fs.rm(this.sessionPath(sessionId), { force: true });
-      await fs.rm(this.checkpointDir(sessionId), { recursive: true, force: true });
+      const sessionFile = this.sessionPath(sessionId);
+      const checkpointDir = this.checkpointDir(sessionId);
+      // fs.access returns success if the path exists and is
+      // visible to us; ENOENT otherwise. We use the access check
+      // (rather than stat-throws) so the exists-and-removed
+      // observation is one syscall. If neither the session file
+      // nor the checkpoint dir existed, removed stays false and
+      // the route handler can 404.
+      try {
+        await fs.access(sessionFile);
+        removed = true;
+      } catch {
+        try {
+          await fs.access(checkpointDir);
+          removed = true;
+        } catch { /* neither existed */ }
+      }
+      await fs.rm(sessionFile, { force: true });
+      await fs.rm(checkpointDir, { recursive: true, force: true });
     });
+    return removed;
   }
 
   /** Clean up session files older than maxAgeMs. Returns number of sessions removed. */

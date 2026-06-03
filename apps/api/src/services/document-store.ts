@@ -477,7 +477,15 @@ export class DocumentStore {
           // `path` (empty string) so the type matches the onChange
           // contract. The route layer filters by path === "" (always
           // pass) for the stopped sentinel.
-          onChange({ documentId: "", category: "design" as DocumentCategory, title: "__watcher_stopped__", path: "" });
+          // 18-M-watcher-sentinel-category: the sentinel payload
+          // previously cast "design" to DocumentCategory. "design"
+          // isn't a member of the union (which is gdd | adr | ... | other)
+          // — the `as` cast hid the mismatch and any frontend filter
+          // on category would silently drop the sentinel. The route
+          // layer checks for `title === "__watcher_stopped__"`, so
+          // the category field is informational only; use "other"
+          // (a real union member) to keep consumers consistent.
+          onChange({ documentId: "", category: "other", title: "__watcher_stopped__", path: "" });
         }
       });
     } catch (err) {

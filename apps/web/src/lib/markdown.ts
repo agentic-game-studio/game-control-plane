@@ -142,9 +142,19 @@ export function renderMarkdown(md: string, options?: { wikilinks?: boolean }): s
   // char reject). Centralising here so the wiki viewer can't drift from
   // the chat renderer.
   if (options?.wikilinks) {
-    html = html.replace(/\[\[([^\]]+)\]\]/g, (_m, target) => {
+    // 18-M-wikilink-alias: match the indexer's regex shape so
+    // `[[link|alias]]` slugifies only the link portion, not the
+    // whole `link|alias`. The previous regex captured the entire
+    // inside and slugified it, producing `combatloopcombat` from
+    // `[[Combat Loop|Combat]]` — a slug that doesn't exist in the
+    // index, so the rendered clickable span navigated nowhere.
+    // The slug computation matches `slugify()` in
+    // document-store.ts:84-91 (lowercase, collapse spaces to `-`,
+    // strip non-alphanumeric).
+    html = html.replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_m, target, alias) => {
       const slug = target.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
-      return `<span data-wikilink="${slug}" class="text-blue-600 underline cursor-pointer hover:text-blue-800">[[${target}]]</span>`;
+      const displayText = alias ? `[[${target}|${alias}]]` : `[[${target}]]`;
+      return `<span data-wikilink="${slug}" class="text-blue-600 underline cursor-pointer hover:text-blue-800">${displayText}</span>`;
     });
   }
 

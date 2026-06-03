@@ -17,7 +17,7 @@ function ticketIdCounter(): number {
 
 import { broadcastEvent } from "./data-store.js";
 import { readData } from "./data-store.js";
-import { DEFAULT_TICKETS_BOARD, readTicketsBoard, resolveProjectIdForSession, writeTicketsBoard, updateTicketsBoard } from "./ticket-board.js";
+import { DEFAULT_TICKETS_BOARD, readTicketsBoard, resolveProjectIdForSession, updateTicketsBoard } from "./ticket-board.js";
 import { logger } from "../utils/logger.js";
 import { loadConfig } from "../config.js";
 import type { TicketsBoard, Ticket, TicketStatus, AgentRole, WSEvent, WorkflowStage, DashboardData } from "@game-studio/types";
@@ -424,6 +424,17 @@ export async function createFixTicket(
       if (found) found.ticket.parentTicketId = parentTicketId;
       return board;
     });
+    // 18-M-fix-ticket-no-broadcast: emit ticket:updated so the
+    // kanban client picks up parentTicketId. The createQuestTicket
+    // call above already broadcast ticket:created with no parent
+    // (we didn't know it yet), and the field assignment here
+    // mutated the board but never fired any websocket event, so
+    // connected clients kept showing the fix ticket with no
+    // parent link until the next manual board refresh. Without
+    // the parent link, the UI can't draw the chain (a "this
+    // ticket fixes <parent>" indicator) and the producer can't
+    // navigate from a failed ticket back to the original.
+    broadcastEvent({ type: "ticket:updated", ticket, projectId } as WSEvent);
   }
   ticket.parentTicketId = parentTicketId;
   return ticket;

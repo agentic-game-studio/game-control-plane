@@ -39,7 +39,18 @@ sessionsRouter.get("/:id", async (req: Request, res: Response) => {
 
 // DELETE /sessions/:id — delete session
 sessionsRouter.delete("/:id", async (req: Request, res: Response) => {
-  await store.delete(req.params.id as string);
+  const id = req.params.id as string;
+  // 18-M-delete-404: 404 on missing id (was always 200, inconsistent
+  // with GET /:id which 404s) and broadcast a deletion event so
+  // other tabs stop showing the session in their list. The POST
+  // and POST /:id/checkpoint handlers in this file already
+  // broadcast; DELETE was the odd one out.
+  const removed = await store.delete(id);
+  if (!removed) {
+    res.status(404).json({ success: false, error: "Session not found" });
+    return;
+  }
+  broadcast({ type: "session:status", sessionId: id, status: "deleted" });
   res.json({ success: true });
 });
 
