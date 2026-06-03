@@ -571,7 +571,7 @@ export class GodotMCPService {
       if (projectMatch) {
         this.godotProjectDir = projectMatch[0].replace(/[/\\\\]$/, "");
         logger.info(
-          { godotDir: this.godotProjectDir, workspaceRelative: this.workspaceRelativePath },
+          { godotDir: this.godotProjectDir, workspaceRelative: this.workspaceRelativePath, event: "godot_project_dir_detected" },
           "Detected Godot project directory",
         );
       }
@@ -943,14 +943,14 @@ export async function installGodotMCPPlugin(
       // copy. Using fsp.access in a loop would multiply the round trips.
       if (existsSync(candidate)) {
         sourcePath = candidate;
-        logger.info({ sourcePath: candidate }, "Found Godot MCP plugin");
+        logger.info({ sourcePath: candidate, event: "godot_mcp_plugin_found" }, "Found Godot MCP plugin");
         break;
       }
     }
 
     if (!sourcePath) {
       result.error = `Godot MCP plugin not found. Searched:\n${possiblePaths.map(p => `  - ${p}`).join("\n")}\n\nMake sure godot-mcp-pro-${GODOT_MCP_PRO_VERSION} is in the project root.`;
-      logger.error({ searched: possiblePaths }, "Godot MCP plugin source not found");
+      logger.error({ searched: possiblePaths, event: "godot_mcp_plugin_source_missing" }, "Godot MCP plugin source not found");
       return result;
     }
 
@@ -968,7 +968,7 @@ export async function installGodotMCPPlugin(
     // Copy the plugin files
     await fsp.cp(sourcePath, projectPluginDir, { recursive: true });
     result.pluginCopied = true;
-    logger.info({ sourcePath, destPath: projectPluginDir }, "Godot MCP plugin copied");
+    logger.info({ sourcePath, destPath: projectPluginDir, event: "godot_mcp_plugin_copied" }, "Godot MCP plugin copied");
 
     // Enable the plugin in project.godot (Godot 4 format)
     const projectGodotPath = join(projectDir, "project.godot");
@@ -1019,14 +1019,14 @@ export async function installGodotMCPPlugin(
 
       await fsp.writeFile(projectGodotPath, projectGodotContent, "utf-8");
       result.pluginEnabled = true;
-      logger.info({ projectGodotPath }, "Godot MCP plugin enabled in project.godot (Godot 4 format)");
+      logger.info({ projectGodotPath, event: "godot_mcp_plugin_enabled" }, "Godot MCP plugin enabled in project.godot (Godot 4 format)");
     }
 
     result.success = true;
   } catch (err) {
     const error = err as Error;
     result.error = error.message;
-    logger.error({ error: error.message }, "Failed to install Godot MCP plugin");
+    logger.error({ error: error.message, event: "godot_mcp_plugin_install_failed" }, "Failed to install Godot MCP plugin");
   }
 
   return result;
@@ -1073,7 +1073,7 @@ export async function launchGodotEditor(projectDir: string): Promise<{ success: 
     const config = loadConfig();
     const installResult = await installGodotMCPPlugin(projectDir, config.WORKSPACE_DIR);
     if (!installResult.success) {
-      logger.warn({ projectDir, error: installResult.error }, "Could not install/enable Godot MCP plugin before launch");
+      logger.warn({ projectDir, error: installResult.error, event: "godot_mcp_plugin_install_skipped" }, "Could not install/enable Godot MCP plugin before launch");
     }
   }
 
@@ -1100,7 +1100,7 @@ export async function launchGodotEditor(projectDir: string): Promise<{ success: 
 
   const existingPid = isAlreadyRunning();
   if (existingPid) {
-    logger.info({ projectDir, existingPid }, "Godot editor already running, skipping launch");
+    logger.info({ projectDir, existingPid, event: "godot_editor_already_running" }, "Godot editor already running, skipping launch");
     return { success: true, pid: existingPid };
   }
 
@@ -1156,11 +1156,11 @@ export async function launchGodotEditor(projectDir: string): Promise<{ success: 
     });
     proc.unref();
 
-    logger.info({ godotBin, projectDir, pid: proc.pid }, "Godot editor launched");
+    logger.info({ godotBin, projectDir, pid: proc.pid, event: "godot_editor_launched" }, "Godot editor launched");
     return { success: true, pid: proc.pid };
   } catch (err) {
     const error = err as Error;
-    logger.error({ error: error.message, godotBin, projectDir }, "Failed to launch Godot editor");
+    logger.error({ error: error.message, godotBin, projectDir, event: "godot_editor_launch_failed" }, "Failed to launch Godot editor");
     return { success: false, error: error.message };
   }
 }
@@ -1242,16 +1242,16 @@ export function setupGodotMCPServer(
       // process.cwd() that the operator can't interpret in Docker.
       const repoRoot = REPO_ROOT_FROM_THIS_FILE;
       result.error = `Could not find godot-mcp-pro server directory.\nSearched in:\n  - ${repoRoot}/godot-mcp-pro-${GODOT_MCP_PRO_VERSION}/server\n  - ${repoRoot}/godot-mcp-pro/server\n\nMake sure godot-mcp-pro-${GODOT_MCP_PRO_VERSION} is in the project root.`;
-      logger.error({ searched: [resolve(repoRoot, `godot-mcp-pro-${GODOT_MCP_PRO_VERSION}`), resolve(repoRoot, "godot-mcp-pro")] }, "Godot MCP server not found");
+      logger.error({ searched: [resolve(repoRoot, `godot-mcp-pro-${GODOT_MCP_PRO_VERSION}`), resolve(repoRoot, "godot-mcp-pro")], event: "godot_mcp_server_missing" }, "Godot MCP server not found");
       return result;
     }
 
-    logger.info({ serverDir }, "Found Godot MCP server");
+    logger.info({ serverDir, event: "godot_mcp_server_found" }, "Found Godot MCP server");
 
     // Step 1: Install dependencies if needed
     if (!isDependenciesInstalled(serverDir)) {
       onProgress?.("Installing npm dependencies...");
-      logger.info({ serverDir }, "Installing npm dependencies");
+      logger.info({ serverDir, event: "godot_mcp_npm_install_started" }, "Installing npm dependencies");
       try {
         // execFileSync passes argv as a vector — no shell interpolation.
         // `execSync` would route through a shell, which is unnecessary
@@ -1263,10 +1263,10 @@ export function setupGodotMCPServer(
           timeout: 120000, // 2 minute timeout
         });
         result.installed = true;
-        logger.info({ serverDir }, "npm install completed");
+        logger.info({ serverDir, event: "godot_mcp_npm_install_completed" }, "npm install completed");
       } catch (err) {
         result.error = `npm install failed: ${(err as Error).message}`;
-        logger.error({ error: result.error, serverDir }, "npm install failed");
+        logger.error({ error: result.error, serverDir, event: "godot_mcp_npm_install_failed" }, "npm install failed");
         return result;
       }
     } else {
@@ -1276,7 +1276,7 @@ export function setupGodotMCPServer(
     // Step 2: Build if needed
     if (!isServerBuilt(serverDir)) {
       onProgress?.("Building TypeScript...");
-      logger.info({ serverDir }, "Building TypeScript");
+      logger.info({ serverDir, event: "godot_mcp_npm_build_started" }, "Building TypeScript");
       try {
         execFileSync("npm", ["run", "build"], {
           cwd: serverDir,
@@ -1284,10 +1284,10 @@ export function setupGodotMCPServer(
           timeout: 120000, // 2 minute timeout
         });
         result.built = true;
-        logger.info({ serverDir }, "npm run build completed");
+        logger.info({ serverDir, event: "godot_mcp_npm_build_completed" }, "npm run build completed");
       } catch (err) {
         result.error = `npm run build failed: ${(err as Error).message}`;
-        logger.error({ error: result.error, serverDir }, "npm run build failed");
+        logger.error({ error: result.error, serverDir, event: "godot_mcp_npm_build_failed" }, "npm run build failed");
         return result;
       }
     } else {
@@ -1297,7 +1297,7 @@ export function setupGodotMCPServer(
     result.success = true;
   } catch (err) {
     result.error = (err as Error).message;
-    logger.error({ error: result.error }, "Server setup failed");
+    logger.error({ error: result.error, event: "godot_mcp_server_setup_failed" }, "Server setup failed");
   }
 
   return result;

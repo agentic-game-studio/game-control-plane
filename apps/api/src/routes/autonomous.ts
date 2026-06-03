@@ -1204,7 +1204,7 @@ If the failure is an infinite loop or hang (timeout), suggest a workaround.`,
         ticketId: activeTicket.id,
         iteration: state.currentIteration,
         errors: [qaSummary],
-      } as unknown as WSEvent);
+      } as WSEvent);
 
       safeIngestProducerSummaryFact(state.projectId, {
         kind: "autonomous_iteration_boot_check_failed",
@@ -1497,8 +1497,18 @@ autonomousRouter.post("/start", async (req: Request, res: Response) => {
         undefined,
         makeTokenTracker(state.sessionId, state.projectId),
       );
-    } catch {
-      logger.warn({ projectId: state.projectId, event: "producer_plan_skipped" }, "Autonomous producer planning skipped");
+    } catch (err) {
+      // 21-M-producer-plan-swallow: include `err` in the structured
+      // log so a recurring LLM outage during the producer's first
+      // planning call surfaces a real cause. The previous bare
+      // `catch {}` discarded the error and only logged an event
+      // discriminator, so a sustained LLM 500 looked like "skipped
+      // on purpose". Sibling sprint-replan (L782) already includes
+      // both `event` and `err`.
+      logger.warn(
+        { projectId: state.projectId, err: err instanceof Error ? err.message : String(err), event: "producer_plan_failed" },
+        "Autonomous producer planning failed — continuing without planning step",
+      );
     }
 
     debugLog(`batch ${state.sessionId}] validated projectContext engine=${readyProjectContext.engine}, workspacePath=${readyProjectContext.workspacePath}`);
