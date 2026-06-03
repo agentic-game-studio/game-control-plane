@@ -4,6 +4,7 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "./useWebSocket";
 import { useAbortableEffect } from "./useAbortableEffect";
+import { WS_REFETCH_DEBOUNCE_MS } from "@/lib/timing";
 import type {
   AssetsData,
   GameAsset,
@@ -120,7 +121,7 @@ export function useAssets(projectId?: string) {
         if (debounceRef.current) clearTimeout(debounceRef.current);
         debounceRef.current = setTimeout(() => {
           fetchAssets();
-        }, 300);
+        }, WS_REFETCH_DEBOUNCE_MS);
       }
     },
     [fetchAssets, projectId]

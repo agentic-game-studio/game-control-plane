@@ -203,7 +203,7 @@ dashboardRouter.post("/demo-project", async (_req: Request, res: Response) => {
         return data;
       }
 
-      const projectId = `proj-demo-${Date.now()}`;
+      const projectId = newId("proj-demo");
       const projectDir = resolveProjectWorkspace(workspacePath);
       await writeDemoGodotProject(projectDir);
 
@@ -222,7 +222,7 @@ dashboardRouter.post("/demo-project", async (_req: Request, res: Response) => {
 
       data.projects.push(newProject);
       data.activityLog.unshift({
-        id: `log-${Date.now()}`,
+        id: newId("log"),
         timestamp: now,
         level: "info",
         source: "demo",
@@ -254,7 +254,7 @@ dashboardRouter.post("/demo-project", async (_req: Request, res: Response) => {
     const projectId = project.id;
     const tickets: Ticket[] = [
       {
-        id: `ticket-demo-${Date.now()}-movement`,
+        id: newId("ticket-demo-movement"),
         projectId,
         title: "Verify platformer movement feel",
         description: "Check run, jump, gravity, and camera behavior in the seeded Godot scene.",
@@ -268,7 +268,7 @@ dashboardRouter.post("/demo-project", async (_req: Request, res: Response) => {
         updatedAt: now,
       },
       {
-        id: `ticket-demo-${Date.now()}-coins`,
+        id: newId("ticket-demo-coins"),
         projectId,
         title: "Add coin pickup loop",
         description: "Create collectible coins, HUD count, and pickup feedback.",
@@ -282,7 +282,7 @@ dashboardRouter.post("/demo-project", async (_req: Request, res: Response) => {
         updatedAt: now,
       },
       {
-        id: `ticket-demo-${Date.now()}-qa`,
+        id: newId("ticket-demo-qa"),
         projectId,
         title: "Smoke-test web export readiness",
         description: "Confirm the project has a main scene and basic boot path for export testing.",

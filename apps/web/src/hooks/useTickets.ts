@@ -5,6 +5,7 @@ import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "./useWebSocket";
 import { useAbortableEffect } from "./useAbortableEffect";
 import { useProject } from "@/contexts/ProjectContext";
+import { WS_REFETCH_DEBOUNCE_MS } from "@/lib/timing";
 import type {
   TicketsBoard,
   Ticket,
@@ -77,7 +78,7 @@ export function useTickets() {
         if (debounceRef.current) clearTimeout(debounceRef.current);
         debounceRef.current = setTimeout(() => {
           void fetchTickets();
-        }, 300);
+        }, WS_REFETCH_DEBOUNCE_MS);
       }
     },
     [currentProjectId, fetchTickets]

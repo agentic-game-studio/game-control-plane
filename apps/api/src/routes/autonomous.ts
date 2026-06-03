@@ -37,6 +37,7 @@ import { upsertRunMetrics, listRunMetrics, getRunMetrics, recordTokenUsage } fro
 import { externalizeProductionNote } from "../services/wiki-memory-service.js";
 import { fireWebhook } from "../services/webhook-service.js";
 import { executeGodotExport } from "../services/build-service.js";
+import { newId } from "../utils/ids.js";
 import { generateProjectChangelog } from "../services/changelog-service.js";
 
 import { execFile, execFileSync } from "node:child_process";
@@ -1523,7 +1524,7 @@ autonomousRouter.post("/start", async (req: Request, res: Response) => {
 
       // Save run record
       saveRunRecord({
-        runId: `run-${Date.now()}`,
+        runId: newId("run"),
         projectId: currentState.projectId,
         startedAt: currentState.startedAt,
         completedAt: new Date().toISOString(),
@@ -1602,7 +1603,7 @@ autonomousRouter.post("/stop", async (req: Request, res: Response) => {
   await saveLoopState(state);
 
   saveRunRecord({
-    runId: `run-${Date.now()}`,
+    runId: newId("run"),
     projectId: state.projectId,
     startedAt: state.startedAt,
     completedAt: new Date().toISOString(),

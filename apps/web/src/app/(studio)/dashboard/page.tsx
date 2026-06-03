@@ -9,6 +9,7 @@ import { ProjectGrid } from "./components/ProjectGrid";
 import { ActivityLog } from "./components/ActivityLog";
 import { NewProjectModal } from "./components/NewProjectModal";
 import { apiFetch } from "@/lib/api";
+import { DASHBOARD_SERVER_STATUS_POLL_MS, MCP_HEALTH_POLL_MS } from "@/lib/timing";
 const logger = createLogger("page");
 
 interface MCPStatus {
@@ -92,7 +93,7 @@ export default function DashboardPage() {
   // Check server status on mount and periodically
   useEffect(() => {
     checkServerStatus();
-    const interval = setInterval(checkServerStatus, 60000);
+    const interval = setInterval(checkServerStatus, DASHBOARD_SERVER_STATUS_POLL_MS);
     return () => clearInterval(interval);
   }, [checkServerStatus]);
 
@@ -148,7 +149,7 @@ export default function DashboardPage() {
   // Poll every 10 seconds
   useEffect(() => {
     checkMCPHealth();
-    const interval = setInterval(checkMCPHealth, 10000);
+    const interval = setInterval(checkMCPHealth, MCP_HEALTH_POLL_MS);
     return () => clearInterval(interval);
   }, [checkMCPHealth]);
 

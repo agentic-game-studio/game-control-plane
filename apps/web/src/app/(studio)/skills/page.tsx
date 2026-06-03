@@ -3,6 +3,7 @@ import { createLogger } from "../../../lib/logger";
 import { useState, useEffect, useRef } from "react";
 import { apiFetch } from "@/lib/api";
 import { useDialog } from "@/hooks/useDialog";
+import { SUCCESS_TOAST_DURATION_MS } from "@/lib/timing";
 const logger = createLogger("page");
 
 interface SkillPhase {
@@ -158,7 +159,7 @@ export default function SkillsPage() {
       invokeSuccessTimerRef.current = setTimeout(() => {
         setInvokeSuccess(false);
         invokeSuccessTimerRef.current = null;
-      }, 3000);
+      }, SUCCESS_TOAST_DURATION_MS);
     } catch (error) {
       logger.error("Failed to invoke skill", { err: error });
       await showAlert(`Failed to invoke skill: ${error}`);

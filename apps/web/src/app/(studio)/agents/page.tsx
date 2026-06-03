@@ -2,6 +2,7 @@
 import { createLogger } from "../../../lib/logger";
 import { useState, useEffect, useRef } from "react";
 import { apiFetch } from "@/lib/api";
+import { SUCCESS_TOAST_DURATION_MS } from "@/lib/timing";
 import type { AgentRole } from "@game-studio/types";
 const logger = createLogger("page");
 
@@ -98,7 +99,7 @@ export default function AgentsPage() {
       spawnSuccessTimerRef.current = setTimeout(() => {
         setSpawnSuccess(null);
         spawnSuccessTimerRef.current = null;
-      }, 3000);
+      }, SUCCESS_TOAST_DURATION_MS);
     } catch (error) {
       logger.error("Failed to spawn agent", { err: error });
     } finally {

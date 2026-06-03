@@ -4,6 +4,7 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "./useWebSocket";
 import { useAbortableEffect } from "./useAbortableEffect";
+import { WS_REFETCH_DEBOUNCE_MS } from "@/lib/timing";
 import {
   DEFAULT_DATA,
   type DashboardData,
@@ -64,7 +65,7 @@ export function useDashboard() {
           // cancel the previous one.
           const controller = new AbortController();
           void fetchDashboard(controller.signal);
-        }, 300);
+        }, WS_REFETCH_DEBOUNCE_MS);
       }
     },
     [fetchDashboard]

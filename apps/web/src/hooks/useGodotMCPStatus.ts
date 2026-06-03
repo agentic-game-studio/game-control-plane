@@ -2,6 +2,7 @@
 import { createLogger } from "../lib/logger";
 import { useState, useCallback, useEffect, useRef } from "react";
 import { apiFetch } from "@/lib/api";
+import { MCP_HEALTH_POLL_MS } from "@/lib/timing";
 const logger = createLogger("useGodotMCPStatus");
 
 interface MCPHealthStatus {
@@ -30,7 +31,7 @@ export function useGodotMCPStatus(
   engine: "godot" | null,
   options: UseGodotMCPStatusOptions = {}
 ) {
-  const { pollInterval = 10000, enabled = true } = options;
+  const { pollInterval = MCP_HEALTH_POLL_MS, enabled = true } = options;
 
   const [status, setStatus] = useState<MCPHealthStatus | null>(null);
   const [checking, setChecking] = useState(false);

@@ -1,12 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import type { WSEvent } from "@game-studio/types";
-
-/** PING_INTERVAL_MS — send a ping every 25s to keep the connection alive
- * through proxies (load balancers commonly drop idle sockets after 60s). The
- * server is configured to respond to pings via ws.pong() and to terminate
- * sockets that miss the heartbeat (see `apps/api/src/services/websocket.ts`). */
-const PING_INTERVAL_MS = 25_000;
+import { WS_PING_INTERVAL_MS, WS_RECONNECT_DELAY_MS } from "@/lib/timing";
 
 // 10-H12: singleton WebSocket connection shared across all useWebSocket
 // callers. Previously every hook (useAgents, useSkills, useDashboard,
@@ -74,7 +69,7 @@ function connect(): void {
           return;
         }
         try { ws.send(JSON.stringify({ type: "ping" })); } catch { /* socket died */ }
-      }, PING_INTERVAL_MS);
+      }, WS_PING_INTERVAL_MS);
       pingInterval = myInterval;
     };
 
@@ -131,7 +126,10 @@ function connect(): void {
         return;
       }
       const attempt = reconnectAttempt;
-      const delay = Math.min(30_000, 1_000 * Math.pow(2, attempt));
+      // 14-M-reconnect-backoff: starting from WS_RECONNECT_DELAY_MS
+      // (1s) and doubling up to 30s, so a downed server doesn't get
+      // hammered and a flaky network still recovers within ~30s.
+      const delay = Math.min(30_000, WS_RECONNECT_DELAY_MS * Math.pow(2, attempt));
       reconnectAttempt = attempt + 1;
       reconnectTimer = setTimeout(() => {
         if (sharedSocket === ws) {

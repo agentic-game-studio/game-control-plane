@@ -112,8 +112,15 @@ export function renderMarkdown(md: string): string {
     }
     // 2. ASCII + Unicode trim
     const trimmed = url.replace(new RegExp("^[\\s\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF]+|[\\s\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF]+$", "g"), "");
-    // 3. deny-list explicit dangerous schemes
-    if (/^(javascript|data|vbscript|file):/i.test(trimmed)) {
+    // 3. deny-list explicit dangerous schemes. Lowercase first so
+    //    `JAVASCRIPT:` and `Javascript:` (which some HTTP clients
+    //    can be tricked into normalising) are caught by the same
+    //    regex — case-insensitive flags are below, but a redundant
+    //    lowercase guard makes the intent obvious to readers and
+    //    protects against a future maintainer removing the `/i`
+    //    flag from the allowlist test below.
+    const normalised = trimmed.toLowerCase();
+    if (/^(javascript|data|vbscript|file):/i.test(normalised)) {
       return `[${text}](${url})`;
     }
     // Allowlist safe schemes.

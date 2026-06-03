@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
+import { NOTIFICATION_TOAST_DURATION_MS } from "@/lib/timing";
 import type { ActivityItem } from "@/hooks/useCommandRoom";
 
 interface NotificationToastsProps {
@@ -19,7 +20,7 @@ export default function NotificationToasts({ toasts, onDismiss }: NotificationTo
   useEffect(() => {
     if (toasts.length === 0) return;
     const timers = toasts.map((toast) =>
-      window.setTimeout(() => onDismiss(toast.id), 5000)
+      window.setTimeout(() => onDismiss(toast.id), NOTIFICATION_TOAST_DURATION_MS)
     );
     return () => timers.forEach((timer) => window.clearTimeout(timer));
   }, [toasts, onDismiss]);
@@ -47,6 +48,7 @@ export default function NotificationToasts({ toasts, onDismiss }: NotificationTo
               </div>
               <button
                 onClick={() => onDismiss(toast.id)}
+                aria-label="Dismiss notification"
                 className="w-6 h-6 border border-black bg-white hover:bg-black hover:text-white transition-colors flex items-center justify-center shrink-0"
                 title="Dismiss"
               >
