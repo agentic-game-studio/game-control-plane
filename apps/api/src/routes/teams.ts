@@ -230,10 +230,21 @@ All Quest tickets have been created — agents just need to be spawned via Task 
       }
     }
 
-    // Move all tickets to completed
-    for (const [role, ticketId] of teamTickets) {
-      moveQuestTicket(ticketId, "completed", role);
-    }
+    // 24-H-teams-fire-forget: await the per-ticket moves before
+    // completing the workflow. The previous shape fired the moves
+    // without `await`, then synchronously ran `completeWorkflow` and
+    // `teamSessions.delete` while the ticket moves were still in
+    // flight. `moveQuestTicket` does its own per-file mutex acquire
+    // + write; a hung move (mutex contention, slow disk) can
+    // outlive the workflow being torn down, leaving the ticket in
+    // the old column and broadcasting a `workflow:complete` that
+    // disagrees with the kanban state. `Promise.all` waits for all
+    // moves to finish before completing the workflow.
+    await Promise.all(
+      [...teamTickets].map(([role, ticketId]) =>
+        moveQuestTicket(ticketId, "completed", role),
+      ),
+    );
 
     // Complete workflow
     completeWorkflow(sessionId, true);
@@ -267,10 +278,14 @@ All Quest tickets have been created — agents just need to be spawned via Task 
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : "Unknown error";
 
-    // Move tickets to qa (failed)
-    for (const [role, ticketId] of teamTickets) {
-      moveQuestTicket(ticketId, "qa", role);
-    }
+    // 24-H-teams-fire-forget: await the per-ticket moves before
+    // completing the workflow (qa branch — see success branch for
+    // the rationale).
+    await Promise.all(
+      [...teamTickets].map(([role, ticketId]) =>
+        moveQuestTicket(ticketId, "qa", role),
+      ),
+    );
 
     completeWorkflow(sessionId, false);
 
