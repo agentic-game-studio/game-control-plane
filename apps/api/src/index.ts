@@ -215,7 +215,19 @@ wss.on("connection", (socket) => {
       const text = Buffer.isBuffer(data) ? data.toString("utf-8") : String(data);
       const parsed = JSON.parse(text) as { type?: string };
       if (parsed?.type === "ping") {
-        socket.send(JSON.stringify({ type: "pong" }));
+        // 19-C-ws-pong-not-ready: guard on OPEN before sending the
+        // pong. A client that disconnects between the message being
+        // received and this send (race window of microseconds, but
+        // real under mobile network flaps and proxy timeouts) would
+        // throw `WebSocket is not open` from `socket.send`. The
+        // outer try/catch already swallows the error, but throwing
+        // is a code smell and the ws library's behaviour for a
+        // closed-socket send is implementation-defined across
+        // versions — the readyState check makes the intent
+        // explicit and avoids relying on the catch path.
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({ type: "pong" }));
+        }
       }
     } catch {
       // Non-JSON or malformed message — ignore. Broadcast events from

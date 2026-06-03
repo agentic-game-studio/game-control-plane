@@ -45,13 +45,39 @@ function parseQuestionFromToolResult(toolCalls?: { name: string; input: Record<s
         const inputStr = typeof tc.input === "string" ? tc.input : JSON.stringify(tc.input);
         const parsed = JSON.parse(inputStr);
         if (parsed.__QUESTION__) {
-          return {
-            questionId: parsed.questionId,
-            question: parsed.question,
-            options: parsed.options,
-            allowMultiple: parsed.allowMultiple,
-            allowCustomInput: parsed.allowCustomInput,
-          };
+          // 19-C-question-no-validate: validate field shapes on the
+          // success path before returning. The catch block below
+          // already type-checks the fallback (object) branch, but
+          // the success path returned the parsed object
+          // unchecked — a malformed LLM response (e.g. options as
+          // a string, question as a number) would propagate a
+          // non-QuestionData shape to the chat UI, where
+          // QuestionMessage.tsx calls `options.map(...)` and
+          // throws `TypeError: options.map is not a function`.
+          // The malformed question would render as a broken
+          // "Ask the user" panel that crashes the whole
+          // message list. Refuse the parse and fall through
+          // to the catch path's safer object validation.
+          const input = parsed as Record<string, unknown>;
+          if (
+            typeof input.questionId === "string" &&
+            typeof input.question === "string" &&
+            Array.isArray(input.options) &&
+            input.options.every(
+              (o): o is { id: string; label: string; description?: string } =>
+                typeof o === "object" && o !== null &&
+                typeof (o as Record<string, unknown>).id === "string" &&
+                typeof (o as Record<string, unknown>).label === "string",
+            )
+          ) {
+            return {
+              questionId: input.questionId,
+              question: input.question,
+              options: input.options as QuestionData["options"],
+              allowMultiple: typeof input.allowMultiple === "boolean" ? input.allowMultiple : false,
+              allowCustomInput: typeof input.allowCustomInput === "boolean" ? input.allowCustomInput : false,
+            };
+          }
         }
       } catch {
         // Try parsing from raw input
@@ -103,13 +129,25 @@ function parsePlanPhasesFromToolResult(toolCalls?: { name: string; input: Record
         const inputStr = typeof tc.input === "string" ? tc.input : JSON.stringify(tc.input);
         const parsed = JSON.parse(inputStr);
         if (parsed.__PLAN__) {
-          return parsed.phases.map((p: { id: string; label: string; description?: string; estimatedEffort?: string }) => ({
-            id: p.id,
-            label: p.label,
-            description: p.description,
-            status: "pending" as const,
-            estimatedEffort: p.estimatedEffort,
-          }));
+          // 19-C-plan-no-validate: same shape guard as the
+          // AskUserQuestion path above. Without this, a malformed
+          // LLM response (e.g. phases as a string, missing
+          // label) would throw on `parsed.phases.map(...)` and
+          // the unhandled rejection would kill the LLM tool loop
+          // for the entire turn. The catch block falls through
+          // to the object-input branch, which has its own loose
+          // type checks — keeping the strict guard here makes
+          // both paths consistent.
+          const input = parsed as Record<string, unknown>;
+          if (Array.isArray(input.phases)) {
+            return input.phases.map((p: { id: string; label: string; description?: string; estimatedEffort?: string }) => ({
+              id: p.id,
+              label: p.label,
+              description: p.description,
+              status: "pending" as const,
+              estimatedEffort: p.estimatedEffort,
+            }));
+          }
         }
       } catch {
         // Try parsing from raw input
