@@ -28,7 +28,7 @@ import { resolveHomeDir } from "../utils/paths.js";
 import type { AgentRole, WSEvent } from "@game-studio/types";
 import type { TicketsBoard, Ticket, DashboardData } from "@game-studio/types";
 import { getOrCreateGodotMCPService, launchGodotEditor, type GodotMCPServiceOptions } from "../services/godot-mcp-service.js";
-import { ingestProducerSummaryFact } from "../services/producer-summary.js";
+import { ingestProducerSummaryFact, safeIngestProducerSummaryFact } from "../services/producer-summary.js";
 import { ingestGDD } from "../services/gdd-ingest-service.js";
 import { runQAGateChain, saveTestEvidenceArtifact } from "../services/qa-gate-service.js";
 import { triggerVerification } from "../services/verification-service.js";
@@ -46,23 +46,11 @@ import { readFile as readFileAsync, writeFile as writeFileAsync, rename as renam
 
 const execFileAsyncLocal = promisify(execFile);
 
-// 16-H-void-ingest-unhandled: ingestProducerSummaryFact internally calls
-// persistChatStore() which writes to disk. A transient EIO/ENOSPC or a
-// concurrent write conflict will reject the returned Promise. Callers
-// here intentionally do not await (the loop must not block on it), but
-// `void p` lets the rejection bubble up to process.unhandledRejection
-// — which fatalExit() in index.ts treats as a crash signal. Wrap so
-// failures are logged and swallowed at the call site.
-function safeIngestProducerSummaryFact(
-  ...args: Parameters<typeof ingestProducerSummaryFact>
-): void {
-  ingestProducerSummaryFact(...args).catch((err) => {
-    logger.warn(
-      { err: err instanceof Error ? err.message : String(err), projectId: args[0], event: "producer_summary_fact_ingest_failed" },
-      "Failed to ingest producer summary fact — continuing",
-    );
-  });
-}
+// 16-M-ingest-fact-fire-and-forget: safeIngestProducerSummaryFact is
+// defined in services/producer-summary.js so it can be reused by other
+// routes (chat.ts has 4 call sites of its own). The shared helper
+// swallows rejection from the underlying persistChatStore() call so a
+// transient disk error doesn't escalate to an unhandledRejection.
 
 type ReadyProjectContext = ProjectContext & { workspacePath: string };
 

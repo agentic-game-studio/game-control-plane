@@ -95,6 +95,30 @@ const server = createServer(app);
   }
 }
 
+// CORS_ORIGIN accepts a single origin or a comma-separated list of allowed
+// origins (e.g. "http://localhost:3000,http://localhost:4000"). A single
+// origin string still works for the common dev case. An unset / empty
+// config is a misconfiguration — refuse to start so a typo doesn't
+// silently block all browsers.
+//
+// Pre-parsed here (above the upgrade handler) so the WS origin check at
+// 16-M-ws-origin-parse-defense doesn't re-validate the configured list
+// on every connection. `corsOriginsAllowAll` short-circuits the loop
+// when `*` is present (dev convenience), and `normalizedCorsOrigins`
+// holds the result of `new URL(o).origin` for each entry — URLs that
+// fail to parse fall back to the raw string so a typo doesn't crash
+// boot or silently disable an entry.
+const corsOriginsRaw = config.CORS_ORIGIN.split(",").map((s) => s.trim()).filter(Boolean);
+if (corsOriginsRaw.length === 0) {
+  logger.error({ CORS_ORIGIN: config.CORS_ORIGIN, event: "cors_misconfigured" },
+    "CORS_ORIGIN is empty — refusing to start. Set CORS_ORIGIN to one or more comma-separated origins.");
+  throw new Error("CORS_ORIGIN must be set to at least one origin");
+}
+const corsOriginsAllowAll = corsOriginsRaw.includes("*");
+const normalizedCorsOrigins = corsOriginsRaw.map((o) => {
+  try { return new URL(o).origin; } catch { return o; }
+});
+
 // WebSocket server — attach wss from websocket.ts to the HTTP server
 server.on("upgrade", (request, socket, head) => {
   const { pathname, searchParams } = new URL(request.url ?? "/", "http://localhost");
@@ -113,8 +137,26 @@ server.on("upgrade", (request, socket, head) => {
   // was bypassed. Invert so missing-Origin requests are rejected when
   // CORS is configured to a specific allowlist.
   const origin = request.headers.origin;
-  if (!corsOrigins.includes("*")) {
-    const allowed = !!origin && corsOrigins.some((o) => o === origin || (o !== "*" && new URL(o).origin === new URL(origin).origin));
+  if (!corsOriginsAllowAll) {
+    // 16-M-ws-origin-parse-defense: parse the incoming Origin header
+    // inside try/catch. `new URL(origin)` throws on malformed input
+    // (origin: "https://", origin: "javascript:foo", etc.) and an
+    // unhandled throw inside the upgrade handler would propagate to
+    // Node's internal HTTP machinery and could log noisy stack traces
+    // for every probe / scan that hits the port. The previous version
+    // also called `new URL(o)` on every connection for every allowed
+    // origin in the list, even though those values were already
+    // validated at startup — pre-parse them once into normalizedCorsOrigins.
+    let allowed = false;
+    if (origin) {
+      let originNormalized: string | null = null;
+      try { originNormalized = new URL(origin).origin; } catch { originNormalized = null; }
+      if (originNormalized) {
+        for (const ok of normalizedCorsOrigins) {
+          if (ok === origin || ok === originNormalized) { allowed = true; break; }
+        }
+      }
+    }
     if (!allowed) {
       socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
       socket.destroy();
@@ -179,18 +221,10 @@ wss.on("connection", (socket) => {
 });
 
 // Middleware
-// CORS_ORIGIN accepts a single origin or a comma-separated list of allowed
-// origins (e.g. "http://localhost:3000,http://localhost:4000"). A single
-// origin string still works for the common dev case. An unset / empty
-// config is a misconfiguration — refuse to start so a typo doesn't
-// silently block all browsers.
-const corsOrigins = config.CORS_ORIGIN.split(",").map((s) => s.trim()).filter(Boolean);
-if (corsOrigins.length === 0) {
-  logger.error({ CORS_ORIGIN: config.CORS_ORIGIN, event: "cors_misconfigured" },
-    "CORS_ORIGIN is empty — refusing to start. Set CORS_ORIGIN to one or more comma-separated origins.");
-  throw new Error("CORS_ORIGIN must be set to at least one origin");
-}
-app.use(cors({ origin: corsOrigins.length === 1 ? corsOrigins[0] : corsOrigins }));
+// CORS_ORIGIN was parsed above (before the WS upgrade handler) so the
+// origin check at 16-M-ws-origin-parse-defense can reuse the pre-parsed
+// list. The HTTP CORS middleware below consumes the same array.
+app.use(cors({ origin: corsOriginsRaw.length === 1 ? corsOriginsRaw[0] : corsOriginsRaw }));
 // Security response headers. The platform serves an authenticated dashboard
 // that handles arbitrary user-provided content (chat messages, GDD markdown,
 // generated assets). The headers below defend against the obvious classes

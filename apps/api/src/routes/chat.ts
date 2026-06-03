@@ -2,7 +2,7 @@ import { Router } from "express";
 import type { Request, Response, NextFunction } from "express";
 import { join } from "node:path";
 import type { AgentRole, ChatSession, ChatMessage, CreateMessageRequest, CreateChatSessionRequest, ContextUsage, DashboardData, Project, ProjectEngine } from "@game-studio/types";
-import { emptyProducerSummarySnapshot, ingestProducerSummaryFact } from "../services/producer-summary.js";
+import { emptyProducerSummarySnapshot, safeIngestProducerSummaryFact } from "../services/producer-summary.js";
 import type { LLMMessage } from "../llm/zai-client.js";
 import { broadcastEvent, readData, writeData } from "../services/data-store.js";
 import { invokeAgent, continueConversation, type ProjectContext, detectEngineFromWorkspace } from "../services/llm-service.js";
@@ -338,6 +338,15 @@ function withTokenUsageLock<T>(sessionId: string, fn: () => T | Promise<T>): Pro
  * and the second will silently overwrite the first. This set serializes
  * the validation phase (sync check + sync add, no awaits between). */
 const pendingSpawns = new Set<string>();
+// 16-M-pending-spawns-cap: defensive upper bound. The set should
+// normally only ever hold sessionIds mid-spawn (a few hundred ms at
+// most), so realistic size is ~tens of entries. If an error path
+// ever forgets to `delete`, the set grows unbounded — and since the
+// set gates every /spawn call, a leak would 409-out the entire API.
+// 1000 matches the sibling sessionsResponding cap; a 429 is the
+// right shape (the client is asking for more spawns than the
+// server can validate concurrently).
+const PENDING_SPAWNS_CAP = 1000;
 // Defensive upper bound. The lock should only ever hold sessionIds that
 // are currently mid-LLM-call, so the set should stay tiny. If a request
 // error path ever leaks a sessionId without `delete`, the set can grow
@@ -900,7 +909,7 @@ chatRouter.post("/sessions/:id/close", async (req: Request, res: Response) => {
     showActions: false,
   });
 
-  void ingestProducerSummaryFact(projectId, {
+  safeIngestProducerSummaryFact(projectId, {
     kind: "consultation_closed",
     at: new Date().toISOString(),
     title: session.role,
@@ -1764,6 +1773,14 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
     res.status(409).json({ success: false, error: `Session ${sessionId} already exists or is being spawned` });
     return;
   }
+  if (pendingSpawns.size >= PENDING_SPAWNS_CAP) {
+    logger.error(
+      { size: pendingSpawns.size, cap: PENDING_SPAWNS_CAP, event: "pending_spawns_overflow" },
+      "pendingSpawns hit the defensive cap — a cleanup path is leaking entries",
+    );
+    res.status(503).json({ success: false, error: "Server at capacity — try again shortly" });
+    return;
+  }
   pendingSpawns.add(sessionId);
   // Track whether the lock made it to the response. The body has a
   // single success-path return at the very end that sets this; an
@@ -1861,7 +1878,7 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
     showActions: false,
   });
 
-  void ingestProducerSummaryFact(projectId, {
+  safeIngestProducerSummaryFact(projectId, {
     kind: "agent_spawned",
     at: now,
     agentRole,
@@ -2016,7 +2033,7 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
         showActions: true,
       });
 
-      void ingestProducerSummaryFact(projectId, {
+      safeIngestProducerSummaryFact(projectId, {
         kind: "spawn_task_complete",
         at: new Date().toISOString(),
         agentRole,
@@ -2075,7 +2092,7 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
         showActions: false,
       });
 
-      void ingestProducerSummaryFact(projectId, {
+      safeIngestProducerSummaryFact(projectId, {
         kind: "spawn_task_failed",
         at: new Date().toISOString(),
         agentRole,

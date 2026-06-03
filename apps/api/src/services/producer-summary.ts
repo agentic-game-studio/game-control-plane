@@ -5,9 +5,30 @@
 
 import { createHash } from "node:crypto";
 import type { ProducerSummaryFact, ProducerSummarySnapshot } from "@game-studio/types";
+import { logger } from "../utils/logger.js";
 
 export const MAX_RECENT_FACTS = 30;
 export const EMIT_COOLDOWN_MS = 45_000;
+
+// 16-M-ingest-fact-fire-and-forget: ingestProducerSummaryFact can throw
+// (await mod.persistChatStore can hit EIO/ENOSPC/EROFS; dynamic import
+// can fail under rare module-graph races). Callers fire-and-forget
+// through `void ingestProducerSummaryFact(...)` — without this helper,
+// a transient write error became an unhandled rejection, which the
+// index.ts unhandledRejection handler routes to fatalExit → process
+// exit. The in-memory summary is a UX nicety; a lost fact is
+// preferable to taking down the whole API.
+export function safeIngestProducerSummaryFact(
+  projectId: string,
+  fact: ProducerSummaryFact,
+): void {
+  ingestProducerSummaryFact(projectId, fact).catch((err) => {
+    logger.warn(
+      { err: err instanceof Error ? err.message : String(err), projectId, event: "producer_summary_fact_ingest_failed" },
+      "Failed to ingest producer summary fact — continuing",
+    );
+  });
+}
 
 const pendingEmitTimers = new Map<string, ReturnType<typeof setTimeout>>();
 

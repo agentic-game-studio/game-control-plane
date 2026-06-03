@@ -174,24 +174,39 @@ settingsRouter.post("/topup", async (req: Request, res: Response) => {
   }
 
   try {
-    const updated = await updateData<SettingsConfig>("settings.json", (data) => ({
-      ...data,
-      credits: {
-        ...data.credits,
-        onTop: {
-          current: data.credits.onTop.current + amount,
-          totalPurchased: data.credits.onTop.totalPurchased + amount,
-        },
-      },
-      topUpHistory: [
+    // 16-M-topup-history-cap: cap the topUpHistory array. The rate
+    // limiter caps topups to 1 per 10s, but over months of use the
+    // array still grows unbounded — at the cap of 1/10s, that's 360
+    // entries/hour, 8.6k/day, 3M/year. Each topup entry is ~150 bytes,
+    // so a year of data is ~500KB of JSON that gets re-serialized on
+    // every PATCH /api/settings. Keep the most recent 500 (about
+    // 1.4 days at the rate limit) — operators reading the ledger care
+    // about recent activity, not year-old history.
+    const TOPUP_HISTORY_CAP = 500;
+    const updated = await updateData<SettingsConfig>("settings.json", (data) => {
+      const newHistory = [
         ...data.topUpHistory,
         {
           id: newId("top"),
           amount,
           timestamp: new Date().toISOString(),
         },
-      ],
-    }));
+      ];
+      if (newHistory.length > TOPUP_HISTORY_CAP) {
+        newHistory.splice(0, newHistory.length - TOPUP_HISTORY_CAP);
+      }
+      return {
+        ...data,
+        credits: {
+          ...data.credits,
+          onTop: {
+            current: data.credits.onTop.current + amount,
+            totalPurchased: data.credits.onTop.totalPurchased + amount,
+          },
+        },
+        topUpHistory: newHistory,
+      };
+    });
 
     broadcastEvent({ type: "settings:updated", settings: updated } as WSEvent);
     res.json({ success: true, data: updated });

@@ -39,7 +39,15 @@ export async function readData<T>(filename: string): Promise<T> {
     }
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-      throw new Error(`Data file not found: ${filename} (expected at ${filePath})`);
+      // 16-M-enoent-error-code: preserve the ENOENT code on the rewrapped
+      // error so callers (getOrCreateData) can match on `err.code ===
+      // "ENOENT"` instead of the brittle `msg.includes("not found")`
+      // string sniff. A future translation, message rewording, or
+      // unrelated error carrying the word "not" in its message would
+      // confuse the substring check; the error code never moves.
+      const wrapped = new Error(`Data file not found: ${filename} (expected at ${filePath})`) as NodeJS.ErrnoException;
+      wrapped.code = "ENOENT";
+      throw wrapped;
     }
     throw err;
   }
@@ -238,12 +246,12 @@ export async function getOrCreateData<T>(
     try {
       return await readData<T>(filename);
     } catch (err) {
-      // Only ENOENT triggers the create path — corrupted JSON should
-      // surface to the caller so they can decide whether to recover or
-      // bail (a corrupted file is usually a data-loss signal, not a
-      // "just overwrite it" signal).
-      const msg = (err as Error).message || "";
-      if (!msg.includes("not found")) throw err;
+      // 16-M-enoent-error-code: switch from `msg.includes("not found")` to
+      // an actual error-code check. readData now sets err.code = "ENOENT"
+      // on the rewrapped error (see data-store.ts:41). Corrupted JSON
+      // and other failures continue to propagate so the caller can
+      // surface a real data-loss signal.
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
       const value = defaultValue();
       await writeData(filename, value);
       return value;
