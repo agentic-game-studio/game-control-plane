@@ -1,8 +1,9 @@
 "use client";
 import { createLogger } from "../lib/logger";
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback } from "react";
 import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "./useWebSocket";
+import { useAbortableEffect } from "./useAbortableEffect";
 import type { AgentDefinition } from "@game-studio/types";
 import type { WSEvent } from "@game-studio/types";
 const logger = createLogger("useAgents");
@@ -19,40 +20,32 @@ export function useAgents(): UseAgentsReturn {
   const [agents, setAgents] = useState<AgentDefinition[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const mountedRef = useRef(true);
 
-  const fetchAgents = useCallback(async () => {
+  const fetchAgents = useCallback(async (signal?: AbortSignal) => {
     try {
-      const result = await apiFetch<AgentDefinition[]>("/api/agents");
-      if (!mountedRef.current) return;
+      const result = await apiFetch<AgentDefinition[]>("/api/agents", { signal });
       setAgents(result);
       setError(null);
     } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
       logger.error("Failed to fetch agents", { err: err });
-      if (!mountedRef.current) return;
       setError(err instanceof Error ? err.message : "Failed to load agents");
-    } finally {
-      if (mountedRef.current) {
-        setLoading(false);
-      }
     }
   }, []);
 
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    fetchAgents();
+  // 14-FH10-unmount-cancel: AbortController-driven initial fetch.
+  useAbortableEffect(async (signal) => {
+    try {
+      await fetchAgents(signal);
+    } finally {
+      setLoading(false);
+    }
   }, [fetchAgents]);
 
   const onWSEvent = useCallback(
     (event: WSEvent) => {
       if (event.type === "agent:spawned") {
-        fetchAgents();
+        void fetchAgents();
       }
     },
     [fetchAgents]
@@ -67,7 +60,7 @@ export function useAgents(): UseAgentsReturn {
 
   const retry = useCallback(() => {
     setLoading(true);
-    fetchAgents();
+    void fetchAgents();
   }, [fetchAgents]);
 
   return { agents, loading, error, retry, getAgent };

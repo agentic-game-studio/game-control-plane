@@ -46,7 +46,10 @@ export default function SideNavBar() {
   }, []);
 
   return (
-    <nav className="hidden md:flex flex-col h-full w-64 border-r-2 border-black bg-white z-40 shrink-0">
+    <nav
+      aria-label="Studio navigation"
+      className="hidden md:flex flex-col h-full w-64 border-r-2 border-black bg-white z-40 shrink-0"
+    >
       {/* Studio Identity */}
       <div className="p-4 border-b-2 border-black">
         <div className="flex items-center gap-3 mb-2">
@@ -92,20 +95,33 @@ export default function SideNavBar() {
 
       {/* Footer Links */}
       <div className="mt-auto border-t-2 border-black p-4">
-        <Link
-          href="#"
-          className="text-black flex items-center gap-3 p-2 hover:bg-[#0055FF] hover:text-white font-[var(--font-terminal)] text-sm font-bold uppercase transition-colors"
+        {/* 14-FH7-placeholder-links: previously these were href="#"
+            which scrolls to the top of the page on click and does
+            nothing else — and "Logout" with a no-op handler is
+            actively dangerous: a user clicking it would believe they
+            were logged out, but their session is still valid.
+            Until real auth/session-handling exists, render the
+            controls as disabled buttons with a clear title
+            explaining why, rather than fake links. Once the auth
+            routes land, wire these to the real handlers. */}
+        <button
+          type="button"
+          disabled
+          title="Support is not yet wired to a help system"
+          className="w-full text-left text-black/40 flex items-center gap-3 p-2 font-[var(--font-terminal)] text-sm font-bold uppercase cursor-not-allowed"
         >
           <span className="material-symbols-outlined">help</span>
           Support
-        </Link>
-        <Link
-          href="#"
-          className="text-black flex items-center gap-3 p-2 hover:bg-[#0055FF] hover:text-white font-[var(--font-terminal)] text-sm font-bold uppercase transition-colors"
+        </button>
+        <button
+          type="button"
+          disabled
+          title="Logout is not yet wired to an auth flow"
+          className="w-full text-left text-black/40 flex items-center gap-3 p-2 font-[var(--font-terminal)] text-sm font-bold uppercase cursor-not-allowed"
         >
           <span className="material-symbols-outlined">logout</span>
           Logout
-        </Link>
+        </button>
       </div>
     </nav>
   );

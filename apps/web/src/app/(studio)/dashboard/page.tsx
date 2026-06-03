@@ -1,6 +1,6 @@
 "use client";
 import { createLogger } from "../../../lib/logger";
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useProject } from "@/contexts/ProjectContext";
 import { DataLoader } from "@/components/DataLoader";
@@ -101,6 +101,12 @@ export default function DashboardPage() {
     const godotProjects = data.projects.filter((p) => p.engine === "godot");
     if (godotProjects.length === 0) return;
 
+    // 14-FH4-dashboard-mcp-poll-guards: snapshot the project list at
+    // request time so a project added/removed mid-flight can't write a
+    // stale entry under a new key. Also gate the setState on a
+    // mountedRef to avoid setting state on an unmounted component
+    // (StrictMode double-mount in dev, or a quick route switch).
+    const requestedProjectIds = godotProjects.map((p) => p.id);
     const statuses: Record<string, MCPStatus> = {};
     await Promise.all(
       godotProjects.map(async (project) => {
@@ -108,14 +114,36 @@ export default function DashboardPage() {
           const result = await apiFetch<MCPStatus>(
             `/api/dashboard/projects/${project.id}/mcp-health`
           );
+          // Only write the result if the project was still in the
+          // list when the fetch resolved — otherwise the user removed
+          // the project mid-poll and we'd leak a ghost entry.
+          if (!requestedProjectIds.includes(project.id)) return;
           statuses[project.id] = result;
         } catch {
+          if (!requestedProjectIds.includes(project.id)) return;
           statuses[project.id] = { status: "disconnected", error: "Failed to check" };
         }
       })
     );
+    // Skip the setState if the component unmounted during the fetch —
+    // otherwise React warns "Can't perform a state update on an
+    // unmounted component" in dev. We use the same mountedRef pattern
+    // as useGodotMCPStatus.
+    if (!mountedRef.current) return;
     setMcpStatuses(statuses);
   }, [data.projects]);
+
+  // Track mounted state so an in-flight checkMCPHealth doesn't
+  // setState on an unmounted dashboard (e.g. user navigates away
+  // mid-poll). StrictMode dev double-mount + a 10s polling interval
+  // makes this easy to hit.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   // Poll every 10 seconds
   useEffect(() => {

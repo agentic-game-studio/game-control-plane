@@ -16,14 +16,7 @@ import { useCommandRoom } from "@/hooks/useCommandRoom";
 import { ProjectGuard } from "@/components/ProjectGuard";
 import { useProject } from "@/contexts/ProjectContext";
 import { useDialog } from "@/hooks/useDialog";
-import { apiFetch } from "@/lib/api";
-
-interface MCPStatus {
-  status: "not_running" | "connected" | "disconnected";
-  serverRunning?: boolean;
-  godotConnected?: boolean;
-  error?: string;
-}
+import { useGodotMCPStatus } from "@/hooks/useGodotMCPStatus";
 
 export default function ChatPage() {
   return (
@@ -35,7 +28,16 @@ export default function ChatPage() {
 
 function ChatPageInner() {
   const { currentProject } = useProject();
-  const [mcpStatus, setMcpStatus] = useState<MCPStatus | null>(null);
+  // 14-FH3-mcp-poll-consolidation: reuse useGodotMCPStatus hook
+  // instead of inlining the same fetch+interval+mountedRef logic.
+  // The hook already handles the projectId race (capture-on-request
+  // + mountedRef guard) and unmount cleanup; the inline version was
+  // missing the projectId snapshot and could show projectA's status
+  // under projectB's name briefly after a project switch.
+  const { status: mcpStatus } = useGodotMCPStatus(
+    currentProject?.id ?? null,
+    (currentProject?.engine as "godot" | null) ?? null,
+  );
   const [selectedSubagentId, setSelectedSubagentId] = useState<string | null>(null);
   const [focusMode, setFocusMode] = useState<boolean>(() => {
     if (typeof window === "undefined") return true;
@@ -65,32 +67,6 @@ function ChatPageInner() {
       };
     }
   }, [currentProject?.id]);
-
-  // Poll MCP health for Godot projects
-  useEffect(() => {
-    if (!currentProject?.id || currentProject?.engine !== "godot") {
-      setMcpStatus(null);
-      return;
-    }
-
-    const checkHealth = async () => {
-      try {
-        const result = await apiFetch<{ success: boolean; data: MCPStatus }>(
-          `/api/dashboard/projects/${currentProject.id}/mcp-health`
-        );
-        setMcpStatus(result.data);
-      } catch (err) {
-        // Backend restarts or local network hiccups should degrade gracefully
-        // without surfacing a noisy dev-overlay error for the chat page.
-        setMcpStatus({ status: "disconnected", error: err instanceof Error ? err.message : "Failed to check" });
-      }
-    };
-
-    // Initial check
-    checkHealth();
-    const interval = setInterval(checkHealth, 10000);
-    return () => clearInterval(interval);
-  }, [currentProject?.id, currentProject?.engine]);
 
   const {
     sessions,

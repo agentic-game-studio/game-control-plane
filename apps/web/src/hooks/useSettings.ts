@@ -1,8 +1,9 @@
 "use client";
 import { createLogger } from "../lib/logger";
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback } from "react";
 import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "./useWebSocket";
+import { useAbortableEffect } from "./useAbortableEffect";
 import {
   DEFAULT_SETTINGS,
   type SettingsConfig,
@@ -16,35 +17,27 @@ export function useSettings() {
   const [data, setData] = useState<SettingsConfig>(DEFAULT_SETTINGS);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const mountedRef = useRef(true);
 
-  const fetchSettings = useCallback(async () => {
+  const fetchSettings = useCallback(async (signal?: AbortSignal) => {
     try {
-      const result = await apiFetch<SettingsConfig>("/api/settings");
-      if (!mountedRef.current) return;
+      const result = await apiFetch<SettingsConfig>("/api/settings", { signal });
       setData(result);
       setError(null);
     } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
       logger.error("Failed to fetch settings", { err: err });
-      if (!mountedRef.current) return;
       setError(err instanceof Error ? err.message : "Failed to load settings");
       setData(DEFAULT_SETTINGS);
-    } finally {
-      if (mountedRef.current) {
-        setLoading(false);
-      }
     }
   }, []);
 
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    fetchSettings();
+  // 14-FH10-unmount-cancel
+  useAbortableEffect(async (signal) => {
+    try {
+      await fetchSettings(signal);
+    } finally {
+      setLoading(false);
+    }
   }, [fetchSettings]);
 
   const onWSEvent = useCallback(
@@ -114,7 +107,7 @@ export function useSettings() {
 
   const retry = useCallback(() => {
     setLoading(true);
-    fetchSettings();
+    void fetchSettings();
   }, [fetchSettings]);
 
   return {

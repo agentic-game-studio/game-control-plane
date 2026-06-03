@@ -3,6 +3,7 @@ import { createLogger } from "../lib/logger";
 import { useState, useCallback, useEffect, useRef } from "react";
 import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "./useWebSocket";
+import { useAbortableEffect } from "./useAbortableEffect";
 import type {
   AssetsData,
   GameAsset,
@@ -78,14 +79,25 @@ export function useAssets(projectId?: string) {
     fetchAssets();
   }, [fetchAssets]);
 
-  // Auto-refresh when projectId changes
-  useEffect(() => {
-    if (lastProjectId.current !== projectId) {
-      lastProjectId.current = projectId;
-      setLoading(true);
-      fetchAssets();
+  // 14-FH10-unmount-cancel: separate useAbortableEffect for the
+  // initial fetch so unmount cancels the request. The previous
+  // useEffect+mountedRef pattern worked but kept the request in
+  // flight for up to 30s. rescan() and the WS-driven fetchAssets
+  // stay as-is since they're user- or event-triggered.
+  useAbortableEffect(async (signal) => {
+    const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+    try {
+      const result = await apiFetch<AssetsData>(`/api/assets${qs}`, { signal });
+      setData(result);
+      setError(null);
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      setError(err instanceof Error ? err.message : "Failed to load assets");
+      setData(DEFAULT_ASSETS);
+    } finally {
+      setLoading(false);
     }
-  }, [projectId, fetchAssets]);
+  }, [projectId]);
 
   const onWSEvent = useCallback(
     (event: WSEvent) => {

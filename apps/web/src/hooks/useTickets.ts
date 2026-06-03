@@ -3,6 +3,7 @@ import { createLogger } from "../lib/logger";
 import { useState, useCallback, useEffect, useRef } from "react";
 import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "./useWebSocket";
+import { useAbortableEffect } from "./useAbortableEffect";
 import { useProject } from "@/contexts/ProjectContext";
 import type {
   TicketsBoard,
@@ -30,29 +31,28 @@ export function useTickets() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const mountedRef = useRef(true);
 
-  const fetchTickets = useCallback(async () => {
+  const fetchTickets = useCallback(async (signal?: AbortSignal) => {
     try {
       const query = currentProjectId ? `?projectId=${encodeURIComponent(currentProjectId)}` : "";
-      const result = await apiFetch<TicketsBoard>(`/api/tickets${query}`);
-      if (!mountedRef.current) return;
+      const result = await apiFetch<TicketsBoard>(`/api/tickets${query}`, { signal });
       setData(result);
       setError(null);
     } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
       logger.error("Failed to fetch tickets", { err: err });
-      if (!mountedRef.current) return;
       setError(err instanceof Error ? err.message : "Failed to load quest board");
       setData(DEFAULT_BOARD);
-    } finally {
-      if (mountedRef.current) {
-        setLoading(false);
-      }
     }
   }, [currentProjectId]);
 
-  useEffect(() => {
-    fetchTickets();
+  // 14-FH10-unmount-cancel
+  useAbortableEffect(async (signal) => {
+    try {
+      await fetchTickets(signal);
+    } finally {
+      setLoading(false);
+    }
   }, [fetchTickets]);
 
   const onWSEvent = useCallback(
@@ -76,7 +76,7 @@ export function useTickets() {
         }
         if (debounceRef.current) clearTimeout(debounceRef.current);
         debounceRef.current = setTimeout(() => {
-          fetchTickets();
+          void fetchTickets();
         }, 300);
       }
     },
@@ -86,9 +86,7 @@ export function useTickets() {
   useWebSocket(onWSEvent);
 
   useEffect(() => {
-    mountedRef.current = true;
     return () => {
-      mountedRef.current = false;
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
   }, []);
@@ -109,7 +107,7 @@ export function useTickets() {
 
   const retry = useCallback(() => {
     setLoading(true);
-    fetchTickets();
+    void fetchTickets();
   }, [fetchTickets]);
 
   return {

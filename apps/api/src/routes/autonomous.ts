@@ -739,13 +739,17 @@ async function producerSprintReplan(
   }
 }
 
-async function moveTicket(projectId: string, ticketId: string, status: string): Promise<void> {
-  // Route the read-modify-write through updateTicketsBoard so the per-board
-  // mutex serializes concurrent moves (the autonomous loop + quest-bridge +
-  // a manual drag in the UI can all hit the same board at the same time).
-  // Without the lock, two concurrent moves can both read the same board,
-  // each splice the ticket out of its own copy, and the second write
-  // silently re-inserts a stale copy of the ticket.
+async function moveTicket(projectId: string, ticketId: string, status: string): Promise<Ticket | null> {
+  // 14-H2-move-ticket-toctou: returns the post-move ticket (or null if
+  // not found) so callers don't need a second readTicketsBoard() that
+  // would race against any other writer that touches the board between
+  // this move and the re-read. Previously the loop did
+  //   await moveTicket(...); const qaTicket = (await readTicketsBoard(...)).columns...
+  // and a concurrent UI drag (or another autonomous iteration) could
+  // move/remove the ticket in the gap, so triggerVerification() was
+  // silently skipped. Now the post-move snapshot is captured under the
+  // same mutex as the move itself.
+  let moved: Ticket | null = null;
   await updateTicketsBoard(projectId, (data) => {
     for (const column of data.columns) {
       const idx = column.tickets.findIndex((t) => t.id === ticketId);
@@ -754,13 +758,16 @@ async function moveTicket(projectId: string, ticketId: string, status: string): 
         column.tickets.splice(idx, 1);
         const destCol = data.columns.find((c) => c.id === status);
         if (destCol) {
-          destCol.tickets.push({ ...ticket, status: status as Ticket["status"], updatedAt: new Date().toISOString() });
+          const updated: Ticket = { ...ticket, status: status as Ticket["status"], updatedAt: new Date().toISOString() };
+          destCol.tickets.push(updated);
+          moved = updated;
         }
         return data;
       }
     }
     return data;
   });
+  return moved;
 }
 
 async function getProjectContext(projectId: string): Promise<ProjectContext | undefined> {
@@ -1011,12 +1018,11 @@ async function runIteration(state: LoopState, board: TicketsBoard, projectContex
     state.lastError = combinedError;
     state.lastHeartbeat = new Date().toISOString();
 
-    // Route to QA for code reviewer + LLM verification
-    await moveTicket(state.projectId, activeTicket.id, "qa");
-
-    const qaTicket = (await readTicketsBoard(state.projectId)).columns
-      .flatMap((c) => c.tickets)
-      .find((t) => t.id === activeTicket.id);
+    // Route to QA for code reviewer + LLM verification. moveTicket
+    // now returns the post-move snapshot under the same mutex, so we
+    // don't need a second readTicketsBoard() that would race against
+    // any other writer.
+    const qaTicket = await moveTicket(state.projectId, activeTicket.id, "qa");
     if (qaTicket) {
       triggerVerification({ ...qaTicket, sessionId: state.sessionId }, combinedError);
     }
@@ -1450,6 +1456,25 @@ autonomousRouter.post("/start", async (req: Request, res: Response) => {
     let done = false;
 
     debugLog(`batch ${state.sessionId}] starting while loop`);
+    // 14-H-autonomous-heartbeat: tick the heartbeat every 60s while the
+    // loop is running, so an in-flight 20-min invokeAgent doesn't
+    // appear stale to recoverStaleLoopStates() on API restart. Without
+    // this, an API restart during a long iteration would mark the
+    // session "idle", but the in-flight LLM call would still complete
+    // and write its locally-buffered state with status="running" —
+    // racing against a fresh /start that picked up the recovered idle
+    // session. The 60s interval is well under the 5-min stale
+    // threshold (STALE_LOOP_HEARTBEAT_MS) and saves happen on the
+    // same file as runIteration's own updates.
+    const heartbeatTimer = setInterval(() => {
+      void saveLoopState({ ...currentState, lastHeartbeat: new Date().toISOString() }).catch((err) => {
+        logger.warn(
+          { sessionId: state.sessionId, err: err instanceof Error ? err.message : String(err), event: "autonomous_heartbeat_failed" },
+          "Periodic heartbeat save failed",
+        );
+      });
+    }, 60_000);
+    heartbeatTimer.unref?.();
     while (!done && currentState.status === "running" && !loopAbort.signal.aborted) {
       try {
         debugLog(`batch ${state.sessionId}] calling runIteration`);
@@ -1486,6 +1511,11 @@ autonomousRouter.post("/start", async (req: Request, res: Response) => {
         });
       }
     }
+    // Stop the 60s heartbeat now that the loop has exited (normal,
+    // error, or abort). Without this, the interval keeps firing in
+    // the background until process exit and writes stale
+    // lastHeartbeat values for already-finished sessions.
+    clearInterval(heartbeatTimer);
 
     if (currentState.status === "running") {
       currentState.status = done ? "done" : "idle";

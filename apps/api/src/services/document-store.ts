@@ -120,6 +120,16 @@ export class DocumentStore {
   private cache: Map<string, DocumentEntry> | null = null;
   private watcher: fsp.FSWatcher | null = null;
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  // 14-H3-scan-files-race: while scanFiles() is in flight, cache the
+  // promise so a burst of concurrent first-time callers (e.g. a wiki
+  // page load that fans out to listAll / getAllCategories /
+  // getGraph concurrently, plus an SSE-triggered reload) doesn't all
+  // re-scan the workspace independently. The losing scans used to
+  // throw their work away after also having walked every CATEGORY_DIR
+  // twice — wasteful and racy on the cache mutation. setCache()
+  // overwrites this.cache on resolution; the last writer wins, but
+  // the data is identical so it's safe.
+  private scanPromise: Promise<Map<string, DocumentEntry>> | null = null;
 
   constructor(workspaceDir: string) {
     this.workspaceDir = workspaceDir;
@@ -217,10 +227,23 @@ export class DocumentStore {
 
   /** Ensure cache is populated */
   private async ensureCache(): Promise<Map<string, DocumentEntry>> {
-    if (!this.cache) {
-      this.cache = await this.scanFiles();
+    if (this.cache) return this.cache;
+    if (!this.scanPromise) {
+      // 14-H3-scan-files-race: coalesce concurrent first-time scans.
+      // On error, clear the in-flight promise so the next caller
+      // retries from scratch — otherwise a transient readdir failure
+      // (e.g. workspace dir briefly missing during a rename) would
+      // poison all future ensureCache() calls.
+      this.scanPromise = this.scanFiles()
+        .then((docs) => {
+          this.cache = docs;
+          return docs;
+        })
+        .finally(() => {
+          this.scanPromise = null;
+        });
     }
-    return this.cache;
+    return this.scanPromise;
   }
 
   /** List all documents */

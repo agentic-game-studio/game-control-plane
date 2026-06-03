@@ -1,8 +1,9 @@
 "use client";
 import { createLogger } from "../lib/logger";
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback } from "react";
 import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "./useWebSocket";
+import { useAbortableEffect } from "./useAbortableEffect";
 import type { SkillName } from "@game-studio/types";
 import type { WSEvent } from "@game-studio/types";
 const logger = createLogger("useSkills");
@@ -20,40 +21,33 @@ export function useSkills(): UseSkillsReturn {
   const [skills, setSkills] = useState<SkillName[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const mountedRef = useRef(true);
 
-  const fetchSkills = useCallback(async () => {
+  const fetchSkills = useCallback(async (signal?: AbortSignal) => {
     try {
-      const result = await apiFetch<SkillName[]>("/api/skills");
-      if (!mountedRef.current) return;
+      const result = await apiFetch<SkillName[]>("/api/skills", { signal });
       setSkills(result);
       setError(null);
     } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
       logger.error("Failed to fetch skills", { err: err });
-      if (!mountedRef.current) return;
       setError(err instanceof Error ? err.message : "Failed to load skills");
-    } finally {
-      if (mountedRef.current) {
-        setLoading(false);
-      }
     }
   }, []);
 
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    fetchSkills();
+  // 14-FH10-unmount-cancel: same AbortController pattern as the
+  // other data hooks.
+  useAbortableEffect(async (signal) => {
+    try {
+      await fetchSkills(signal);
+    } finally {
+      setLoading(false);
+    }
   }, [fetchSkills]);
 
   const onWSEvent = useCallback(
     (event: WSEvent) => {
       if (event.type === "checkpoint:saved") {
-        fetchSkills();
+        void fetchSkills();
       }
     },
     [fetchSkills]
@@ -80,7 +74,7 @@ export function useSkills(): UseSkillsReturn {
 
   const retry = useCallback(() => {
     setLoading(true);
-    fetchSkills();
+    void fetchSkills();
   }, [fetchSkills]);
 
   return { skills, loading, error, retry, getSkill, invokeSkill };

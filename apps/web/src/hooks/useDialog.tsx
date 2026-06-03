@@ -1,6 +1,6 @@
 "use client";
 import { createLogger } from "../lib/logger";
-import { createContext, useCallback, useContext, useMemo, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 /**
  * Promise-based dialog API.
  *
@@ -90,6 +90,49 @@ export function DialogProvider({ children }: { children: React.ReactNode }) {
     currentRef.current = next;
     setCurrent(next);
   }, []);
+
+  // 14-FH2-use-dialog-a11y: Escape dismisses (confirm = false, alert =
+  // true), and the previously-focused element is restored on close so
+  // keyboard users return to where they were. Capture the trigger
+  // element when a dialog opens (the autoFocus button steals focus);
+  // restore it after the dialog unmounts.
+  const previouslyFocusedRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (!current) return;
+    // Snapshot the active element when the dialog opens. We capture
+    // in an effect (not in `enqueue`) so it runs after React has
+    // committed and the autoFocus button has stolen focus.
+    const prev = (typeof document !== "undefined"
+      ? (document.activeElement as HTMLElement | null)
+      : null);
+    previouslyFocusedRef.current = prev;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (currentRef.current === null) return; // ignore stale events
+      e.stopPropagation();
+      // For confirm: Escape = Cancel. For alert: Escape = OK.
+      close(currentRef.current.kind === "alert");
+    };
+    document.addEventListener("keydown", onKeyDown);
+    const prevOverflow = typeof document !== "undefined" ? document.body.style.overflow : "";
+    if (typeof document !== "undefined") {
+      document.body.style.overflow = "hidden";
+    }
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      if (typeof document !== "undefined") {
+        document.body.style.overflow = prevOverflow;
+        // Restore focus to the trigger. Guard with isConnected in case
+        // the element was unmounted while the dialog was open (e.g.
+        // the parent route changed mid-confirm).
+        const target = previouslyFocusedRef.current;
+        if (target && typeof target.isConnected !== "boolean" || target?.isConnected) {
+          target?.focus();
+        }
+        previouslyFocusedRef.current = null;
+      }
+    };
+  }, [current, close]);
 
   const value = useMemo(() => ({ confirm, alert }), [confirm, alert]);
 

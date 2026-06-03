@@ -3,6 +3,7 @@ import { createLogger } from "../lib/logger";
 import { useState, useCallback, useEffect, useRef } from "react";
 import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "./useWebSocket";
+import { useAbortableEffect } from "./useAbortableEffect";
 import {
   DEFAULT_DATA,
   type DashboardData,
@@ -19,32 +20,36 @@ export function useDashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const mountedRef = useRef(true);
 
-  const fetchDashboard = useCallback(async () => {
+  // 14-FH10-unmount-cancel: pass the AbortSignal into the initial
+  // fetch so an unmount cancels the request. The previous
+  // mountedRef dance still worked but left a 30s timeout in flight
+  // and a queued setState that just got dropped.
+  useAbortableEffect(async (signal) => {
     try {
-      const result = await apiFetch<DashboardData>("/api/dashboard");
-      if (!mountedRef.current) return;
+      const result = await apiFetch<DashboardData>("/api/dashboard", { signal });
       setData(result);
       setError(null);
     } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
       logger.error("Failed to fetch dashboard", { err: err });
-      if (!mountedRef.current) return;
       setError(err instanceof Error ? err.message : "Failed to load dashboard");
-      // Preserve the previous data on a transient fetch failure — wiping it
-      // to DEFAULT_DATA hides already-loaded projects/activity on every
-      // momentary backend hiccup. The initial load (when `data === DEFAULT_DATA`)
-      // is the only case where we want to leave an empty state.
     } finally {
-      if (mountedRef.current) {
-        setLoading(false);
-      }
+      setLoading(false);
     }
   }, []);
 
-  useEffect(() => {
-    fetchDashboard();
-  }, [fetchDashboard]);
+  const fetchDashboard = useCallback(async (signal?: AbortSignal) => {
+    try {
+      const result = await apiFetch<DashboardData>("/api/dashboard", { signal });
+      setData(result);
+      setError(null);
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      logger.error("Failed to fetch dashboard", { err: err });
+      setError(err instanceof Error ? err.message : "Failed to load dashboard");
+    }
+  }, []);
 
   const onWSEvent = useCallback(
     (event: WSEvent) => {
@@ -55,7 +60,10 @@ export function useDashboard() {
       ) {
         if (debounceRef.current) clearTimeout(debounceRef.current);
         debounceRef.current = setTimeout(() => {
-          fetchDashboard();
+          // Pass an AbortController so a subsequent debounce can
+          // cancel the previous one.
+          const controller = new AbortController();
+          void fetchDashboard(controller.signal);
         }, 300);
       }
     },
@@ -65,9 +73,7 @@ export function useDashboard() {
   useWebSocket(onWSEvent);
 
   useEffect(() => {
-    mountedRef.current = true;
     return () => {
-      mountedRef.current = false;
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
   }, []);
@@ -118,7 +124,7 @@ export function useDashboard() {
 
   const retry = useCallback(() => {
     setLoading(true);
-    fetchDashboard();
+    void fetchDashboard();
   }, [fetchDashboard]);
 
   return {

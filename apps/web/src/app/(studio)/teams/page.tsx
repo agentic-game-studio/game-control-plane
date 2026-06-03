@@ -1,6 +1,6 @@
 "use client";
 import { createLogger } from "../../../lib/logger";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { apiFetch } from "@/lib/api";
 import { useDialog } from "@/hooks/useDialog";
 const logger = createLogger("page");
@@ -82,6 +82,44 @@ export default function TeamsPage() {
   }, []);
 
   const { alert: showAlert } = useDialog();
+
+  // 14-FH1-team-modal-a11y: dialog refs and Escape-key handling.
+  // selectedTeamIdRef decouples the keydown listener (which closes
+  // via setSelectedTeam) from the effect's dependency on selectedTeam.
+  // Re-binding the listener on every selection would tear down and
+  // re-add a global listener for each open/close cycle; using a ref
+  // keeps a single stable listener.
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+  const selectedTeamIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    selectedTeamIdRef.current = selectedTeam?.name ?? null;
+  }, [selectedTeam]);
+
+  const closeTeamModal = useCallback(() => setSelectedTeam(null), []);
+
+  useEffect(() => {
+    if (!selectedTeam) return;
+    // Focus the close button on open so Tab/Shift+Tab cycles inside
+    // the dialog, and Escape dismisses.
+    closeButtonRef.current?.focus();
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      // Only act on the active modal — guard against stale events
+      // after a second modal opens.
+      if (selectedTeamIdRef.current === null) return;
+      e.stopPropagation();
+      closeTeamModal();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    // Lock background scroll while modal is open.
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [selectedTeam, closeTeamModal]);
 
   const handleRunTeam = async (team: TeamSkill) => {
     if (!sessionId) {
@@ -205,6 +243,10 @@ export default function TeamsPage() {
           onClick={() => setSelectedTeam(null)}
         >
           <div
+            ref={dialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="team-modal-title"
             className="bg-white border-2 border-black w-full max-w-3xl max-h-[85vh] overflow-y-auto shadow-[8px_8px_0_0_rgba(0,0,0,1)]"
             onClick={(e) => e.stopPropagation()}
           >
@@ -215,12 +257,17 @@ export default function TeamsPage() {
                     {TEAM_ICONS[selectedTeam.name] || "groups"}
                   </span>
                 </div>
-                <h2 className="font-[var(--font-terminal)] text-xl font-bold uppercase">
+                <h2
+                  id="team-modal-title"
+                  className="font-[var(--font-terminal)] text-xl font-bold uppercase"
+                >
                   {selectedTeam.name.replace(/-/g, " ")}
                 </h2>
               </div>
               <button
-                onClick={() => setSelectedTeam(null)}
+                ref={closeButtonRef}
+                onClick={closeTeamModal}
+                aria-label="Close team details"
                 className="w-8 h-8 flex items-center justify-center border-2 border-black hover:bg-black hover:text-white transition-colors"
               >
                 ×

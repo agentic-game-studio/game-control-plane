@@ -108,6 +108,12 @@ const ActivityLog = memo(function ActivityLog({ toolCalls, logs, defaultExpanded
       {/* Header bar */}
       <button
         onClick={() => setExpanded((e) => !e)}
+        aria-expanded={expanded}
+        // 14-FH6-activity-aria: aria-expanded announces collapsed/
+        // expanded state to screen readers (matches the WAI-ARIA
+        // disclosure pattern). aria-controls wires the button to the
+        // region it toggles so SR users can navigate to the content.
+        aria-controls="activity-log-panel"
         className="w-full px-3 py-1.5 bg-black flex items-center gap-2 hover:bg-[#191b25] transition-colors"
       >
         <span className="material-symbols-outlined text-white text-sm">
@@ -123,7 +129,7 @@ const ActivityLog = memo(function ActivityLog({ toolCalls, logs, defaultExpanded
 
       {/* Collapsed: show 3 latest entries */}
       {!expanded && previewEntries.length > 0 && (
-        <div className="divide-y divide-[#e1e1ef]">
+        <div id="activity-log-panel" className="divide-y divide-[#e1e1ef]">
           {previewEntries.map((entry, i) => (
             <div key={i} className="flex items-center gap-2 px-3 py-1.5 min-w-0">
               {entry.kind === "tool" ? (
@@ -156,7 +162,7 @@ const ActivityLog = memo(function ActivityLog({ toolCalls, logs, defaultExpanded
 
       {/* Expanded: all entries in reverse order (newest first) */}
       {expanded && (
-        <div className="divide-y divide-[#e1e1ef]">
+        <div id="activity-log-panel" className="divide-y divide-[#e1e1ef]">
           {entries.map((entry, i) =>
             entry.kind === "tool" ? (
               <div key={i} className="flex items-center gap-2 px-3 py-1.5 min-w-0">

@@ -1,6 +1,6 @@
 "use client";
 import { createLogger } from "../../../lib/logger";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { apiFetch } from "@/lib/api";
 import { useDialog } from "@/hooks/useDialog";
 const logger = createLogger("page");
@@ -46,6 +46,19 @@ export default function SkillsPage() {
   const [selectedSkill, setSelectedSkill] = useState<Skill | null>(null);
   const [invoking, setInvoking] = useState(false);
   const [invokeSuccess, setInvokeSuccess] = useState(false);
+  // 14-FH5-toast-cleanup: same pattern as agents/page.tsx — track
+  // the auto-dismiss timer so unmount or a quick re-invoke doesn't
+  // leak a setState call onto a dead component or race two timers
+  // against the same success state.
+  const invokeSuccessTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    return () => {
+      if (invokeSuccessTimerRef.current) {
+        clearTimeout(invokeSuccessTimerRef.current);
+        invokeSuccessTimerRef.current = null;
+      }
+    };
+  }, []);
   const [sessionId, setSessionId] = useState("");
   const [activeTab, setActiveTab] = useState<"all" | "team" | "solo">("all");
 
@@ -139,7 +152,13 @@ export default function SkillsPage() {
         body: JSON.stringify({ sessionId, reviewMode: "lean" }),
       });
       setInvokeSuccess(true);
-      setTimeout(() => setInvokeSuccess(false), 3000);
+      if (invokeSuccessTimerRef.current) {
+        clearTimeout(invokeSuccessTimerRef.current);
+      }
+      invokeSuccessTimerRef.current = setTimeout(() => {
+        setInvokeSuccess(false);
+        invokeSuccessTimerRef.current = null;
+      }, 3000);
     } catch (error) {
       logger.error("Failed to invoke skill", { err: error });
       await showAlert(`Failed to invoke skill: ${error}`);

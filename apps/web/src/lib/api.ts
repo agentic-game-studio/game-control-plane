@@ -13,8 +13,22 @@ const API_KEY = process.env.NEXT_PUBLIC_API_KEY ?? "";
 const DEFAULT_TIMEOUT_MS = 30_000;
 
 export async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
+  // 14-FH10-caller-abort: if the caller passed their own
+  // AbortSignal (typical pattern in useEffect cleanup so an
+  // unmount cancels the in-flight fetch), combine it with our
+  // timeout controller. EITHER signal aborting cancels the
+  // request, so callers can compose their own unmount-cleanup
+  // signal with our 30s safety net.
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+  const onCallerAbort = () => controller.abort();
+  if (options?.signal) {
+    if (options.signal.aborted) {
+      controller.abort();
+    } else {
+      options.signal.addEventListener("abort", onCallerAbort, { once: true });
+    }
+  }
   try {
     const res = await fetch(`${API_BASE}${path}`, {
       ...options,
@@ -43,10 +57,18 @@ export async function apiFetch<T>(path: string, options?: RequestInit): Promise<
     return json.data as T;
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") {
+      // Distinguish caller-initiated abort (unmount, deps change)
+      // from timeout so the caller can ignore the former silently.
+      if (options?.signal?.aborted) {
+        throw new DOMException("Aborted", "AbortError");
+      }
       throw new Error(`API request timed out after ${DEFAULT_TIMEOUT_MS}ms (${path})`);
     }
     throw err;
   } finally {
     clearTimeout(timeout);
+    if (options?.signal) {
+      options.signal.removeEventListener("abort", onCallerAbort);
+    }
   }
 }
