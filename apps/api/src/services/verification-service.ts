@@ -391,7 +391,15 @@ export async function verifyTicket(
           (ticket.assignee as AgentRole) ?? "godot-specialist",
           `Verification ${verdict}: ${result.content.slice(0, 2000)}`,
         ).catch((err) => {
-          logger.warn({ ticketId: ticket.id, error: err instanceof Error ? err.message : String(err) }, "createFixTicket failed");
+          // 19-L-log-event: add the `event` discriminator that
+          // every other warn call in this file already carries
+          // (verify_no_verifier, verify_failed, verify_timeout,
+          // etc.) so a 404 / 500 triage can grep by event name
+          // without matching on the human-readable message.
+          logger.warn(
+            { ticketId: ticket.id, error: err instanceof Error ? err.message : String(err), event: "create_fix_ticket_failed" },
+            "createFixTicket failed",
+          );
         });
       }
     }

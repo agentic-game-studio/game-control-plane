@@ -1208,7 +1208,15 @@ chatRouter.post("/sessions/:id/compact", async (req: Request, res: Response) => 
     const session = chatStore.sessions[id];
 
     if (!session) {
-      logger.warn({ requestedId: id, availableIds: Object.keys(chatStore.sessions).slice(0, 10) }, "Compact: session not found");
+      // 19-L-log-event: include an `event` discriminator for
+      // greppability in the structured log stream. Every other warn
+      // call in this file (compact_lock_cap_hit, spawn_failed, etc.)
+      // carries an event field; this one didn't, so an operator
+      // triaging 404s had to pattern-match on the message text.
+      logger.warn(
+        { requestedId: id, availableIds: Object.keys(chatStore.sessions).slice(0, 10), event: "compact_session_not_found" },
+        "Compact: session not found",
+      );
       res.status(404).json({ error: "Session not found" });
       return;
     }

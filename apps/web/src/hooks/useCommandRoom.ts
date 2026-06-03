@@ -2043,11 +2043,23 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
           const sess = sessionsRef.current;
           const subs = subagentsRef.current;
           let tree = "Agent Hierarchy\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n";
-          const producer = [...sess.values()].find((s) => isProducerSession(s.role));
+          // 19-L-tree-singlepass: partition the sessions map into
+          // producer + delegated agents in one iteration. The previous
+          // shape did two `[...sess.values()]` spreads (one for `.find`,
+          // one for `.filter`) — each spread allocates a fresh array of
+          // every session in the map and runs the predicate per element.
+          // On a /tree command with 50 active sessions that's 100
+          // predicate calls + 2 array allocations to produce 2 results.
+          // Walk the map once and bucket by session id.
+          let producer: AgentSession | undefined;
+          const agents: AgentSession[] = [];
+          for (const [id, s] of sess) {
+            if (isProducerSession(id)) producer = s;
+            else agents.push(s);
+          }
           if (producer) {
             tree += `📋 ${producer.role.toUpperCase()} (${producer.status})\n`;
           }
-          const agents = [...sess.values()].filter((s) => !isProducerSession(s.role));
           if (agents.length > 0) {
             tree += "\nActive Sessions:\n";
             for (const a of agents) {
@@ -2637,12 +2649,20 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
   }, [subagents, sessions]);
 
   const producerUIState = useMemo<ProducerUIState>(() => {
-    const activeDelegatedSessions = [...sessions.entries()].filter(
-      ([id, session]) => !isProducerSession(id) && session.status === "active"
-    ).length;
-    const activeDelegatedSubagents = [...visibleSubagents.values()].filter(
-      (subagent) => subagent.status === "active"
-    ).length;
+    // 19-L-count-noalloc: count without materializing a throwaway
+    // array. The previous shape built a full [...entries()] / [...
+    // values()] spread, ran `.filter` over it, then discarded the
+    // array to keep the count. The producer UI panel re-renders on
+    // every WS event, so this work was running dozens of times per
+    // second on a busy session. Just increment a counter.
+    let activeDelegatedSessions = 0;
+    for (const [id, session] of sessions) {
+      if (!isProducerSession(id) && session.status === "active") activeDelegatedSessions++;
+    }
+    let activeDelegatedSubagents = 0;
+    for (const subagent of visibleSubagents.values()) {
+      if (subagent.status === "active") activeDelegatedSubagents++;
+    }
     const producerThinking = currentSession === producerSessionId && isLoading;
 
     if (producerThinking) {
