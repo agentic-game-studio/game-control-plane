@@ -1377,12 +1377,15 @@ autonomousRouter.post("/start", async (req: Request, res: Response) => {
     // 12-C15: defensive handover. If `activeLoopSessions.add` ever
     // throws (frozen Set, OOM, etc.), the pendingStarts entry is
     // already gone but the IIFE will not register. Re-add to
-    // pendingStarts so a subsequent /start can retry, and rethrow
-    // so the outer finally's `!lockHandedOff` branch cleans up too.
-    // Without this re-add, a thrown handover would leave the session
-    // permanently un-startable (no in pendingStarts, no in
-    // activeLoopSessions, persisted state still "running" → /stop
-    // can't find it either).
+    // pendingStarts so a subsequent /start can retry.
+    // 14-CR-autonomous: set lockHandedOff = true BEFORE the re-add
+    // so the outer finally's `if (!lockHandedOff)` branch skips the
+    // pendingStarts.delete. The previous code rethrew without
+    // setting the flag, so the finally ran and undid the re-add —
+    // leaving the session permanently un-startable (no entry in
+    // pendingStarts, no entry in activeLoopSessions, persisted
+    // state still "running" → /stop couldn't find it either).
+    lockHandedOff = true;
     pendingStarts.add(sessionId);
     throw err;
   }

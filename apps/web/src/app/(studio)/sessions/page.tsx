@@ -46,10 +46,19 @@ export default function SessionsPage() {
       loadSessions();
     }
     if (event.type === "log:entry" && selectedSession && event.sessionId === selectedSession.id) {
-      setLogs((prev) => [
-        ...prev,
-        { level: event.level, message: event.message, timestamp: event.timestamp },
-      ]);
+      // 14-CR-unbounded-logs: cap the in-memory log list. A long-running
+      // session that the user opens and walks away from can produce
+      // 10k+ WS log events; setLogs with an unbounded array triggers
+      // an O(n) re-render on every push, and the React state grows
+      // into the multi-MB range. Keep the last 500 — enough context
+      // for a human reader, small enough to render instantly.
+      setLogs((prev) => {
+        const next = [
+          ...prev,
+          { level: event.level, message: event.message, timestamp: event.timestamp },
+        ];
+        return next.length > 500 ? next.slice(next.length - 500) : next;
+      });
     }
   };
 

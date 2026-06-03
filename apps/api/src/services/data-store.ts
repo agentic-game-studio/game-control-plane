@@ -26,14 +26,16 @@ export async function readData<T>(filename: string): Promise<T> {
     // page cache flush. The window is tiny (microseconds) but
     // reproducible under concurrent load — a reader can see the
     // main file mid-rename and get an empty string. Retry up to
-    // twice with a 5ms delay to absorb the race without making
-    // the read path noticeably slower.
+    // twice with a 25ms delay to absorb the race without making
+    // the read path noticeably slower. 14-CR: previous 5ms was
+    // marginal on heavily-loaded CI runners where page-cache
+    // flush + Docker volume propagation can take 10-30ms.
     let attempts = 0;
     while (true) {
       content = await fs.readFile(filePath, "utf-8");
       if (content.length > 0 || attempts >= 2) break;
       attempts++;
-      await new Promise((r) => setTimeout(r, 5));
+      await new Promise((r) => setTimeout(r, 25));
     }
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") {

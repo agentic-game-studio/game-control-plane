@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 import AgentTree from "./components/AgentTree";
 import ChatTabs from "./components/ChatTabs";
-import ChatThread from "./components/ChatThread";
+import ChatThread, { setCurrentProjectIdForMarkdownCache, clearProjectMarkdownCache } from "./components/ChatThread";
 import CommandInput from "./components/CommandInput";
 import QuestionToolbar from "./components/QuestionToolbar";
 import ProgressSummary from "./components/ProgressSummary";
@@ -47,6 +47,24 @@ function ChatPageInner() {
   useEffect(() => {
     window.localStorage.setItem("studio-chat-focus-mode", String(focusMode));
   }, [focusMode]);
+
+  // 14-CR-markdown-cache: keep the markdown render cache bucketed by
+  // the active project so messages from project A don't get rendered
+  // with project B's HTML, and so the per-project Map evicts when the
+  // user navigates away (rather than growing unbounded across the
+  // app's lifetime).
+  useEffect(() => {
+    const nextId = currentProject?.id ?? null;
+    setCurrentProjectIdForMarkdownCache(nextId);
+    if (nextId) {
+      // Drop the *previous* project's cache on switch (if it had one)
+      // to bound memory at ~200 entries × current project. The
+      // current project's cache is reused.
+      return () => {
+        clearProjectMarkdownCache(nextId);
+      };
+    }
+  }, [currentProject?.id]);
 
   // Poll MCP health for Godot projects
   useEffect(() => {

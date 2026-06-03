@@ -401,9 +401,24 @@ const WelcomeMessage = memo(function WelcomeMessage({ msg }: { msg: ChatMessage 
  * promotes to most-recent, write evicts the least-recently-read entry.
  *
  * `currentProjectIdRef` is read at call time so callers don't have to
- * thread the project through every renderMarkdown site. */
+ * thread the project through every renderMarkdown site. The parent
+ * (chat page) sets the ref via setCurrentProjectIdForMarkdownCache()
+ * whenever currentProjectId changes — see useEffect there. */
 const MD_CACHE_LIMIT = 200;
 const mdCaches = new Map<string, Map<string, string>>();
+// 14-CR-markdown-cache: the ref holds the *currently active* project
+// id. Without it, every call site that forgot to pass projectId would
+// bucket into the same `__default__` Map, causing cross-project HTML
+// contamination (a 100KB entry from project A served for project B's
+// message if the markdown bodies happened to collide) and unbounded
+// growth (one map per app session, never reclaimed on project switch).
+let currentProjectIdRef: string | null = null;
+
+/** Update the projectId used to bucket the markdown cache. Call from
+ * a useEffect on currentProjectId change in the chat page. */
+export function setCurrentProjectIdForMarkdownCache(projectId: string | null): void {
+  currentProjectIdRef = projectId;
+}
 
 function getMdCache(projectId: string | null): Map<string, string> {
   const key = projectId ?? "__default__";
@@ -416,7 +431,12 @@ function getMdCache(projectId: string | null): Map<string, string> {
 }
 
 function cachedRenderMarkdown(content: string, projectId?: string | null): string {
-  const cache = getMdCache(projectId ?? null);
+  // 14-CR-markdown-cache: prefer the explicit arg, fall back to the
+  // ref (so legacy call sites that didn't pass projectId still bucket
+  // correctly), fall back to `__default__`. The ref path is what
+  // fixes the cross-project contamination.
+  const effectiveProjectId = projectId ?? currentProjectIdRef;
+  const cache = getMdCache(effectiveProjectId);
   const cached = cache.get(content);
   if (cached !== undefined) {
     // LRU: re-insert to mark as most-recently-used.

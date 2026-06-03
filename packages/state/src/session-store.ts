@@ -165,11 +165,18 @@ export class SessionStore {
     // outside the lock; the lock was only cleared after the file was
     // already gone, so a contender could pass `await prev`, then
     // see a missing file and write a stale .tmp that never promotes).
+    // 14-CR-session-store: withSessionLock's `finally` already
+    // removes the entry when the current lock is the tail (line 27
+    // reference equality check). Adding a second `sessionLocks.delete`
+    // here races with a concurrent caller that has just installed a
+    // new lock between release() and this line — that out-of-band
+    // delete would clobber the new lock's entry, leaving the new
+    // caller waiting on `await prev` (a resolved promise) forever
+    // inside withSessionLock. Don't double-clean.
     await withSessionLock(sessionId, async () => {
       await fs.rm(this.sessionPath(sessionId), { force: true });
       await fs.rm(this.checkpointDir(sessionId), { recursive: true, force: true });
     });
-    sessionLocks.delete(sessionId);
   }
 
   /** Clean up session files older than maxAgeMs. Returns number of sessions removed. */

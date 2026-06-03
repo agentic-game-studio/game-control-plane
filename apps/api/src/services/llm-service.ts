@@ -46,7 +46,7 @@ import { resolveProjectWorkspace } from "../utils/workspace.js";
 import { getAgentSystemPrompt, loadAgentPrompts } from "../prompts/agent-prompt-loader.js";
 import { callLLMWithTools, GAME_STUDIO_TOOLS, type LLMMessage, type ProgressCallback, type FileOperationCallback } from "../llm/zai-client.js";
 import { broadcast, broadcastSessionUpdate } from "./websocket.js";
-import { readData, writeData, broadcastEvent } from "./data-store.js";
+import { readData, writeData, updateData, broadcastEvent } from "./data-store.js";
 import { getModelForTier } from "../config/model-mapping.js";
 import type { WSEvent, AgentRole, GameAsset, AssetsData, AssetGenerationMeta } from "@game-studio/types";
 import {
@@ -940,12 +940,17 @@ async function executeTool(
             const entries = isBatch ? manifest : manifest.length > 0 ? [manifest[manifest.length - 1]] : [];
 
             if (entries.length > 0) {
-              const data = await readData<AssetsData>("assets.json");
-              const existingIds = new Set(data.assets.map((a: GameAsset) => a.id));
+              // 14-CR-llm-assets: route the manifest→inventory write
+              // through updateData so the per-file mutex serializes
+              // concurrent asset registrations. The previous
+              // readData+writeData pair was lock-free, so a parallel
+              // RunAssetPipeline call (the autonomous loop spawns
+              // multiple concurrently) could see the same baseline,
+              // each push its own entries, and last-writer-wins drop
+              // the earlier batch.
               const registered: string[] = [];
-
+              const newAssets: GameAsset[] = [];
               for (const entry of entries) {
-                if (existingIds.has(entry.id as string)) continue;
                 const newAsset: GameAsset = {
                   id: entry.id as string,
                   filename: entry.filename as string,
@@ -960,20 +965,32 @@ async function executeTool(
                   createdAt: entry.createdAt as string,
                   updatedAt: entry.updatedAt as string,
                 };
-                data.assets.push(newAsset);
-                existingIds.add(newAsset.id);
-                registered.push(newAsset.filename);
+                newAssets.push(newAsset);
+              }
+
+              await updateData<AssetsData>("assets.json", (data) => {
+                const existingIds = new Set(data.assets.map((a) => a.id));
+                for (const newAsset of newAssets) {
+                  if (existingIds.has(newAsset.id)) continue;
+                  data.assets.push(newAsset);
+                  existingIds.add(newAsset.id);
+                  registered.push(newAsset.filename);
+                }
+                return data;
+              });
+
+              for (const newAsset of newAssets) {
                 // 10-L5: forward the projectId so the studio hook can
                 // filter out events for projects it isn't viewing.
+                if (!registered.includes(newAsset.filename)) continue;
                 broadcastEvent({ type: "asset:created", asset: newAsset, projectId: projectContext?.projectId ?? null } as WSEvent);
                 broadcastEvent({ type: "asset:generated", asset: newAsset, projectId: projectContext?.projectId ?? null } as WSEvent);
               }
 
               if (registered.length > 0) {
-                await writeData("assets.json", data);
                 manifestInfo = isBatch
                   ? `\nBatch generated ${registered.length} assets: ${registered.join(", ")}`
-                  : `\nGenerated: ${registered[0]} (${entries[0].type}/${entries[0].category})\nPath: ${entries[0].path}`;
+                  : `\nGenerated: ${newAssets[0].filename} (${entries[0].type}/${entries[0].category})\nPath: ${entries[0].path}`;
                 manifestInfo += "\nRegistered in asset inventory with full generation metadata.";
               }
             }
@@ -1133,7 +1150,6 @@ loop_offset=0
 
           // Register audio in asset inventory
           try {
-            const data = await readData<AssetsData>("assets.json");
             const filename = _outputPath.split("/").pop() ?? `${_sfxType}.wav`;
             const audioAsset: GameAsset = {
               id: newId(`audio-${_sfxType}`),
@@ -1146,8 +1162,13 @@ loop_offset=0
               createdAt: new Date().toISOString(),
               updatedAt: new Date().toISOString(),
             };
-            data.assets.push(audioAsset);
-            await writeData("assets.json", data);
+            // 14-CR-llm-assets: route through updateData so concurrent
+            // GenerateAudio + RunAssetPipeline calls don't clobber
+            // each other on assets.json.
+            await updateData<AssetsData>("assets.json", (data) => {
+              data.assets.push(audioAsset);
+              return data;
+            });
             broadcastEvent({ type: "asset:created", asset: audioAsset, projectId: projectContext?.projectId ?? null } as WSEvent);
           } catch { /* non-fatal */ }
 
