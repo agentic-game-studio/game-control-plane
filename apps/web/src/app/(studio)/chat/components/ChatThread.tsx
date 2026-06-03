@@ -65,6 +65,16 @@ const TOOL_COLORS: Record<string, string> = {
   AskUserQuestion: "#c13301",
 };
 
+/** Default color for tools missing from TOOL_COLORS. Mirrors the
+ * chrome/secondary text color used elsewhere so unknown tools blend
+ * in rather than jumping out as "broken". Centralized so the value
+ * stays in sync between the tool pill and any future call site. */
+const DEFAULT_TOOL_COLOR = "#737688";
+
+function getToolColor(name: string): string {
+  return TOOL_COLORS[name] ?? DEFAULT_TOOL_COLOR;
+}
+
 function truncateArg(str: string, maxLen: number): string {
   // Split at word boundary or path separator for cleaner truncation
   const splitPoints = str.match(/[/\\. _-]/g) || [];
@@ -136,7 +146,7 @@ const ActivityLog = memo(function ActivityLog({ toolCalls, logs, defaultExpanded
                 <>
                   <span
                     className="material-symbols-outlined text-sm shrink-0"
-                    style={{ color: TOOL_COLORS[entry.name] ?? "#737688" }}
+                    style={{ color: getToolColor(entry.name) }}
                   >
                     {TOOL_ICONS[entry.name] ?? "build"}
                   </span>
@@ -168,7 +178,7 @@ const ActivityLog = memo(function ActivityLog({ toolCalls, logs, defaultExpanded
               <div key={i} className="flex items-center gap-2 px-3 py-1.5 min-w-0">
                 <span
                   className="material-symbols-outlined text-sm shrink-0"
-                  style={{ color: TOOL_COLORS[entry.name] ?? "#737688" }}
+                  style={{ color: getToolColor(entry.name) }}
                 >
                   {TOOL_ICONS[entry.name] ?? "build"}
                 </span>
@@ -557,8 +567,12 @@ const AgentMessage = memo(function AgentMessage({
             )}
 
             <div className="absolute -right-3 -top-3 opacity-0 group-hover:opacity-100 transition-opacity">
-              <button className="w-8 h-8 border-2 border-black bg-black text-white hover:bg-[#0055FF] flex justify-center items-center retro-press" title="Trace Thought Process">
-                <span className="material-symbols-outlined text-sm">search</span>
+              <button
+                className="w-8 h-8 border-2 border-black bg-black text-white hover:bg-[#0055FF] flex justify-center items-center retro-press"
+                title="Trace Thought Process"
+                aria-label="Trace thought process"
+              >
+                <span className="material-symbols-outlined text-sm" aria-hidden="true">search</span>
               </button>
             </div>
           </div>

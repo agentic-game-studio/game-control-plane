@@ -5,6 +5,7 @@ import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "./useWebSocket";
 import { useProject } from "@/contexts/ProjectContext";
 import { CHAT_CACHE_SAVE_DEBOUNCE_MS, LLM_LOADING_TIMEOUT_MS, QUEUE_DRAIN_DELAY_MS } from "@/lib/timing";
+import { contextFillPercentFromUsage } from "@/lib/chat-context";
 import type { WSEvent, ContextUsage } from "@game-studio/types";
 const logger = createLogger("useCommandRoom");
 
@@ -1945,7 +1946,14 @@ Also: spawn <agent>, approve, done <agent>`,
           addSessionMessage(producerSessionIdRef.current, { type: "user", sender: "DIRECTOR", content: trimmed });
           const usage = contextUsageMap.get(producerSessionIdRef.current);
           if (usage) {
-            const pct = Math.round((usage.lastInputTokens / usage.contextWindowTokens) * 100);
+            // 15-L-usecommandroom-context-percent: previously computed
+            // `Math.round((usage.lastInputTokens / usage.contextWindowTokens) * 100)`
+            // inline — same formula as the shared
+            // `contextFillPercentFromUsage()` helper, but missing the
+            // `Math.min(100, ...)` clamp and the null-guard. Use the
+            // helper so the /cost and /context messages report the
+            // same value the context bar displays.
+            const pct = contextFillPercentFromUsage(usage);
             addSessionMessage(producerSessionIdRef.current, {
               type: "agent",
               sender: "producer",
@@ -1995,7 +2003,11 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
           const usage = contextUsageMapRef.current.get(producerSessionIdRef.current);
           const pressure = contextPressureRef.current.get(producerSessionIdRef.current);
           if (usage) {
-            const pct = Math.round((usage.lastInputTokens / usage.contextWindowTokens) * 100);
+            // 15-L-usecommandroom-context-percent: use the shared
+            // helper (clamps to 100, null-guards contextWindowTokens)
+            // instead of the inline round. Matches the cost command
+            // and the context bar in ProgressSummary.
+            const pct = contextFillPercentFromUsage(usage);
             const pressurePct = pressure ?? 0;
             const filled = Math.round(pressurePct / 5);
             const pressureBar = "█".repeat(filled) + "░".repeat(20 - filled);

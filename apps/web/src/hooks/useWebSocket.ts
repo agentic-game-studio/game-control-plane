@@ -2,6 +2,9 @@
 import { useEffect, useRef, useState } from "react";
 import type { WSEvent } from "@game-studio/types";
 import { WS_PING_INTERVAL_MS, WS_RECONNECT_DELAY_MS } from "@/lib/timing";
+import { createLogger } from "@/lib/logger";
+
+const logger = createLogger("useWebSocket");
 
 // 10-H12: singleton WebSocket connection shared across all useWebSocket
 // callers. Previously every hook (useAgents, useSkills, useDashboard,
@@ -110,13 +113,18 @@ function connect(): void {
       // one-time warning, and stop reconnecting (the user must
       // refresh with a new key).
       if (event.code === 1008 && reconnectAttempt === 0) {
-        if (typeof window !== "undefined") {
-          console.warn(
-            "[useWebSocket] WS auth failed (close code 1008). " +
-            "Check NEXT_PUBLIC_API_KEY matches the server's API_SECRET. " +
-            "Reconnect attempts will continue but the key needs to be updated.",
-          );
-        }
+        // 15-L-usewebsocket-console-warn: every other module routes
+        // through the pino-backed createLogger, but this hook was
+        // using a raw console.warn — so a WS auth failure showed up
+        // nowhere in the structured logs the dashboard operator
+        // actually reads. Use the logger so it shows up in the
+        // browser console, the file transport, and the request-
+        // correlation prefix the rest of the codebase gets for free.
+        logger.warn(
+          "WS auth failed (close code 1008) — check NEXT_PUBLIC_API_KEY matches server's API_SECRET. " +
+          "Reconnect attempts will continue but the key needs to be updated.",
+          { event: "ws_auth_failed", closeCode: 1008 },
+        );
       }
       if (!stillCurrent) return;
       // Only reconnect if there are still active subscribers — otherwise

@@ -475,9 +475,17 @@ async function executeTool(
         const rawPath = input.file_path as string;
         if (!rawPath) return "Error: file_path is required";
         const filePath = safePath(rawPath, workspaceDir);
-        // Q5: Reject files larger than 1MB
+        // Q5: Reject files larger than 1MB. The cap is matched by
+        // the LLM's context budget (a single tool result > 1MB is
+        // almost always a binary or log file the LLM can't reason
+        // over anyway). Kept as a named constant so future bumps
+        // (or per-route overrides for log scraping) have one place
+        // to change.
+        const MAX_TOOL_FILE_READ_BYTES = 1 * 1024 * 1024;
         const stat = await fs.stat(filePath);
-        if (stat.size > 1_048_576) return `Error: File too large (${Math.round(stat.size / 1024)}KB). Maximum is 1MB.`;
+        if (stat.size > MAX_TOOL_FILE_READ_BYTES) {
+          return `Error: File too large (${Math.round(stat.size / 1024)}KB). Maximum is ${MAX_TOOL_FILE_READ_BYTES / 1024 / 1024}MB.`;
+        }
         try {
           const content = await fs.readFile(filePath, "utf-8");
           logEntry(sessionId, "info", `[${agentRole}] Read: ${filePath}`, agentRole);
