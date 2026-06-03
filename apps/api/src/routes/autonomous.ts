@@ -46,6 +46,24 @@ import { readFile as readFileAsync, writeFile as writeFileAsync, rename as renam
 
 const execFileAsyncLocal = promisify(execFile);
 
+// 16-H-void-ingest-unhandled: ingestProducerSummaryFact internally calls
+// persistChatStore() which writes to disk. A transient EIO/ENOSPC or a
+// concurrent write conflict will reject the returned Promise. Callers
+// here intentionally do not await (the loop must not block on it), but
+// `void p` lets the rejection bubble up to process.unhandledRejection
+// — which fatalExit() in index.ts treats as a crash signal. Wrap so
+// failures are logged and swallowed at the call site.
+function safeIngestProducerSummaryFact(
+  ...args: Parameters<typeof ingestProducerSummaryFact>
+): void {
+  ingestProducerSummaryFact(...args).catch((err) => {
+    logger.warn(
+      { err: err instanceof Error ? err.message : String(err), projectId: args[0], event: "producer_summary_fact_ingest_failed" },
+      "Failed to ingest producer summary fact — continuing",
+    );
+  });
+}
+
 type ReadyProjectContext = ProjectContext & { workspacePath: string };
 
 /** In-memory registry of running loop session IDs for graceful shutdown */
@@ -708,7 +726,14 @@ function assignTicketToAgent(ticket: Ticket): AgentRole {
 
 function makeTokenTracker(sessionId: string, projectId: string) {
   return (usage: { input_tokens: number; output_tokens: number }) => {
-    void recordTokenUsage(sessionId, projectId, usage);
+    // 16-H-void-record-token-usage: persistChatStore-style write inside.
+    // Failures must not crash the loop via unhandledRejection.
+    recordTokenUsage(sessionId, projectId, usage).catch((err) => {
+      logger.warn(
+        { err: err instanceof Error ? err.message : String(err), event: "record_token_usage_failed" },
+        "Failed to record token usage — continuing",
+      );
+    });
   };
 }
 
@@ -882,7 +907,7 @@ async function runIteration(state: LoopState, board: TicketsBoard, projectContex
     iteration: state.currentIteration,
   } as WSEvent);
 
-  void ingestProducerSummaryFact(state.projectId, {
+  safeIngestProducerSummaryFact(state.projectId, {
     kind: "autonomous_iteration_started",
     at: new Date().toISOString(),
     ticketId: activeTicket.id,
@@ -1084,7 +1109,7 @@ If the failure is an infinite loop or hang (timeout), suggest a workaround.`,
       bootErrors: bootErrors.slice(0, 5).map((e) => e.slice(0, 200)),
     } as WSEvent);
 
-    void ingestProducerSummaryFact(state.projectId, {
+    safeIngestProducerSummaryFact(state.projectId, {
       kind: "autonomous_iteration_failed",
       at: new Date().toISOString(),
       ticketId: activeTicket.id,
@@ -1118,7 +1143,9 @@ If the failure is an infinite loop or hang (timeout), suggest a workaround.`,
         return board;
       });
 
-      void upsertRunMetrics({
+      // 16-H-void-upsert-run-metrics: write through updateData;
+      // crash on failure would kill the loop.
+      upsertRunMetrics({
         sessionId: state.sessionId,
         projectId: state.projectId,
         qaGatePasses: qaPassed ? (state.completedCount + 1) : state.completedCount,
@@ -1126,6 +1153,11 @@ If the failure is an infinite loop or hang (timeout), suggest a workaround.`,
         completedCount: state.completedCount,
         failedCount: state.failedCount,
         totalIterations: state.currentIteration,
+      }).catch((err) => {
+        logger.warn(
+          { err: err instanceof Error ? err.message : String(err), event: "upsert_run_metrics_failed" },
+          "Failed to upsert run metrics — continuing",
+        );
       });
     }
 
@@ -1148,7 +1180,7 @@ If the failure is an infinite loop or hang (timeout), suggest a workaround.`,
         errors: [qaSummary],
       } as unknown as WSEvent);
 
-      void ingestProducerSummaryFact(state.projectId, {
+      safeIngestProducerSummaryFact(state.projectId, {
         kind: "autonomous_iteration_boot_check_failed",
         at: new Date().toISOString(),
         ticketId: activeTicket.id,
@@ -1178,13 +1210,27 @@ If the failure is an infinite loop or hang (timeout), suggest a workaround.`,
       }
 
       const gateContext = `Milestone check after ticket "${activeTicket.title}". Completed: ${state.completedCount}. Agent output:\n${agentResult?.content?.slice(0, 1500) ?? ""}`;
-      void advanceMilestoneIfReady(state.projectId, state.sessionId, state.completedCount, gateContext);
+      // 16-H-void-advance-milestone: same pattern — failure in the
+      // milestone gate must not bubble up to unhandledRejection.
+      advanceMilestoneIfReady(state.projectId, state.sessionId, state.completedCount, gateContext).catch((err) => {
+        logger.warn(
+          { err: err instanceof Error ? err.message : String(err), projectId: state.projectId, event: "advance_milestone_failed" },
+          "Failed to advance milestone — continuing",
+        );
+      });
 
-      void externalizeProductionNote(
+      // 16-H-void-externalize-note: file write under workspace/wiki;
+      // transient EIO/ENOSPC would crash the loop without this catch.
+      externalizeProductionNote(
         state.projectId,
         "ticket-completed",
         `${activeTicket.title}: ${qaSummary}`,
-      );
+      ).catch((err) => {
+        logger.warn(
+          { err: err instanceof Error ? err.message : String(err), projectId: state.projectId, event: "externalize_note_failed" },
+          "Failed to externalize production note — continuing",
+        );
+      });
 
       broadcast({
         type: "autonomous:iteration:completed",
@@ -1194,7 +1240,7 @@ If the failure is an infinite loop or hang (timeout), suggest a workaround.`,
         completedCount: state.completedCount,
       } as WSEvent);
 
-      void ingestProducerSummaryFact(state.projectId, {
+      safeIngestProducerSummaryFact(state.projectId, {
         kind: "autonomous_iteration_completed",
         at: new Date().toISOString(),
         ticketId: activeTicket.id,
@@ -1334,7 +1380,13 @@ autonomousRouter.post("/start", async (req: Request, res: Response) => {
     gameType: readyProjectContext.description?.slice(0, 80),
   } as WSEvent);
 
-  void upsertRunMetrics({ sessionId, projectId, startedAt: new Date().toISOString() });
+  // 16-H-void-upsert-run-metrics: see comment at the other call site.
+  upsertRunMetrics({ sessionId, projectId, startedAt: new Date().toISOString() }).catch((err) => {
+    logger.warn(
+      { err: err instanceof Error ? err.message : String(err), event: "upsert_run_metrics_failed" },
+      "Failed to upsert run metrics (startedAt) — continuing",
+    );
+  });
 
   const state: LoopState = existing && existing.status !== "idle"
     ? { ...existing, status: "running", maxIterations, lastHeartbeat: new Date().toISOString() }
@@ -1441,16 +1493,24 @@ autonomousRouter.post("/start", async (req: Request, res: Response) => {
           "Failed to start Godot MCP service — agents will fall back to file I/O");
       });
 
-      // Auto-launch Godot editor if workspace path is known
+      // Auto-launch Godot editor if workspace path is known.
+      // 16-H-launch-godot-fire-forget: launchGodotEditor is now async
+      // because the plugin install was made async to avoid blocking
+      // the event loop. The autonomous loop must not block on Godot
+      // startup, so fire-and-forget and log the outcome when settled.
       const projectDir = resolveProjectWorkspace(readyProjectContext.workspacePath);
-      const launchResult = launchGodotEditor(projectDir);
-      if (launchResult.success) {
-        logger.info({ projectId: state.projectId, pid: launchResult.pid, event: "godot_editor_launched" },
-          `Godot editor launched (pid=${launchResult.pid})`);
-      } else {
-        logger.warn({ projectId: state.projectId, error: launchResult.error, event: "godot_editor_launch_failed" },
-          `Godot editor launch failed: ${launchResult.error}`);
-      }
+      launchGodotEditor(projectDir).then((launchResult) => {
+        if (launchResult.success) {
+          logger.info({ projectId: state.projectId, pid: launchResult.pid, event: "godot_editor_launched" },
+            `Godot editor launched (pid=${launchResult.pid})`);
+        } else {
+          logger.warn({ projectId: state.projectId, error: launchResult.error, event: "godot_editor_launch_failed" },
+            `Godot editor launch failed: ${launchResult.error}`);
+        }
+      }).catch((err) => {
+        logger.warn({ projectId: state.projectId, err: err instanceof Error ? err.message : String(err), event: "godot_editor_launch_failed" },
+          "Godot editor launch failed (rejected promise)");
+      });
     }
 
     let currentState = (await loadLoopState(state.sessionId))!;
@@ -1505,7 +1565,7 @@ autonomousRouter.post("/start", async (req: Request, res: Response) => {
 
         void fireWebhook("autonomous:error", { sessionId: state.sessionId, projectId: currentState.projectId, error });
 
-        void ingestProducerSummaryFact(currentState.projectId, {
+        safeIngestProducerSummaryFact(currentState.projectId, {
           kind: "autonomous_error",
           at: new Date().toISOString(),
           detail: error,
@@ -1550,7 +1610,7 @@ autonomousRouter.post("/start", async (req: Request, res: Response) => {
         totalIterations: currentState.currentIteration,
       });
 
-      void ingestProducerSummaryFact(currentState.projectId, {
+      safeIngestProducerSummaryFact(currentState.projectId, {
         kind: "autonomous_loop_completed",
         at: new Date().toISOString(),
         detail: `done=${currentState.completedCount} fail=${currentState.failedCount} iter=${currentState.currentIteration}`,
@@ -1620,7 +1680,7 @@ autonomousRouter.post("/stop", async (req: Request, res: Response) => {
     failedCount: state.failedCount,
   } as WSEvent);
 
-  void ingestProducerSummaryFact(state.projectId, {
+  safeIngestProducerSummaryFact(state.projectId, {
     kind: "autonomous_loop_stopped",
     at: new Date().toISOString(),
     detail: `done=${state.completedCount} fail=${state.failedCount} iter=${state.currentIteration}`,

@@ -457,7 +457,23 @@ export async function appendMessage(sessionId: string, msg: ChatMessage): Promis
   const session = chatStore.sessions[sessionId];
   if (!session) return;
   session.messages.push(msg);
-  await saveChatState();
+  // 16-H-append-message-unhandled-rejection: the previous `await
+  // saveChatState()` rethrew on disk-full / EROFS / JSON.parse-fail
+  // / etc. The function is called from many fire-and-forget sites
+  // (producer summary, autonomous loop, chat) and from `await`
+  // sites that don't catch — so a transient write error became an
+  // unhandled rejection, which the index.ts unhandledRejection
+  // handler routes to fatalExit → process exit. The message is
+  // already in the in-memory session.messages array; the on-disk
+  // loss is preferable to taking down the whole API.
+  try {
+    await saveChatState();
+  } catch (saveErr) {
+    logger.error(
+      { err: saveErr instanceof Error ? saveErr.message : String(saveErr), sessionId, event: "chat_state_save_failed" },
+      "Failed to persist chat state after appendMessage — continuing with in-memory state",
+    );
+  }
   broadcast({
     type: "chat:message",
     sessionId,
@@ -584,12 +600,20 @@ chatRouter.get("/sessions/producer/:projectId", async (req: Request, res: Respon
     // Auto-launch Godot editor
     if (project.workspacePath) {
       const projectDir = resolveProjectWorkspace(project.workspacePath);
-      const launchResult = launchGodotEditor(projectDir);
-      if (launchResult.success) {
-        logger.info({ projectId, pid: launchResult.pid, event: "godot_editor_launched" }, "Godot editor auto-launched");
-      } else {
-        logger.warn({ projectId, error: launchResult.error, event: "godot_editor_launch_failed" }, "Could not auto-launch Godot editor");
-      }
+      // 16-H-launch-godot-fire-forget: launchGodotEditor is now async
+      // (plugin install was made async to avoid blocking the event
+      // loop). We don't want to await it here because the chat session
+      // response shouldn't block on Godot startup — fire-and-forget,
+      // log the outcome when the promise settles.
+      launchGodotEditor(projectDir).then((launchResult) => {
+        if (launchResult.success) {
+          logger.info({ projectId, pid: launchResult.pid, event: "godot_editor_launched" }, "Godot editor auto-launched");
+        } else {
+          logger.warn({ projectId, error: launchResult.error, event: "godot_editor_launch_failed" }, "Could not auto-launch Godot editor");
+        }
+      }).catch((err) => {
+        logger.warn({ projectId, err: err instanceof Error ? err.message : String(err), event: "godot_editor_launch_failed" }, "Could not auto-launch Godot editor");
+      });
     }
   }
 
@@ -1761,13 +1785,16 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
       logger.error({ projectId, role: agentRole, error: err.message, event: "godot_mcp_spawn_error" }, "Failed to start Godot MCP for agent");
     });
 
-    // Auto-launch Godot editor
+    // Auto-launch Godot editor (fire-and-forget; see comment at line ~600).
     if (project.workspacePath) {
       const projectDir = resolveProjectWorkspace(project.workspacePath);
-      const launchResult = launchGodotEditor(projectDir);
-      if (launchResult.success) {
-        logger.info({ projectId, pid: launchResult.pid, event: "godot_editor_launched" }, "Godot editor auto-launched for agent spawn");
-      }
+      launchGodotEditor(projectDir).then((launchResult) => {
+        if (launchResult.success) {
+          logger.info({ projectId, pid: launchResult.pid, event: "godot_editor_launched" }, "Godot editor auto-launched for agent spawn");
+        }
+      }).catch((err) => {
+        logger.warn({ projectId, err: err instanceof Error ? err.message : String(err), event: "godot_editor_launch_failed" }, "Could not auto-launch Godot editor for agent spawn");
+      });
     }
   }
 

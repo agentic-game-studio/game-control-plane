@@ -1,7 +1,7 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
 import fs from "fs";
-import { readData, writeData, updateData, broadcastEvent, deleteData } from "../services/data-store.js";
+import { readData, writeData, updateData, broadcastEvent, deleteData, getOrCreateData } from "../services/data-store.js";
 import { logger } from "../utils/logger.js";
 import type {
   DashboardData,
@@ -68,12 +68,19 @@ function normalizeDashboardData(data: DashboardData): DashboardData {
 export const dashboardRouter: Router = Router();
 
 async function readDashboardOrDefault(): Promise<DashboardData> {
-  try {
-    return await readData<DashboardData>("dashboard.json");
-  } catch {
-    await writeData("dashboard.json", DEFAULT_DATA);
-    return structuredClone(DEFAULT_DATA);
-  }
+  // 16-H-dashboard-read-toctou: previously this was a manual
+  // try/readData → catch/writeData(DEFAULT_DATA) pattern. Two
+  // concurrent callers that both saw the file missing would
+  // both enter the catch and both call writeData(DEFAULT_DATA),
+  // racing each other and losing whichever write landed second
+  // (and worse: clobbering any state a third caller had just
+  // written between the two reads). getOrCreateData() serializes
+  // the read/create through fileLocks so only one process path
+  // ever performs the initial write.
+  return await getOrCreateData<DashboardData>(
+    "dashboard.json",
+    () => structuredClone(DEFAULT_DATA),
+  );
 }
 
 async function writeDemoGodotProject(projectDir: string): Promise<void> {
@@ -525,7 +532,7 @@ dashboardRouter.post("/projects", async (req: Request, res: Response) => {
     let pluginInstallResult: { success: boolean; pluginCopied: boolean; pluginEnabled: boolean; error?: string } | null = null;
     if (engine === "godot" && workspacePath) {
       const projectDir = resolveProjectWorkspace(workspacePath);
-      pluginInstallResult = installGodotMCPPlugin(projectDir, projectDir);
+      pluginInstallResult = await installGodotMCPPlugin(projectDir, projectDir);
       if (!pluginInstallResult.success && pluginInstallResult.error) {
         logger.warn({ error: pluginInstallResult.error, projectDir }, "Failed to auto-install Godot MCP plugin");
       }
@@ -716,7 +723,7 @@ dashboardRouter.post("/projects/:id/install-plugin", async (req: Request, res: R
     }
 
     const projectDir = resolveProjectWorkspace(project.workspacePath);
-    const result = installGodotMCPPlugin(projectDir, projectDir);
+    const result = await installGodotMCPPlugin(projectDir, projectDir);
 
     if (result.success) {
       res.json({
@@ -929,7 +936,7 @@ dashboardRouter.post("/projects/:id/launch-editor", async (req: Request, res: Re
       return;
     }
 
-    const result = launchGodotEditor(projectDir);
+    const result = await launchGodotEditor(projectDir);
     res.json({ success: result.success, data: result });
   } catch (error) {
     logger.error(

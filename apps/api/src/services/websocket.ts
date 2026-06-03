@@ -85,8 +85,35 @@ wss.on("connection", (socket) => {
 // default `ws` library's `maxPayload` of 100MB.
 const MAX_BUFFERED_BYTES_PER_CLIENT = 1_000_000;
 
+// 16-H-broadcast-oom: per-client buffered-bytes cap protects
+// against a slow consumer, but the cap is checked AFTER
+// JSON.stringify. A single 50MB event would allocate 50MB
+// across every connected client before the per-client check
+// could drop the slow ones. Cap the event payload by serialized
+// size before stringify — anything above 1MB is almost certainly
+// a runaway assistant message or a misuse, and is dropped with a
+// logged warning so the operator can investigate.
+const MAX_BROADCAST_BYTES = 1_000_000;
+
 export function broadcast(event: WSEvent) {
-  const message = JSON.stringify(event);
+  // Fast path: serialize once, check size. If too large, drop and log.
+  let message: string;
+  try {
+    message = JSON.stringify(event);
+  } catch (err) {
+    logger.warn(
+      { err: err instanceof Error ? err.message : String(err), event: "ws_serialize_failed" },
+      "Failed to serialize WebSocket event — dropping broadcast",
+    );
+    return;
+  }
+  if (Buffer.byteLength(message) > MAX_BROADCAST_BYTES) {
+    logger.warn(
+      { sizeBytes: Buffer.byteLength(message), cap: MAX_BROADCAST_BYTES, eventType: event.type, event: "ws_event_too_large" },
+      "WebSocket event exceeds size cap — dropping to protect process memory",
+    );
+    return;
+  }
   for (const client of wss.clients) {
     if (client.readyState !== WebSocket.OPEN) {
       // Non-OPEN sockets shouldn't be in the set at all, but be defensive.

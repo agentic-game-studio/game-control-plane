@@ -16,7 +16,15 @@ const config = loadConfig();
 // Global store for backward compatibility (no project specified)
 const globalStore = new DocumentStore(config.WORKSPACE_DIR);
 
-// Per-project document stores keyed by projectId
+// Per-project document stores keyed by projectId. LRU-bounded so a
+// burst of project creation/deletion can't leak fs.watch handles
+// forever. Each entry holds an active recursive watcher plus an
+// in-memory document graph cache; without a cap, a long-running
+// process that cycles through many short-lived projects (test
+// fixtures, demo sessions) accumulates handles until the kernel's
+// fs.inotify.max_user_watches trips and the watcher errors out.
+// Matches the pattern in apps/api/src/routes/assets.ts:309-313.
+const PROJECT_STORE_LRU_CAP = 200;
 const projectStores = new Map<string, DocumentStore>();
 
 /** Look up a project by ID from dashboard.json */
@@ -32,7 +40,33 @@ async function getProjectById(projectId: string): Promise<Project | null> {
 /** Get or create a DocumentStore for a project */
 async function getProjectStore(projectId: string): Promise<DocumentStore | null> {
   const existing = projectStores.get(projectId);
-  if (existing) return existing;
+  if (existing) {
+    // LRU touch: re-insert so the key moves to the end of the
+    // Map's insertion order. The next eviction pass will skip
+    // this entry in favor of a truly idle one.
+    projectStores.delete(projectId);
+    projectStores.set(projectId, existing);
+    return existing;
+  }
+
+  // 16-H-project-stores-lru-cap: before creating a new entry,
+  // enforce the cap. If the cap is reached, evict the oldest
+  // entry (the first key in iteration order) by stopping its
+  // fs.watch handle and dropping it from the map. Without this,
+  // a process that creates many short-lived projects leaks
+  // recursive watchers until the kernel's inotify limit is hit
+  // and the watcher emits ENOSPC. dropProjectStore() does the
+  // same teardown for explicit deletes.
+  if (projectStores.size >= PROJECT_STORE_LRU_CAP) {
+    const oldest = projectStores.keys().next().value;
+    if (oldest && oldest !== projectId) {
+      const evicted = projectStores.get(oldest);
+      projectStores.delete(oldest);
+      if (evicted) {
+        try { evicted.stopWatching(); } catch { /* best effort */ }
+      }
+    }
+  }
 
   const project = await getProjectById(projectId);
   if (!project) return null;

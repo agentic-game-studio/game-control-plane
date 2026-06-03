@@ -44,7 +44,12 @@ REVIEW_MODE=lean
 MAX_TOOL_CALLS=100
 TOOL_CHECKPOINT_INTERVAL=30
 API_TIMEOUT_MS=120000      # Per-LLM-call timeout (default 120s)
-BODY_LIMIT_MB=50           # Max request body for image paste uploads
+# BODY_LIMIT_MB=5          # Default 5MB for the global JSON parser. Asset
+                           # upload routes attach their own higher-limit
+                           # parser locally — do NOT raise this globally
+                           # unless you actually need it everywhere; large
+                           # global limits make the API easier to OOM with
+                           # huge unauthenticated POSTs.
 ENABLE_TEST_ENDPOINTS=false # Disable /api/chat/sessions/consultation/test-create in prod
 ```
 

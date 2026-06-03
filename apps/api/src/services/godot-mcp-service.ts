@@ -838,7 +838,8 @@ export function getGodotMCPService(projectId: string): GodotMCPService | null {
 
 // ─── Plugin Auto-Installation ──────────────────────────────────────────
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, cpSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import * as fsp from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 /** Result of a plugin installation attempt */
@@ -859,10 +860,17 @@ export interface InstallPluginResult {
  * @param projectDir - Absolute path to the Godot project directory
  * @param workspaceDir - The workspace directory (for finding godot-mcp-pro)
  */
-export function installGodotMCPPlugin(
+// 16-H-install-plugin-async: previously this used `cpSync` / `readFileSync`
+// / `writeFileSync` / `rmSync` synchronously. The Godot MCP plugin folder
+// contains 50+ small files; `cpSync` of all of them blocks the Node event
+// loop for 100ms+ on slow disks (Docker volumes, NFS, encrypted home
+// dirs). The HTTP handler that calls this serialized every other
+// incoming request for the duration. Matches the 11-M5 pattern in
+// dashboard.ts:writeDemoGodotProject — keep the ergonomics, just yield.
+export async function installGodotMCPPlugin(
   projectDir: string,
   workspaceDir: string
-): InstallPluginResult {
+): Promise<InstallPluginResult> {
   const result: InstallPluginResult = {
     success: false,
     pluginCopied: false,
@@ -886,6 +894,8 @@ export function installGodotMCPPlugin(
 
     let sourcePath: string | null = null;
     for (const candidate of possiblePaths) {
+      // existsSync is fine here — it's a single stat call, not a recursive
+      // copy. Using fsp.access in a loop would multiply the round trips.
       if (existsSync(candidate)) {
         sourcePath = candidate;
         logger.info({ sourcePath: candidate }, "Found Godot MCP plugin");
@@ -901,68 +911,70 @@ export function installGodotMCPPlugin(
 
     // Create project's addons directory if it doesn't exist
     const projectAddonsDir = join(projectDir, "addons");
-    if (!existsSync(projectAddonsDir)) {
-      mkdirSync(projectAddonsDir, { recursive: true });
-    }
+    await fsp.mkdir(projectAddonsDir, { recursive: true });
 
     // Copy the godot_mcp folder to the project's addons directory
     const projectPluginDir = join(projectAddonsDir, "godot_mcp");
 
-    // Remove existing plugin folder if it exists (for clean reinstall)
-    if (existsSync(projectPluginDir)) {
-      rmSync(projectPluginDir, { recursive: true, force: true });
-    }
+    // Remove existing plugin folder if it exists (for clean reinstall).
+    // fsp.rm with force:true is idempotent — no need to existsSync first.
+    await fsp.rm(projectPluginDir, { recursive: true, force: true });
 
     // Copy the plugin files
-    cpSync(sourcePath, projectPluginDir, { recursive: true });
+    await fsp.cp(sourcePath, projectPluginDir, { recursive: true });
     result.pluginCopied = true;
     logger.info({ sourcePath, destPath: projectPluginDir }, "Godot MCP plugin copied");
 
     // Enable the plugin in project.godot (Godot 4 format)
     const projectGodotPath = join(projectDir, "project.godot");
-    if (existsSync(projectGodotPath)) {
-      let projectGodotContent = readFileSync(projectGodotPath, "utf-8");
-      const pluginCfgPath = "res://addons/godot_mcp/plugin.cfg";
-
-      // Check if already enabled in Godot 4 format ([editor_plugins])
-      if (projectGodotContent.includes(pluginCfgPath)) {
-        result.pluginEnabled = true;
-      } else {
-        // Remove any Godot 3 format [plugins] entries
-        projectGodotContent = projectGodotContent.replace(
-          /\[plugins\][^\[]*?"Godot MCP Pro"\/enable="[^"]*"[^\[]*?\n/g,
-          ""
-        );
-
-        if (projectGodotContent.includes("[editor_plugins]")) {
-          // Append to existing [editor_plugins] section
-          projectGodotContent = projectGodotContent.replace(
-            /\[editor_plugins\]\s*\nenabled=PackedStringArray\(([^)]*)\)/,
-            (_, existing: string) => {
-              if (existing.includes(pluginCfgPath)) return `enabled=PackedStringArray(${existing})`;
-              return `enabled=PackedStringArray(${existing}, "${pluginCfgPath}")`;
-            }
-          );
-          // Fallback: if regex didn't match the PackedStringArray pattern, just add after section header
-          if (!projectGodotContent.includes(pluginCfgPath)) {
-            projectGodotContent = projectGodotContent.replace(
-              /\[editor_plugins\]/,
-              `[editor_plugins]\n\nenabled=PackedStringArray("${pluginCfgPath}")`
-            );
-          }
-        } else {
-          // Add new [editor_plugins] section
-          const pluginEntry = `\n[editor_plugins]\n\nenabled=PackedStringArray("${pluginCfgPath}")\n`;
-          projectGodotContent += pluginEntry;
-        }
-
-        writeFileSync(projectGodotPath, projectGodotContent, "utf-8");
-        result.pluginEnabled = true;
-        logger.info({ projectGodotPath }, "Godot MCP plugin enabled in project.godot (Godot 4 format)");
+    let projectGodotContent: string;
+    try {
+      projectGodotContent = await fsp.readFile(projectGodotPath, "utf-8");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        result.error = `project.godot not found at ${projectGodotPath}`;
+        return result;
       }
+      throw err;
+    }
+
+    const pluginCfgPath = "res://addons/godot_mcp/plugin.cfg";
+
+    // Check if already enabled in Godot 4 format ([editor_plugins])
+    if (projectGodotContent.includes(pluginCfgPath)) {
+      result.pluginEnabled = true;
     } else {
-      result.error = `project.godot not found at ${projectGodotPath}`;
-      return result;
+      // Remove any Godot 3 format [plugins] entries
+      projectGodotContent = projectGodotContent.replace(
+        /\[plugins\][^\[]*?"Godot MCP Pro"\/enable="[^"]*"[^\[]*?\n/g,
+        ""
+      );
+
+      if (projectGodotContent.includes("[editor_plugins]")) {
+        // Append to existing [editor_plugins] section
+        projectGodotContent = projectGodotContent.replace(
+          /\[editor_plugins\]\s*\nenabled=PackedStringArray\(([^)]*)\)/,
+          (_, existing: string) => {
+            if (existing.includes(pluginCfgPath)) return `enabled=PackedStringArray(${existing})`;
+            return `enabled=PackedStringArray(${existing}, "${pluginCfgPath}")`;
+          }
+        );
+        // Fallback: if regex didn't match the PackedStringArray pattern, just add after section header
+        if (!projectGodotContent.includes(pluginCfgPath)) {
+          projectGodotContent = projectGodotContent.replace(
+            /\[editor_plugins\]/,
+            `[editor_plugins]\n\nenabled=PackedStringArray("${pluginCfgPath}")`
+          );
+        }
+      } else {
+        // Add new [editor_plugins] section
+        const pluginEntry = `\n[editor_plugins]\n\nenabled=PackedStringArray("${pluginCfgPath}")\n`;
+        projectGodotContent += pluginEntry;
+      }
+
+      await fsp.writeFile(projectGodotPath, projectGodotContent, "utf-8");
+      result.pluginEnabled = true;
+      logger.info({ projectGodotPath }, "Godot MCP plugin enabled in project.godot (Godot 4 format)");
     }
 
     result.success = true;
@@ -1008,13 +1020,13 @@ export function isGodotMCPPluginEnabled(projectDir: string): boolean {
  * Ensures the MCP plugin is installed and enabled in project.godot
  * before launching. Uses Godot 4 [editor_plugins] format.
  */
-export function launchGodotEditor(projectDir: string): { success: boolean; pid?: number; error?: string } {
+export async function launchGodotEditor(projectDir: string): Promise<{ success: boolean; pid?: number; error?: string }> {
   const platform = process.platform; // "darwin" | "linux" | "win32"
 
   // Ensure plugin is installed and enabled before launching
   if (!isGodotMCPPluginInstalled(projectDir) || !isGodotMCPPluginEnabled(projectDir)) {
     const config = loadConfig();
-    const installResult = installGodotMCPPlugin(projectDir, config.WORKSPACE_DIR);
+    const installResult = await installGodotMCPPlugin(projectDir, config.WORKSPACE_DIR);
     if (!installResult.success) {
       logger.warn({ projectDir, error: installResult.error }, "Could not install/enable Godot MCP plugin before launch");
     }
