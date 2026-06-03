@@ -21,7 +21,7 @@ import { DEFAULT_TICKETS_BOARD, readTicketsBoard, resolveProjectIdForSession, wr
 import { logger } from "../utils/logger.js";
 import { loadConfig } from "../config.js";
 import type { TicketsBoard, Ticket, TicketStatus, AgentRole, WSEvent, WorkflowStage, DashboardData } from "@game-studio/types";
-import { ingestProducerSummaryFact, ingestProducerSummaryFromSession } from "./producer-summary.js";
+import { ingestProducerSummaryFromSession, safeIngestProducerSummaryFact } from "./producer-summary.js";
 import { triggerVerification } from "./verification-service.js";
 
 // ─── Workflow State (in-memory, per session) ───
@@ -320,15 +320,14 @@ export async function createQuestTicket(
   }
 
   if (resolvedProjectId) {
-    void ingestProducerSummaryFact(resolvedProjectId, {
+    safeIngestProducerSummaryFact(resolvedProjectId, {
       kind: "ticket_created",
       at: now,
       title,
       ticketId: ticket.id,
       agentRole: agentRole as string,
       sessionId,
-    }).catch((err) => logger.warn({ projectId: resolvedProjectId, err: String(err), event: "producer_summary_ticket_created_failed" },
-      "ingestProducerSummaryFact rejected in ticket_created"));
+    });
   }
 
   return ticket;
@@ -388,7 +387,7 @@ export async function moveQuestTicket(
     projectId,
   } as WSEvent);
 
-  void ingestProducerSummaryFact(projectId, {
+  safeIngestProducerSummaryFact(projectId, {
     kind: "ticket_moved",
     at: ticket.updatedAt,
     ticketId,
@@ -396,8 +395,7 @@ export async function moveQuestTicket(
     fromColumn: fromColumnId ?? ticket.status,
     toColumn: status,
     agentRole: ticket.assignee,
-  }).catch((err) => logger.warn({ projectId, err: String(err), event: "producer_summary_ticket_moved_failed" },
-    "ingestProducerSummaryFact rejected in ticket_moved"));
+  });
 
   if (status === "qa") {
     triggerVerification(ticket, ticket.description || ticket.title);

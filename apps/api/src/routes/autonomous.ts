@@ -28,7 +28,7 @@ import { resolveHomeDir } from "../utils/paths.js";
 import type { AgentRole, WSEvent } from "@game-studio/types";
 import type { TicketsBoard, Ticket, DashboardData } from "@game-studio/types";
 import { getOrCreateGodotMCPService, launchGodotEditor, type GodotMCPServiceOptions } from "../services/godot-mcp-service.js";
-import { ingestProducerSummaryFact, safeIngestProducerSummaryFact } from "../services/producer-summary.js";
+import { safeIngestProducerSummaryFact } from "../services/producer-summary.js";
 import { ingestGDD } from "../services/gdd-ingest-service.js";
 import { runQAGateChain, saveTestEvidenceArtifact } from "../services/qa-gate-service.js";
 import { triggerVerification } from "../services/verification-service.js";

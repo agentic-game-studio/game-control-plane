@@ -87,6 +87,11 @@ vi.mock("./ticket-board.js", async () => {
 vi.mock("./producer-summary.js", () => ({
   ingestProducerSummaryFact: vi.fn().mockResolvedValue(undefined),
   ingestProducerSummaryFromSession: vi.fn().mockResolvedValue(undefined),
+  // 16-M: safeIngestProducerSummaryFact wraps ingestProducerSummaryFact
+  // with a swallow-and-log .catch. The test only verifies the
+  // happy-path board mutation, so the wrapper is a no-op pass-through
+  // here.
+  safeIngestProducerSummaryFact: vi.fn(),
 }));
 
 vi.mock("./verification-service.js", () => ({

@@ -5,7 +5,7 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
 import { ingestGDD } from "../services/gdd-ingest-service.js";
-import { ingestProducerSummaryFact } from "../services/producer-summary.js";
+import { safeIngestProducerSummaryFact } from "../services/producer-summary.js";
 
 export const gddRouter: Router = Router();
 
@@ -33,7 +33,7 @@ gddRouter.post("/ingest", async (req: Request, res: Response) => {
     return;
   }
 
-  void ingestProducerSummaryFact(projectSlug, {
+  safeIngestProducerSummaryFact(projectSlug, {
     kind: "gdd_ingested",
     at: new Date().toISOString(),
     detail: `total=${result.totalItems} created=${result.created} skipped=${result.skipped} errors=${result.errors.length}`,
