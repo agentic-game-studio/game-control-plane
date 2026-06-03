@@ -1109,6 +1109,36 @@ async function executeTool(
           return "Error: type and output are required";
         }
 
+        // 16-C-llm-generate-audio-path-traversal: _outputPath is an
+        // LLM-supplied path. The previous code used it directly: if
+        // absolute, absOutput = _outputPath verbatim, then a Godot
+        // .import sidecar was written to `${_outputPath}.import` —
+        // a prompt-injected LLM could write `/etc/cron.d/evil.wav`
+        // plus its sidecar. Even relative paths were joined with
+        // resolveProjectWorkspace without a containment check, so a
+        // path like `../../../etc/evil` would escape the project
+        // root once joined. Resolve the LLM path against the
+        // project workspace, then assert the resolved path stays
+        // inside that workspace via path.relative. Bail with an
+        // error before any file is written.
+        const projectWs = (() => {
+          try {
+            return resolveProjectWorkspace(projectContext?.workspacePath ?? "");
+          } catch {
+            return null;
+          }
+        })();
+        if (!projectWs) {
+          return "Error: cannot resolve project workspace for GenerateAudio output";
+        }
+        const candidateAbs = path.isAbsolute(_outputPath)
+          ? path.normalize(_outputPath)
+          : path.normalize(path.join(projectWs, _outputPath));
+        const relToWs = path.relative(projectWs, candidateAbs);
+        if (relToWs.startsWith("..") || path.isAbsolute(relToWs)) {
+          return `Error: GenerateAudio output path '${_outputPath}' resolves outside the project workspace`;
+        }
+
         const config = loadConfig();
         const scriptDir = path.join(config.WORKSPACE_DIR, "scripts", "asset-pipeline");
         const pythonBin = resolvePipelinePython();
@@ -1132,10 +1162,11 @@ async function executeTool(
 
           // Write Godot .import sidecar for audio assets
           try {
-            const config = loadConfig();
-            const absOutput = path.isAbsolute(_outputPath)
-              ? _outputPath
-              : path.join(resolveProjectWorkspace(projectContext?.workspacePath ?? ""), _outputPath);
+            // Use the validated candidateAbs (already proven to be
+            // inside the project workspace) instead of recomputing
+            // the join here. This prevents any drift between the
+            // validation above and the actual write below.
+            const absOutput = candidateAbs;
             const importPath = `${absOutput}.import`;
             const ext = path.extname(absOutput).slice(1) || "wav";
             const importBody = `[remap]
