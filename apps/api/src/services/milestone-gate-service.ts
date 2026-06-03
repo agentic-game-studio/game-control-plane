@@ -31,7 +31,24 @@ export function isGatePassing(verdict: string): boolean {
   const v = verdict.toUpperCase().replace(/\s+/g, "_");
   if (BLOCK_VERDICTS.has(v)) return false;
   if (PASS_VERDICTS.has(v)) return true;
-  return !BLOCK_VERDICTS.has(v);
+  // 20-H-gate-fail-open: the previous final line was
+  // `return !BLOCK_VERDICTS.has(v);` which is tautologically `true` —
+  // the two early returns above already eliminated every verdict in
+  // BLOCK_VERDICTS and PASS_VERDICTS, so this branch only ever ran
+  // for *unknown* verdicts, and the conditional always evaluated to
+  // `true`. The bug was effectively "any verdict the LLM emits that
+  // isn't explicitly listed as blocking is treated as passing," which
+  // means a malformed / ambiguous / hallucinated gate response (e.g.
+  // the LLM regurgitating its prompt instead of answering, returning
+  // "MAYBE" or "OK", or a JSON-RPC error string) silently advances
+  // the autonomous milestone. Gate callers — runMilestoneGates at L70
+  // — push the verdict into a `blockers` list only when this returns
+  // false; an over-permissive classifier means blockers stays empty
+  // and the milestone summary at L75-78 says "passed". Fail-closed:
+  // an unrecognized verdict must be re-classified (added to PASS or
+  // BLOCK) before the gate treats it as passing. Mirrors the same
+  // shape as the auth middleware's explicit-allowlist policy.
+  return false;
 }
 
 export interface MilestoneGateRunResult {
