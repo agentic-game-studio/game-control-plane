@@ -229,6 +229,15 @@ export function clearProjectProducerSummary(projectId: string): void {
     clearTimeout(t);
     pendingEmitTimers.delete(projectId);
   }
+  // 20-M-chain-leak: the persist chain Map previously survived project
+  // deletion. Once the project is gone, no more ingest calls land on
+  // its entry, so the chain's tail resolves to a settled Promise and
+  // is GC-able as a value — but the *key* persisted for the lifetime
+  // of the process. With UUID project IDs and a long-lived API, every
+  // deleted project left a permanent Map entry (one Promise reference
+  // each, ~100 bytes). Drop the chain entry so the Map shrinks back
+  // to the active-project count.
+  producerSummaryPersistChains.delete(projectId);
 }
 
 async function flushEmitProducerUpdate(projectId: string): Promise<void> {

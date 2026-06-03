@@ -287,8 +287,22 @@ function parseVerdict(
     return { parsed: "CONCERNS", raw: firstLine };
   }
 
-  // Default to CONCERNS if we can't parse
-  return { parsed: expectedOptions.includes("CONCERNS") ? "CONCERNS" : expectedOptions[0], raw: firstLine };
+  // 20-M-verdict-fail-open: the previous default returned
+  // `expectedOptions.includes("CONCERNS") ? "CONCERNS" :
+  // expectedOptions[0]`. CONCERNS is in PASS_VERDICTS
+  // (milestone-gate-service.ts:22), so an LLM that produced
+  // something completely unparseable — e.g., a model echoing its
+  // prompt, returning a JSON-RPC error, or hallucinating a verdict
+  // keyword that doesn't appear in expectedOptions — got
+  // classified as "passing with concerns", which is fail-open for
+  // a security-relevant classifier. Throw instead; the catch in
+  // executeGate returns verdict: "ERROR" (a BLOCK verdict), the
+  // logger.error gets the original content for triage, and the
+  // caller can decide whether to retry or surface to the operator.
+  // The firstLine is included so triage doesn't have to re-parse.
+  throw new Error(
+    `parseVerdict: could not classify verdict. expectedOptions=[${expectedOptions.join(", ")}] rawFirstLine="${firstLine}"`,
+  );
 }
 
 /**

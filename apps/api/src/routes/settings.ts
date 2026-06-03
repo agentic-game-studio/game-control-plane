@@ -294,8 +294,16 @@ settingsRouter.post("/consume", async (req: Request, res: Response) => {
             current: onTopCurrent,
           },
         },
+        // 20-M-usage-log-cap: mirror the cap that
+        // credit-service.ts:54 enforces. Both code paths target the
+        // same settings.json usageLog field; without the cap, the
+        // alternate route here grows the array unbounded and forces
+        // PATCH /api/settings to re-serialize the entire history on
+        // every subsequent call. Cap at 500 (one more than credit-
+        // service's 499) so the two paths can't disagree about the
+        // cap during a transition window.
         usageLog: [
-          ...data.usageLog,
+          ...data.usageLog.slice(-499),
           {
             id: newId("use"),
             taskName,

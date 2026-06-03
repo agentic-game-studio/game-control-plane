@@ -20,7 +20,7 @@ export async function getRunMetrics(sessionId: string): Promise<AutonomousRunMet
   return data.runs.find((r) => r.sessionId === sessionId) ?? null;
 }
 
-export async function upsertRunMetrics(partial: Partial<AutonomousRunMetrics> & { sessionId: string; projectId: string }): Promise<AutonomousRunMetrics> {
+export async function upsertRunMetrics(partial: Partial<AutonomousRunMetrics> & { sessionId: string; projectId: string; addTokens?: number }): Promise<AutonomousRunMetrics> {
   // 14-CR-run-metrics: route the read-modify-write through updateData so
   // the per-file mutex serializes concurrent upserts. recordTokenUsage
   // is called from makeTokenTracker on every LLM tool call — two
@@ -28,6 +28,21 @@ export async function upsertRunMetrics(partial: Partial<AutonomousRunMetrics> & 
   // verifier tokens) would both see the same baseline, each compute
   // its own delta, and last-writer-wins losing one delta silently.
   // updateData takes a mutator and applies it under the lock.
+  //
+  // 20-M-run-metrics-rwm: the previous fix moved the *write* under the
+  // mutex but left the *read* outside it. recordTokenUsage computed
+  // `baseTokens + delta` from a lock-free read and then passed that
+  // fixed value to upsertRunMetrics, which Object.assign'd it on top
+  // of whatever the mutex had. Two concurrent calls (CallA reading
+  // baseline=100 with delta=50, CallB reading baseline=100 with
+  // delta=30) would serialize at the mutex but the second writer
+  // would clobber the first's increment — the lock guaranteed mutual
+  // exclusion, not linearizability. Fix: callers that want to
+  // *add* to estimatedTokens pass `addTokens: delta` instead of
+  // `estimatedTokens: baseTokens + delta`; we apply the += inside
+  // the same mutex acquisition that read the baseline. Object.assign
+  // is still used for all other fields, so non-token upserts are
+  // unchanged.
   const now = new Date().toISOString();
   const blankRecord: AutonomousRunMetrics = {
     sessionId: partial.sessionId,
@@ -54,7 +69,14 @@ export async function upsertRunMetrics(partial: Partial<AutonomousRunMetrics> & 
       existing = { ...blankRecord };
       data.runs.unshift(existing);
     }
-    Object.assign(existing, partial, { lastUpdatedAt: now });
+    // Pull addTokens out of the assign payload so Object.assign doesn't
+    // treat it as a real field. Apply the increment under the same
+    // mutex acquisition that read the baseline.
+    const { addTokens, ...assignable } = partial;
+    if (typeof addTokens === "number" && addTokens > 0) {
+      existing.estimatedTokens = (existing.estimatedTokens ?? 0) + addTokens;
+    }
+    Object.assign(existing, assignable, { lastUpdatedAt: now });
     data.runs = data.runs.slice(0, 100);
     return data;
   });
@@ -81,17 +103,21 @@ export async function recordTokenUsage(
   projectId: string,
   usage: { input_tokens: number; output_tokens: number },
 ): Promise<void> {
-  // 14-CR-run-metrics: read baseline once, then perform a single
-  // atomic upsert. Avoids the previous two-IO pattern (read, find,
-  // upsert-create-if-missing, read-again-to-find) which had its own
-  // race between the first read and the second upsert.
-  const data = await readMetricsData();
-  const existing = data.runs.find((r) => r.sessionId === sessionId);
-  const baseTokens = existing?.estimatedTokens ?? 0;
+  // 20-M-run-metrics-rwm: the read-modify-write must happen under a
+  // single mutex acquisition. The previous shape read the baseline
+  // here, added the delta lock-free, then passed the pre-summed
+  // value into upsertRunMetrics. Two concurrent calls (invokeAgent
+  // tokens + verifier tokens, both routed through makeTokenTracker)
+  // would both see the same baseline, both compute the delta, and
+  // last-writer-wins inside the mutex would clobber the first
+  // call's increment. Pass the delta only and let upsertRunMetrics
+  // apply `existing.estimatedTokens += delta` under the same lock
+  // that located `existing`. The lock-free read is gone.
   const delta = (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0);
+  if (delta <= 0) return;
   await upsertRunMetrics({
     sessionId,
     projectId,
-    estimatedTokens: baseTokens + delta,
+    addTokens: delta,
   });
 }
