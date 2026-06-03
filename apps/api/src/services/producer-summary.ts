@@ -32,6 +32,20 @@ export function safeIngestProducerSummaryFact(
 
 const pendingEmitTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
+// 18-H-prod-sum-rmw: per-project serialization chain for the
+// producer-summary ingest path. The in-memory RMW on
+// `session.producerSummary` is synchronous (no `await` between the
+// read, push, and write) so it can't lose data in-process. But the
+// next line, `await mod.persistChatStore()`, is a yield point. Two
+// concurrent facts can both complete the RMW and then interleave
+// on the persist: CallA writes snapshot-with-fact1, CallB writes
+// snapshot-with-fact1+fact2 to disk first, then CallA's write
+// overwrites it with snapshot-with-fact1 only. Process restart
+// would then load the older snapshot and lose fact2. Serialize the
+// persist+emit behind a per-project promise chain so the disk
+// state always reflects the most recent RMW.
+const producerSummaryPersistChains = new Map<string, Promise<unknown>>();
+
 export function emptyProducerSummarySnapshot(): ProducerSummarySnapshot {
   return {
     version: 1,
@@ -287,8 +301,25 @@ export async function ingestProducerSummaryFact(
     session.producerSummary = emptyProducerSummarySnapshot();
   }
   session.producerSummary = pushProducerSummaryFact(session.producerSummary, fact);
-  await mod.persistChatStore();
-  await flushEmitProducerUpdate(projectId);
+  // 18-H-prod-sum-rmw: serialize the persist+emit behind the per-project
+  // chain. The previous tail's promise resolves into this fact's
+  // work; the new tail is what the next caller awaits. Errors are
+  // caught so a failure in one fact's persist doesn't poison the
+  // chain for all subsequent facts (the snapshot was already
+  // mutated synchronously above — we still try to persist, but a
+  // disk-full here shouldn't strand later ingests).
+  const previousTail = producerSummaryPersistChains.get(projectId) ?? Promise.resolve();
+  const nextTail = previousTail
+    .catch(() => undefined)
+    .then(async () => {
+      await mod.persistChatStore();
+      await flushEmitProducerUpdate(projectId);
+    });
+  producerSummaryPersistChains.set(
+    projectId,
+    nextTail.catch(() => undefined),
+  );
+  await nextTail;
 }
 
 /**

@@ -961,6 +961,22 @@ chatRouter.post("/sessions/:id/close", async (req: Request, res: Response) => {
     detail: roleDisplay,
   });
 
+  // 18-H-close-no-abort: abort any in-flight LLM call for the
+  // consultation before deleting the session. Without this, the
+  // LLM can keep streaming tokens after the user has called
+  // /close; the response handler would then call
+  // `session.messages.push(...)` against the now-orphaned
+  // object and the subsequent `saveChatState()` would persist it
+  // back into chat-state.json, resurrecting the deleted session
+  // on next load. DELETE /sessions/:id has the same wiring at
+  // line ~877; /close was added later and missed it.
+  const controller = sessionAbortControllers.get(id);
+  if (controller) {
+    try { controller.abort(); } catch { /* already aborted */ }
+  }
+  sessionAbortControllers.delete(id);
+  cleanupWorkflow(id);
+
   // Delete the consultation session after forwarding summary
   delete chatStore.sessions[id];
 
@@ -1507,6 +1523,16 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
 
   // If this is a system / orchestration message or no auto-response needed, return early
   if (body.type === "system" || body.type === "progress" || body.type === "producer_update") {
+    // 18-H-disconnect-handler-leak: detach the close handler before
+    // the early return. The handler itself is a no-op for system
+    // messages (lockHeld is false), but the listener keeps the
+    // `releaseLock` closure alive in the request's listener map and
+    // would fire on a late `req` close — which today is harmless,
+    // but if a future maintainer adds a side-effect to
+    // releaseLock (e.g. broadcasting chat:aborted), the late fire
+    // would be a phantom event for a session that already
+    // responded.
+    req.off("close", clientDisconnectHandler);
     broadcast({
       type: "chat:message",
       sessionId: id,

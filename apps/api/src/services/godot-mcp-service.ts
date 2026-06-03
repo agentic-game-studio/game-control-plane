@@ -472,6 +472,31 @@ export class GodotMCPService {
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pendingRequests.delete(id);
+        // 18-H-mcp-no-cancel: best-effort JSON-RPC cancellation
+        // notification to the MCP server. The server doesn't know
+        // we gave up; its `tools/call` continues to run on the
+        // Godot side (a long mcp__godot_run_project test), holding
+        // the Godot editor's WS connection. When the response
+        // eventually arrives, processStdout sees no matching id and
+        // silently drops it — the work was wasted, and the orphan
+        // call blocks subsequent calls. JSON-RPC 2.0 § 4.5 allows
+        // notifications/cancelled as a hint; the server is free to
+        // ignore it, but Godot's MCP server honors the cancellation
+        // request. Failures here are non-fatal — the timeout
+        // rejection is what the caller sees.
+        try {
+          const cancelNotification = {
+            jsonrpc: "2.0",
+            method: "notifications/cancelled",
+            params: { id, reason: "client timeout" },
+          };
+          this.process!.stdin!.write(JSON.stringify(cancelNotification) + "\n");
+        } catch (cancelErr) {
+          logger.warn(
+            { method, id, err: cancelErr instanceof Error ? cancelErr.message : String(cancelErr), event: "godot_mcp_cancel_write_failed" },
+            "Failed to send MCP cancel notification — server will receive late response that will be dropped",
+          );
+        }
         logger.error({ method, id, event: "godot_mcp_timeout" }, `MCP request timed out: ${method}`);
         reject(new Error(`Request '${method}' timed out after ${this.timeout}ms`));
       }, this.timeout);

@@ -184,6 +184,12 @@ export interface VerificationResult {
   feedback: string;
   verifier: AgentRole;
   passed: boolean;
+  // 18-H-verify-double: set to "skipped" when the function returned
+  // early because a verification for the same ticket is already in
+  // flight. Callers (e.g. autonomous loop retry) use this to know
+  // that the no-op return wasn't a silent bug — the in-flight
+  // verification will move the ticket on its own.
+  status?: "completed" | "skipped";
 }
 
 /**
@@ -194,6 +200,24 @@ export async function verifyTicket(
   ticket: Ticket,
   agentOutput: string,
 ): Promise<VerificationResult> {
+  // 18-H-verify-double: refuse to start a second verification for
+  // the same ticket. A ticket can land in `qa` twice (autonomous
+  // redelivery + producer move, or two rapid fire-and-forget
+  // triggerVerification calls) and both calls would otherwise run
+  // the verifier LLM, race on `consecutiveFailures`, and broadcast
+  // duplicate `ticket:verified` events. The first call's
+  // AbortController is registered in `activeVerifications` at line
+  // ~218; the second call's set() below would overwrite it and
+  // orphan the first's controller (so a later cancelVerification
+  // would abort the wrong one). Bail with a "skipped" result so
+  // the caller doesn't crash, but no work is done.
+  if (activeVerifications.has(ticket.id)) {
+    logger.warn(
+      { event: "verify_already_running", ticketId: ticket.id },
+      `Verification already in flight for ticket ${ticket.id} — skipping duplicate`,
+    );
+    return { ticketId: ticket.id, verdict: "skipped", feedback: "verification already in flight", verifier: "qa-tester", passed: false, status: "skipped" };
+  }
   const verifier = selectVerifier(ticket.area, ticket.subarea);
   const task = buildVerificationPrompt(ticket, agentOutput);
 
