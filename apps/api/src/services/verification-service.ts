@@ -18,21 +18,35 @@ import { loadConfig } from "../config.js";
 // Without this, a project delete would orphan the verification job: the
 // LLM round-trip would continue burning tokens on a ticket that no
 // longer exists.
-const activeVerifications = new Map<string, AbortController>();
+//
+// 15-H-cancel-string-match: the value is a `VerificationEntry` that
+// also stores the projectId. cancelVerificationsForProject used to
+// match by `ticketId.startsWith(projectId-)` which is false-positive
+// prone — project "foo" matched ticket "foobar-123". Storing the
+// projectId lets the cancel walk the map and abort by exact match.
+interface VerificationEntry {
+  controller: AbortController;
+  // Ticket.projectId is `string | undefined` per packages/types; a
+  // ticket with no projectId is a project-orphan that the cancel-by-
+  // project walk will never match. Using `string | undefined` here
+  // (instead of coercing to null) keeps the call site type-correct.
+  projectId: string | undefined;
+}
+const activeVerifications = new Map<string, VerificationEntry>();
 
 export function cancelVerification(ticketId: string): boolean {
-  const controller = activeVerifications.get(ticketId);
-  if (!controller) return false;
-  try { controller.abort(); } catch { /* already aborted */ }
+  const entry = activeVerifications.get(ticketId);
+  if (!entry) return false;
+  try { entry.controller.abort(); } catch { /* already aborted */ }
   activeVerifications.delete(ticketId);
   return true;
 }
 
 export function cancelVerificationsForProject(projectId: string): number {
   let count = 0;
-  for (const [ticketId, controller] of activeVerifications) {
-    if (ticketId.startsWith(`${projectId}-`) || ticketId.includes(`/${projectId}/`)) {
-      try { controller.abort(); } catch { /* already aborted */ }
+  for (const [ticketId, entry] of activeVerifications) {
+    if (entry.projectId === projectId) {
+      try { entry.controller.abort(); } catch { /* already aborted */ }
       activeVerifications.delete(ticketId);
       count++;
     }
@@ -201,7 +215,7 @@ export async function verifyTicket(
     const fallbackSession = ticket.projectId
       ? `verify-fallback-${ticket.projectId}`
       : `verify-fallback-${ticket.id}`;
-    activeVerifications.set(ticket.id, controller);
+    activeVerifications.set(ticket.id, { controller, projectId: ticket.projectId });
     // 12-H17: walk the verifier fallback chain on error. The static
     // AREA_VERIFIERS table declares a `fallback` per area, but the
     // previous code only used the primary — if the primary verifier
@@ -572,7 +586,7 @@ export async function verifyTicket(
     // Always release the controller slot. We only clear if this
     // controller is still the active one for the ticket — a
     // re-entered verification would have replaced it.
-    if (activeVerifications.get(ticket.id) === controller) {
+    if (activeVerifications.get(ticket.id)?.controller === controller) {
       activeVerifications.delete(ticket.id);
     }
   }

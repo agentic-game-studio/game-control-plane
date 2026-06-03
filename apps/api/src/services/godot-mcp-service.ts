@@ -265,6 +265,19 @@ export class GodotMCPService {
   async start(): Promise<void> {
     if (this.isRunning) return;
 
+    // 15-H-start-reentry: if a previous start() partially failed (spawn
+    // succeeded but handshake errored, or setupGodotMCPServer threw
+    // after we attached listeners), this.process may be set while
+    // isRunning is false. Without this guard, re-calling start() would
+    // spawn a SECOND child, leak the first one (its listeners are
+    // overwritten when we re-assign this.process), and never call
+    // cleanup on the orphan. The orphan runs forever, holds a stdin
+    // pipe, and would surface as a zombie process on every project.
+    if (this.process) {
+      logger.warn({ event: "godot_mcp_start_reentry_cleanup" }, "start() called with orphaned process — cleaning up before re-spawn");
+      this.cleanup();
+    }
+
     // Auto-setup: install dependencies and build if needed
     const setupResult = setupGodotMCPServer();
     if (!setupResult.success) {
@@ -343,6 +356,14 @@ export class GodotMCPService {
 
     this.process.on("error", (err) => {
       logger.error({ error: err.message, event: "godot_mcp_error" }, "MCP process error");
+      // 15-H-error-no-cleanup: Node's spawn fires `error` (and NOT
+      // `exit`) on ENOENT/EACCES for the binary, or on EPIPE if the
+      // process dies before the handshake. Without this call, the
+      // pendingRequests map is never cleared, this.process is never
+      // nulled, and a subsequent executeTool() races against a dead
+      // stdin. cleanup() nulls the process and aborts the in-flight
+      // requests with a clear error.
+      this.cleanup();
     });
 
     // Wait for the MCP `initialize` JSON-RPC handshake to actually complete
@@ -724,6 +745,14 @@ export async function getOrCreateGodotMCPService(
   projectId: string,
   options?: GodotMCPServiceOptions
 ): Promise<GodotMCPService> {
+  // 15-H-shutdown-race: short-circuit any race that fires AFTER
+  // shutdownAllMCPServices. The shutdown clears both maps but a
+  // request in flight that hits the route handler at the wrong
+  // moment would still try to spawn a new child. The flag is the
+  // belt; the map clear is the suspenders.
+  if (shuttingDown) {
+    throw new Error("MCP services are shutting down — cannot create new services");
+  }
   const existing = activeServices.get(projectId);
   if (existing) return existing;
 
@@ -763,9 +792,43 @@ export async function removeGodotMCPService(projectId: string): Promise<void> {
 
 /** Stop all active MCP services (for graceful shutdown) */
 export async function shutdownAllMCPServices(): Promise<void> {
+  // 15-H-shutdown-race: set the backstop flag FIRST so any in-flight
+  // getOrCreate that races past the map check below still throws.
+  shuttingDown = true;
+  // 15-H-shutdown-race: clear AFTER awaiting the stops, not before.
+  // The previous order (clear → await stop) let a concurrent
+  // getOrCreateGodotMCPService see an empty map during the stop
+  // window, spawn a new child process, and call activeServices.set
+  // — leaving two MCP servers running for the same projectId. Now:
+  // mark intent first, then await, then clear.
+  //
+  // 15-H-pending-creations: pendingCreations entries that resolve
+  // AFTER shutdown would call activeServices.set on a torn-down map,
+  // creating a zombie service that never gets stopped. Drain
+  // pendingCreations too so a creation that fires during shutdown
+  // doesn't escape.
   const entries = [...activeServices.entries()];
-  activeServices.clear();
+  for (const [, service] of entries) {
+    // Best-effort: the service may already be stopping; ignore the
+    // race (stop() is idempotent thanks to intentionalStop).
+    void service.stop();
+  }
   await Promise.allSettled(entries.map(([, service]) => service.stop()));
+  // Clear both registries AFTER the await. A getOrCreate that races
+  // after this point sees an empty map and would re-spawn; guard
+  // against that with the shutdown flag below.
+  activeServices.clear();
+  pendingCreations.clear();
+}
+
+// 15-H-shutdown-race: a getOrCreate call that races AFTER the await
+// but BEFORE this function returns would see an empty map and spawn
+// a new service. The flag is a belt-and-suspenders backstop — the
+// real fix is to clear maps last, but the flag also covers
+// pendingCreations that resolve mid-shutdown.
+let shuttingDown = false;
+export function isShuttingDown(): boolean {
+  return shuttingDown;
 }
 
 /** Get the active service for a project (null if not running) */

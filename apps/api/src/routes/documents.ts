@@ -1,5 +1,6 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
+import path from "node:path";
 import { DocumentStore } from "../services/document-store.js";
 import { loadConfig } from "../config.js";
 import { broadcast } from "../services/websocket.js";
@@ -55,6 +56,35 @@ async function getProjectStore(projectId: string): Promise<DocumentStore | null>
   return store;
 }
 
+/** 15-H-document-store-broadcast-dup: when a project store's
+ * workspace dir is a subdirectory of WORKSPACE_DIR, the global
+ * store's recursive watcher (rooted at WORKSPACE_DIR) ALSO fires
+ * for the same file. Both stores' onChange handlers would then
+ * broadcast the same `document:updated` event — every connected
+ * client re-renders twice, the wiki UI re-fetches the board twice.
+ *
+ * The fix: the global store's onChange filters out files whose
+ * absolute path falls under any active project store's workspace.
+ * The empty path is the `__watcher_stopped__` sentinel, which is
+ * always passed through (the watcher is gone, no overlap to dedupe).
+ *
+ * path.relative() is used instead of startsWith() so a project
+ * store at `/workspace/foo` correctly excludes a global file at
+ * `/workspace/foobar` (which would false-match the naive
+ * `path.startsWith("/workspace/foo")` check).
+ */
+function isPathInActiveProjectStore(absolutePath: string): boolean {
+  if (!absolutePath) return false;
+  for (const [, store] of projectStores) {
+    const projectDir = store.getWorkspaceDir();
+    const rel = path.relative(projectDir, absolutePath);
+    if (rel && !rel.startsWith("..") && !path.isAbsolute(rel)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /** Drop the in-memory DocumentStore for a project (called on project delete).
  * Without this, the projectStores Map grows unbounded as projects are created
  * and deleted — each entry holds an active fs.watch handle and the in-memory
@@ -79,6 +109,11 @@ async function resolveStore(req: Request): Promise<DocumentStore> {
 
 // Start global file watching with WebSocket broadcast
 globalStore.startWatching((event) => {
+  // 15-H-document-store-broadcast-dup: skip events that fall under
+  // any active project store's workspace — those will be broadcast
+  // by the project store's own watcher. Sentinel events (path === "")
+  // always pass through.
+  if (isPathInActiveProjectStore(event.path)) return;
   broadcast({ type: "document:updated", documentId: event.documentId, category: event.category, title: event.title });
 });
 

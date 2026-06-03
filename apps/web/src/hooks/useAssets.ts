@@ -33,8 +33,22 @@ export function useAssets(projectId?: string) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const lastProjectId = useRef<string | undefined>(projectId);
   const mountedRef = useRef(true);
+  // 15-H-assets-duplicate-fetch: the previous code had BOTH a
+  // useEffect(setLoading+fetchAssets) AND a useAbortableEffect that
+  // both fired on mount — two parallel GETs, the first response
+  // discarded. Removed that duplicate useEffect; useAbortableEffect is
+  // now the single source of truth for the initial fetch and handles
+  // its own abort on unmount via the signal.
+  //
+  // mountedRef is still needed for `rescan`, which is a user-triggered
+  // action (button click) that does NOT go through useAbortableEffect.
+  // Without it, a user clicking "rescan" and then navigating away
+  // mid-flight would call setState on an unmounted component. We could
+  // wrap rescan in a fresh AbortController, but the simpler mountedRef
+  // is fine here because rescan is rare (one user click at a time) and
+  // the only consequence of leaking is a harmless React warning.
+
   // Q9-6: single-flight de-dup. Two consumers (assets page + Producer
   // chat) can mount the hook in the same render and fire a parallel
   // GET each. The second call wastes a round-trip and worsens the
@@ -51,18 +65,15 @@ export function useAssets(projectId?: string) {
       try {
         const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
         const result = await apiFetch<AssetsData>(`/api/assets${qs}`);
-        if (!mountedRef.current) return;
         setData(result);
         setError(null);
       } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") return;
         logger.error("Failed to fetch assets", { err: err });
-        if (!mountedRef.current) return;
         setError(err instanceof Error ? err.message : "Failed to load assets");
         setData(DEFAULT_ASSETS);
       } finally {
-        if (mountedRef.current) {
-          setLoading(false);
-        }
+        setLoading(false);
         // Clear the inflight ref only if it still matches this run —
         // a key change mid-flight would have already installed a new
         // entry that we mustn't blow away.
@@ -75,16 +86,11 @@ export function useAssets(projectId?: string) {
     return promise;
   }, [projectId]);
 
-  useEffect(() => {
-    setLoading(true);
-    fetchAssets();
-  }, [fetchAssets]);
-
-  // 14-FH10-unmount-cancel: separate useAbortableEffect for the
-  // initial fetch so unmount cancels the request. The previous
-  // useEffect+mountedRef pattern worked but kept the request in
-  // flight for up to 30s. rescan() and the WS-driven fetchAssets
-  // stay as-is since they're user- or event-triggered.
+  // 14-FH10-unmount-cancel: useAbortableEffect cancels the in-flight
+  // request on unmount via its signal, replacing the previous
+  // useEffect+mountedRef pattern that kept the request alive for up
+  // to 30s. rescan() and the WS-driven fetchAssets stay as-is since
+  // they're user- or event-triggered.
   useAbortableEffect(async (signal) => {
     const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
     try {

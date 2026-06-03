@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useCallback } from "react";
 import type {
   DocumentEntry,
   DocumentDetail,
@@ -8,6 +8,7 @@ import type {
   WSEvent,
 } from "@game-studio/types";
 import { apiFetch } from "@/lib/api";
+import { useAbortableEffect } from "./useAbortableEffect";
 
 interface UseDocumentsReturn {
   documents: DocumentEntry[];
@@ -29,14 +30,6 @@ export function useDocuments(projectId?: string): UseDocumentsReturn {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  // 14-FH10-unmount-cancel: hold a long-lived controller for
-  // the effect-driven fetches. selectDocument/refresh are
-  // user-triggered so they get a per-call controller instead.
-  // On unmount we abort the in-flight fetch so React doesn't
-  // warn about a state update on an unmounted component, and
-  // a quick projectId switch doesn't trigger an old fetch's
-  // setState to clobber the new data.
-  const loadAbortRef = useRef<AbortController | null>(null);
 
   const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
 
@@ -62,24 +55,25 @@ export function useDocuments(projectId?: string): UseDocumentsReturn {
     }
   }, [qs]);
 
-  // Initial load — abort in-flight on unmount or qs change.
-  useEffect(() => {
-    loadAbortRef.current?.abort();
-    const controller = new AbortController();
-    loadAbortRef.current = controller;
-    (async () => {
-      setLoading(true);
-      try {
-        await Promise.all([fetchDocuments(controller.signal), fetchGraph(controller.signal)]);
-      } finally {
-        if (!controller.signal.aborted) {
-          setLoading(false);
-        }
+  // 15-H-useDocuments-dead-ref: the previous useEffect held a
+  // `loadAbortRef` to abort the previous controller on qs change.
+  // But the effect's cleanup also called `controller.abort()` on the
+  // local var, so the ref-based abort was always a no-op (the previous
+  // controller was already aborted by the cleanup before the new effect
+  // ran). useAbortableEffect does the right thing in one helper —
+  // creates a controller, passes the signal to the work, and aborts
+  // the controller on unmount or deps change. selectDocument/refresh
+  // are user-triggered and keep their per-call controller so they
+  // don't clobber the initial-load signal.
+  useAbortableEffect(async (signal) => {
+    setLoading(true);
+    try {
+      await Promise.all([fetchDocuments(signal), fetchGraph(signal)]);
+    } finally {
+      if (!signal.aborted) {
+        setLoading(false);
       }
-    })();
-    return () => {
-      controller.abort();
-    };
+    }
   }, [fetchDocuments, fetchGraph]);
 
   // Select a document

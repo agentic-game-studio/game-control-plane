@@ -135,6 +135,15 @@ export class DocumentStore {
     this.workspaceDir = workspaceDir;
   }
 
+  /** Expose the watched directory so routes can detect overlap
+   * between the global store and per-project stores (which would
+   * otherwise double-broadcast the same `document:updated` event).
+   * Without this accessor, the route layer has no way to filter
+   * the global store's events against active project store dirs. */
+  getWorkspaceDir(): string {
+    return this.workspaceDir;
+  }
+
   /** Get category for a file path relative to workspace */
   private categorize(relPath: string): DocumentCategory {
     const normalized = relPath.startsWith("docs/") ? relPath.slice(5) : relPath;
@@ -390,7 +399,7 @@ export class DocumentStore {
   }
 
   /** Start watching workspace for file changes */
-  startWatching(onChange?: (event: { documentId: string; category: DocumentCategory; title: string }) => void): void {
+  startWatching(onChange?: (event: { documentId: string; category: DocumentCategory; title: string; /** Absolute path of the changed file (workspace-relative path joined onto workspaceDir). Lets callers detect overlap with other stores' watches. */ path: string }) => void): void {
     if (this.watcher) return;
 
     try {
@@ -427,7 +436,19 @@ export class DocumentStore {
               const docs = await this.ensureCache();
               const doc = docs.get(slug);
               if (doc) {
-                onChange({ documentId: doc.id, category: doc.category, title: doc.title });
+                // 15-H-document-store-broadcast-dup: emit the absolute
+                // path alongside the metadata so the route layer can
+                // filter the global store's events against active
+                // project store directories (a project whose workspace
+                // is under WORKSPACE_DIR is watched by BOTH stores,
+                // and fs.watch on the parent fires for the child's
+                // changes too).
+                onChange({
+                  documentId: doc.id,
+                  category: doc.category,
+                  title: doc.title,
+                  path: path.join(this.workspaceDir, filename),
+                });
               }
             }
           } catch {
@@ -452,7 +473,11 @@ export class DocumentStore {
         }
         this.watcher = null;
         if (onChange) {
-          onChange({ documentId: "", category: "design" as DocumentCategory, title: "__watcher_stopped__" });
+          // 15-H-document-store-broadcast-dup: include the sentinel
+          // `path` (empty string) so the type matches the onChange
+          // contract. The route layer filters by path === "" (always
+          // pass) for the stopped sentinel.
+          onChange({ documentId: "", category: "design" as DocumentCategory, title: "__watcher_stopped__", path: "" });
         }
       });
     } catch (err) {

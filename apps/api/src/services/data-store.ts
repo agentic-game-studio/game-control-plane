@@ -51,34 +51,70 @@ export async function readData<T>(filename: string): Promise<T> {
 }
 
 export async function writeData<T>(filename: string, data: T): Promise<void> {
-  await ensureDataDir();
-  const filePath = path.join(DATA_DIR, filename);
-  const tmpPath = filePath + ".tmp";
-  try {
-    await fs.writeFile(tmpPath, JSON.stringify(data, null, 2), "utf-8");
-    await fs.rename(tmpPath, filePath);
-  } catch (writeErr) {
-    // Clean up tmp file on failure to avoid stale .tmp files
-    await fs.unlink(tmpPath).catch(() => {});
-    // 12-H5: surface EROFS specifically with a clearer error. A
-    // read-only filesystem (mounted data volume in CI, container
-    // with the data dir bind-mounted read-only, accidental chmod)
-    // produces an EROFS error from rename(). The default message
-    // is "EROFS: read-only filesystem, rename '...tmp' -> '...'"
-    // which is informative, but the caller has no way to
-    // distinguish "disk full" from "permission denied" from
-    // "read-only mount". Wrap with a tagged error so route
-    // handlers can decide whether to retry (transient) or surface
-    // 503 (read-only is a config problem, not a request problem).
-    if (writeErr instanceof Error && /EROFS/.test(writeErr.message)) {
-      const err = new Error(
-        `Cannot write ${filename}: data directory is on a read-only filesystem. ` +
-        `Check that ${DATA_DIR} is mounted with read-write permissions.`,
-      );
-      (err as Error & { code: string }).code = "DATA_DIR_READONLY";
-      throw err;
+  // 15-H-write-mutex: writeData used to bypass the per-file mutex that
+  // updateData enforces. Two concurrent writes to the same file (e.g.,
+  // a /settings PATCH landing while the autonomous loop is also writing
+  // settings.json, or two /api/chat/sessions calls racing on
+  // chat-state.json) would both write to the shared .tmp path, and the
+  // second's rename could interleave with the first's writeFile —
+  // leaving a truncated, corrupted, or partially-old file. Wrap the
+  // body in a per-file lock so any updateData + writeData call (and
+  // any two writeData calls) for the same filename are serialized.
+  await withFileLock(filename, async () => {
+    await ensureDataDir();
+    const filePath = path.join(DATA_DIR, filename);
+    const tmpPath = filePath + ".tmp";
+    try {
+      await fs.writeFile(tmpPath, JSON.stringify(data, null, 2), "utf-8");
+      await fs.rename(tmpPath, filePath);
+    } catch (writeErr) {
+      // Clean up tmp file on failure to avoid stale .tmp files
+      await fs.unlink(tmpPath).catch(() => {});
+      // 12-H5: surface EROFS specifically with a clearer error. A
+      // read-only filesystem (mounted data volume in CI, container
+      // with the data dir bind-mounted read-only, accidental chmod)
+      // produces an EROFS error from rename(). The default message
+      // is "EROFS: read-only filesystem, rename '...tmp' -> '...'"
+      // which is informative, but the caller has no way to
+      // distinguish "disk full" from "permission denied" from
+      // "read-only mount". Wrap with a tagged error so route
+      // handlers can decide whether to retry (transient) or surface
+      // 503 (read-only is a config problem, not a request problem).
+      if (writeErr instanceof Error && /EROFS/.test(writeErr.message)) {
+        const err = new Error(
+          `Cannot write ${filename}: data directory is on a read-only filesystem. ` +
+          `Check that ${DATA_DIR} is mounted with read-write permissions.`,
+        );
+        (err as Error & { code: string }).code = "DATA_DIR_READONLY";
+        throw err;
+      }
+      throw writeErr;
     }
-    throw writeErr;
+  });
+}
+
+/** Acquire a per-file mutex for the duration of `body`. Used by writeData
+ * so concurrent writes to the same file (across both writeData and
+ * updateData) are serialized. Mirrors the same V8-single-thread pattern
+ * updateData uses: get → set without an await between them. */
+async function withFileLock<T>(filename: string, body: () => Promise<T>): Promise<T> {
+  const prev = fileLocks.get(filename) ?? Promise.resolve();
+  let resolveLock!: () => void;
+  const lockPromise = new Promise<void>((r) => { resolveLock = r; });
+  try {
+    fileLocks.set(filename, lockPromise);
+  } catch {
+    resolveLock();
+    throw new Error("fileLocks.set failed");
+  }
+  try {
+    await prev;
+    return await body();
+  } finally {
+    resolveLock();
+    if (fileLocks.get(filename) === lockPromise) {
+      fileLocks.delete(filename);
+    }
   }
 }
 
