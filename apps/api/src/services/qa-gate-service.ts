@@ -63,8 +63,25 @@ function runGodotHeadlessCommand(
         stderr: parsed.stderr ?? "",
         returnCode: parsed.returnCode ?? 0,
       };
-    } catch {
-      return { success: true, stdout, stderr: "", returnCode: 0 };
+    } catch (err) {
+      // 21-C-qa-gate-parse-fail-open: the previous catch returned
+      // `{ success: true, returnCode: 0 }` whenever stdout didn't
+      // parse as JSON. The Python gate script is supposed to emit
+      // a single-line JSON object; if it instead prints a Python
+      // traceback, a partial line (e.g. a timeout cut it off), or
+      // an empty string, the gate was silently classified as
+      // "passed" — moving the ticket toward completion in
+      // runQAGateChain. Mirrors the fail-closed shape used at
+      // autonomous.ts:336-345 (runBootCheck): treat unparseable
+      // output as a failed step, not a pass. Log the raw stdout
+      // (capped) so an operator can see *why* the gate failed to
+      // parse without trawling the Python script.
+      const preview = stdout.length > 500 ? `${stdout.slice(0, 500)}…` : stdout;
+      logger.warn(
+        { err: err instanceof Error ? err.message : String(err), stdoutPreview: preview, event: "qa_gate_parse_failed" },
+        "qa-gate: failed to parse Python gate output as JSON — treating as failure",
+      );
+      return { success: false, stdout, stderr: "Failed to parse gate output as JSON", returnCode: 1 };
     }
   } catch (err: unknown) {
     const stderr = err && typeof err === "object" && "stderr" in err ? String((err as { stderr: unknown }).stderr) : "";

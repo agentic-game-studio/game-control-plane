@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { AgentRole, ChatSession, ChatMessage, CreateMessageRequest, CreateChatSessionRequest, ContextUsage, DashboardData, Project, ProjectEngine } from "@game-studio/types";
 import { emptyProducerSummarySnapshot, safeIngestProducerSummaryFact } from "../services/producer-summary.js";
 import type { LLMMessage } from "../llm/zai-client.js";
-import { broadcastEvent, readData, writeData } from "../services/data-store.js";
+import { broadcastEvent, readData, writeData, updateData } from "../services/data-store.js";
 import { invokeAgent, continueConversation, type ProjectContext, detectEngineFromWorkspace } from "../services/llm-service.js";
 import { makeProgressCallback } from "../services/llm-service.js";
 import { getAgentSystemPrompt } from "../prompts/agent-prompt-loader.js";
@@ -537,16 +537,38 @@ async function getProjectById(projectId: string): Promise<Project | null> {
 }
 
 async function updateProjectEngine(projectId: string, engine: ProjectEngine): Promise<void> {
-  const data = await readData<DashboardData>("dashboard.json");
-  const idx = data.projects.findIndex((p) => p.id === projectId);
-  if (idx !== -1) {
-    data.projects[idx].engine = engine as Project["engine"];
-    data.projects[idx].updatedAt = new Date().toISOString();
-    await writeData("dashboard.json", data);
-    // Broadcast update
+  // 21-C-update-project-engine-rmw: previously this was a
+  // lock-free read → mutate → write sequence. Two concurrent
+  // `getProjectContextForSession` calls (chat.ts:510-521) for
+  // the same project with `engine: null` would each detect the
+  // engine, each call `updateProjectEngine`, and last-writer-
+  // wins inside the read+write cycle. Worse: if a
+  // `PATCH /api/dashboard/projects/:id` (which uses `updateData`
+  // with the per-file mutex) landed between this function's
+  // read and write, the PATCH's updated fields would be
+  // clobbered. Route through updateData so the read-modify-
+  // write happens under the same mutex acquisition that locates
+  // the project. Capture the post-update project for the
+  // broadcast via closure (updateData's signature is
+  // `(data) => data`, so we can't return a separate "result"
+  // value out of the updater).
+  let updatedProject: Project | null = null;
+  await updateData<DashboardData>("dashboard.json", (data) => {
+    const idx = data.projects.findIndex((p) => p.id === projectId);
+    if (idx === -1) return data;
+    const next: Project = {
+      ...data.projects[idx],
+      engine: engine as Project["engine"],
+      updatedAt: new Date().toISOString(),
+    };
+    data.projects[idx] = next;
+    updatedProject = next;
+    return data;
+  });
+  if (updatedProject) {
     broadcast({
       type: "project:updated",
-      project: data.projects[idx],
+      project: updatedProject,
     } as WSEvent);
   }
 }

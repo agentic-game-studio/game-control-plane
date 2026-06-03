@@ -407,26 +407,30 @@ dashboardRouter.post("/browse-directory", async (req: Request, res: Response) =>
 
 // GET /api/dashboard - Get all dashboard data
 dashboardRouter.get("/", async (_req: Request, res: Response) => {
-  try {
-    const data = await readData<DashboardData>("dashboard.json");
-    const normalized = normalizeDashboardData(data);
-    res.json({ success: true, data: normalized });
-  } catch {
-    // Initialize with default data if file doesn't exist
-    await writeData("dashboard.json", DEFAULT_DATA);
-    res.json({ success: true, data: DEFAULT_DATA });
-  }
+  // 21-C-dashboard-read-toctou: previously this was a manual
+  // try/readData → catch/writeData(DEFAULT_DATA) pattern. Two
+  // concurrent first-time GETs both saw ENOENT, both entered the
+  // catch, and both wroteData(DEFAULT_DATA). Worse, a
+  // `POST /api/dashboard/projects` that landed between the two
+  // reads was clobbered by the second writeData. The
+  // `readDashboardOrDefault` helper above was added in 16-H to
+  // route this through `getOrCreateData` (per-file mutex), but
+  // nothing ever called it — the dead helper was the actual fix
+  // and the route never adopted it. Wire it up now.
+  const data = await readDashboardOrDefault();
+  res.json({ success: true, data: normalizeDashboardData(data) });
 });
 
 // GET /api/dashboard/projects - List all projects
 dashboardRouter.get("/projects", async (_req: Request, res: Response) => {
-  try {
-    const data = await readData<DashboardData>("dashboard.json");
-    const normalized = normalizeDashboardData(data);
-    res.json({ success: true, data: normalized.projects });
-  } catch {
-    res.json({ success: true, data: [] });
-  }
+  // 21-C-dashboard-read-toctou: same fix as the / route above —
+  // was `try { readData } catch { res.json([]) }`. Two concurrent
+  // first-time callers racing the missing-file window would each
+  // see the catch path; the second writeData (in the / route)
+  // clobbered the first. Use the helper so a missing file goes
+  // through getOrCreateData (per-file mutex).
+  const data = await readDashboardOrDefault();
+  res.json({ success: true, data: normalizeDashboardData(data).projects });
 });
 
 // GET /api/dashboard/projects/:id - Get project by ID
