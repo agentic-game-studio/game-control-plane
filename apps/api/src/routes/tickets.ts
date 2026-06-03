@@ -86,7 +86,6 @@ ticketsRouter.post("/", async (req: Request, res: Response) => {
 
   try {
     const projectId = getProjectId(req);
-    const data = await readTicketsBoard(projectId);
     const now = new Date().toISOString();
     const status: TicketStatus = body.status ?? "available";
 
@@ -111,16 +110,29 @@ ticketsRouter.post("/", async (req: Request, res: Response) => {
       updatedAt: now,
     };
 
-    // Find the column for this status
-    const column = data.columns.find((col) => col.id === status);
-    if (column) {
-      column.tickets.push(newTicket);
-    } else {
-      // Default to available column
-      data.columns[0].tickets.push(newTicket);
-    }
-
-    await writeTicketsBoard(data, projectId);
+    // 24-C-tickets-post-rmw: route the read-push-write through
+    // `updateTicketsBoard` so the per-file mutex serializes concurrent
+    // POSTs for the same projectId (and the default board when
+    // projectId is null — that path is global). The previous shape
+    // (`readTicketsBoard` → push → `writeTicketsBoard` lock-free) is
+    // the same pattern fixed in 13-M17 (PATCH/DELETE) and 23-C-cleanup-
+    // stale-rmw (cleanupStaleInProgress); the POST was missed in those
+    // sweeps. Two concurrent ticket creates both saw the same
+    // baseline columns array, both pushed, and the second
+    // `writeTicketsBoard` clobbered the first ticket. On
+    // `projectId = null` (the default board) this is a globally-lost
+    // update; on per-project boards it loses the racing ticket.
+    await updateTicketsBoard(projectId, (data) => {
+      // Find the column for this status
+      const column = data.columns.find((col) => col.id === status);
+      if (column) {
+        column.tickets.push(newTicket);
+      } else {
+        // Default to available column
+        data.columns[0].tickets.push(newTicket);
+      }
+      return data;
+    });
 
     // Broadcast event
     broadcastEvent({

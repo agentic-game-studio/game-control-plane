@@ -901,19 +901,33 @@ assetsRouter.post("/generate", async (req: Request, res: Response) => {
           manifest = [];
         }
 
-        const data = await readData<AssetsData>("assets.json");
-        const existingIds = new Set(data.assets.map((a) => a.id));
-
-        for (const entry of manifest) {
-          if (!existingIds.has(entry.id as string)) {
-            const newAsset = manifestEntryToGameAsset(entry);
-            data.assets.push(newAsset);
-            generated.push(newAsset);
+        // 24-C-assets-generate-batch-rmw: route the manifest ingestion
+        // through `updateData<AssetsData>` so the per-file mutex
+        // serialises a concurrent batch call against a parallel
+        // single-asset call (or two batch calls). The previous shape
+        // (`readData` → push → `writeData` lock-free) had two concurrent
+        // generators both observe the same `existingIds` set, both
+        // push, and the second `writeData` clobbered the first set
+        // of generated entries. The companion PATCH and DELETE
+        // routes use `updateData` correctly; this branch was the one
+        // leaked read-modify-write. Use a closure-captured
+        // `generated` array so the broadcast below fires with the
+        // *exactly* assets the mutex just persisted.
+        const ingested: GameAsset[] = [];
+        await updateData<AssetsData>("assets.json", (data) => {
+          const existingIds = new Set(data.assets.map((a) => a.id));
+          for (const entry of manifest) {
+            if (!existingIds.has(entry.id as string)) {
+              const newAsset = manifestEntryToGameAsset(entry);
+              data.assets.push(newAsset);
+              ingested.push(newAsset);
+            }
           }
-        }
+          return data;
+        });
+        generated = ingested;
 
         if (generated.length > 0) {
-          await writeData("assets.json", data);
           for (const asset of generated) {
             broadcastEvent({
               type: "asset:created",
@@ -1041,20 +1055,43 @@ assetsRouter.post("/generate", async (req: Request, res: Response) => {
       }
       const last = manifest[manifest.length - 1];
       if (last) {
-        const data = await readData<AssetsData>("assets.json");
-        const existingIds = new Set(data.assets.map((a) => a.id));
         const assetId = last.id as string;
-        if (!existingIds.has(assetId)) {
-          const newAsset = manifestEntryToGameAsset(last);
+        const newAsset = manifestEntryToGameAsset(last);
+        // 24-C-assets-generate-single-rmw: route the
+        // "skip-if-already-present" check + push through
+        // `updateData<AssetsData>` so the per-file mutex serialises
+        // against the parallel batch handler's mutation. The previous
+        // shape (`readData` → `existingIds.has` → push → `writeData`)
+        // had a race: two concurrent generators (batch + single) could
+        // both observe `existingIds` empty, both push the *same*
+        // manifest entry, and the second `writeData` clobbered the
+        // first. The asset is then present in `assets.json` exactly
+        // once (the second writer wins) but two `asset:created`
+        // WebSocket events were broadcast, and the response
+        // referenced the same row twice. The mutex collapses the
+        // check-and-insert into one atomic op. A closure-captured
+        // `isNew` flag controls the broadcast: the `find` lookup
+        // inside the callback sees the *current* disk state under
+        // the same lock, not a stale snapshot.
+        let isNew = false;
+        let createdAsset: GameAsset | null = null;
+        await updateData<AssetsData>("assets.json", (data) => {
+          const existing = data.assets.find((a) => a.id === assetId);
+          if (existing) {
+            generatedAsset = existing;
+            return data;
+          }
           data.assets.push(newAsset);
-          await writeData("assets.json", data);
+          generatedAsset = newAsset;
+          createdAsset = newAsset;
+          isNew = true;
+          return data;
+        });
+        if (isNew && createdAsset) {
           broadcastEvent({
             type: "asset:created",
-            asset: newAsset,
+            asset: createdAsset,
           } as WSEvent);
-          generatedAsset = newAsset;
-        } else {
-          generatedAsset = data.assets.find((a) => a.id === assetId) ?? null;
         }
       }
     } catch {
