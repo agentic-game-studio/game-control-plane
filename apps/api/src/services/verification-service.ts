@@ -120,7 +120,18 @@ function parseVerdict(content: string): { parsed: string; raw: string } {
     return { parsed: "NEEDS_FIX", raw: firstLine };
   }
 
-  // Default to NEEDS_FIX if ambiguous — safer than blindly passing
+  // Default to NEEDS_FIX if ambiguous — safer than blindly passing.
+  // 21-H-verify-verdict-unparseable: log the unparseable firstLine
+  // so the operator can see when a verifier is consistently
+  // returning junk (LLM outage, model echo, JSON-RPC error string)
+  // and triage the underlying cause. The dead-letter counter only
+  // trips after 3 consecutive failures, so without this log a
+  // recurring "verifier is broken" condition would look like
+  // "ticket needs work" indefinitely.
+  logger.warn(
+    { firstLine, event: "verify_verdict_unparseable" },
+    "verification-service: parseVerdict fell through to NEEDS_FIX default — verifier LLM returned an unrecognized first line",
+  );
   return { parsed: "NEEDS_FIX", raw: firstLine };
 }
 

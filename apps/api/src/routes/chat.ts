@@ -1479,7 +1479,14 @@ Max 4000 characters. Respond ONLY with the summary.`;
 
     res.json({ session: newSession, oldSessionId: id });
   } catch (err) {
-    logger.error({ err }, "Compact endpoint error");
+    // 21-H-compact-endpoint-event: add the `event` discriminator
+    // that every other error call in this file carries
+    // (chat_state_save_failed, compact_lock_cap_hit, etc.) so a
+    // 500 triage can grep a single token.
+    logger.error(
+      { err: err instanceof Error ? err.message : String(err), sessionId: id, event: "compact_endpoint_failed" },
+      "Compact endpoint error",
+    );
     res.status(500).json({ error: "Compaction failed" });
   } finally {
     // 18-C-compact-race: release the per-session compaction lock
