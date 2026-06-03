@@ -1922,12 +1922,6 @@ Session:
 Workflows:
   /ralphloop <task>    — Run research→plan→code→verify loop
 
-Production:
-  /plan [query]        — Create execution plan
-  /sprint              — Summarize current sprint
-  /verify [ticket]     — Run auto-verification
-  /inject <text>       — Inject context into producer
-
 Utilities:
   /diff                — Show recent changes
   /help                — Show this message

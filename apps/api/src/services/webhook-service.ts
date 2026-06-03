@@ -38,7 +38,15 @@ function isBlockedAddress(hostname: string): boolean {
   // block whole /8 boundaries, not to be a full IP validator.
   const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(lower);
   if (ipv4) {
-    const [a, b] = [parseInt(ipv4[1], 10), parseInt(ipv4[2], 10)];
+    const octets = [parseInt(ipv4[1], 10), parseInt(ipv4[2], 10), parseInt(ipv4[3], 10), parseInt(ipv4[4], 10)];
+    // 17-M1: reject malformed IPv4 literals (octets >255). The regex
+    // above only checks the digit count, so `999.999.999.999`
+    // matched and slipped past every prefix check below — the DNS
+    // lookup eventually failed and the function returned false, but
+    // failing here gives a cleaner error path and protects future
+    // maintainers who skip the DNS stage.
+    if (octets.some((o) => o < 0 || o > 255)) return true;
+    const [a, b] = octets;
     if (a === 0 || a === 127) return true;                    // 0.0.0.0/8, 127.0.0.0/8
     if (a === 10) return true;                                 // 10.0.0.0/8
     if (a === 172 && b >= 16 && b <= 31) return true;          // 172.16.0.0/12

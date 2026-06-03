@@ -220,10 +220,13 @@ export function clearProjectProducerSummary(projectId: string): void {
 async function flushEmitProducerUpdate(projectId: string): Promise<void> {
   const mod = await import("../routes/chat.js");
   await mod.chatStoreReady;
-  const sid = mod.producerSessionId(projectId);
-  const session = mod.chatStore.sessions[sid] as
-    | { producerSummary?: ProducerSummarySnapshot }
-    | undefined;
+  // 17-M-prod-sum-compacted: walk the compaction chain so a producer_update
+  // never lands on a session the UI isn't displaying. Without this, an emit
+  // that fires after /compact writes to the base (compacted) session whose
+  // id is what producerSessionId returns, and the message is silently lost.
+  const session = mod.resolveActiveProducerSession(projectId) as
+    | { id: string; producerSummary?: ProducerSummarySnapshot }
+    | null;
   if (!session?.producerSummary) return;
 
   const snap = session.producerSummary;
@@ -243,7 +246,7 @@ async function flushEmitProducerUpdate(projectId: string): Promise<void> {
   snap.lastEmittedAt = now;
   snap.lastEmittedContentHash = h;
 
-  await mod.appendMessage(sid, {
+  await mod.appendMessage(session.id, {
     id: `producer-update-${now}`,
     type: "producer_update",
     sender: "Producer",
@@ -263,10 +266,15 @@ export async function ingestProducerSummaryFact(
   if (!projectId) return;
   const mod = await import("../routes/chat.js");
   await mod.chatStoreReady;
-  const sid = mod.producerSessionId(projectId);
-  const session = mod.chatStore.sessions[sid] as
+  // 17-M-prod-sum-compacted: facts must be written to the LIVE session,
+  // not the (frozen) compacted base. The summary snapshot is per-session
+  // — if a project is compacted mid-flow, the fact would otherwise be
+  // captured only on the dead base and a subsequent emit (which now uses
+  // resolveActiveProducerSession) would emit an empty summary because the
+  // new generation has no producerSummary field.
+  const session = mod.resolveActiveProducerSession(projectId) as
     | { producerSummary?: ProducerSummarySnapshot }
-    | undefined;
+    | null;
   if (!session) return;
 
   if (!session.producerSummary) {

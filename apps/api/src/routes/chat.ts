@@ -400,6 +400,35 @@ export function producerSessionId(projectId: string): string {
   return `producer-${projectId}`;
 }
 
+// 17-M-prod-sum-compacted: resolve the active producer session for a
+// project, walking the compaction chain. After /compact, the base
+// session stays in chatStore.sessions with status="compacted" and a
+// new `producer-${projectId}-g${N}` session is created. Callers that
+// only look up the base id would write to the compacted (frozen) one
+// — producer_update messages would land in a session the UI never
+// shows, wasting I/O and confusing operators. Walk the chain and
+// return the latest non-compacted session, or null if none exists.
+export function resolveActiveProducerSession(
+  projectId: string,
+): ExtendedChatSession | null {
+  const sessionId = producerSessionId(projectId);
+  let active: ExtendedChatSession | undefined = chatStore.sessions[sessionId];
+  if (!active) return null;
+  if (active.status !== "compacted") return active;
+  let gen = active.generation ?? 1;
+  let depth = 0;
+  while (depth < MAX_COMPACTION_CHAIN_DEPTH) {
+    const nextGen = gen + 1;
+    const next = chatStore.sessions[`${sessionId}-g${nextGen}`] as ExtendedChatSession | undefined;
+    if (!next) break;
+    active = next;
+    gen = nextGen;
+    depth++;
+    if (active.status !== "compacted") break;
+  }
+  return active && active.status !== "compacted" ? active : null;
+}
+
 function toProjectContext(project: Project): ProjectContext {
   return {
     name: project.name,
