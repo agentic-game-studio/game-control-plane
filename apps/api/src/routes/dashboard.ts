@@ -326,7 +326,16 @@ dashboardRouter.post("/demo-project", async (_req: Request, res: Response) => {
 
     res.status(201).json({ success: true, data: project });
   } catch (err) {
-    logger.error({ error: err instanceof Error ? err.message : String(err) }, "Failed to create demo project");
+    // 24-M-logger-event-convention: tag the failure with an `event` so
+    // it can be filtered / alerted in production. The message text
+    // "Failed to create demo project" leaks into the log line; pairing
+    // it with a stable discriminator makes it greppable across the
+    // rest of the dashboard route and the few autonomous ones that
+    // share this codepath.
+    logger.error(
+      { error: err instanceof Error ? err.message : String(err), event: "dashboard_create_demo_failed" },
+      "Failed to create demo project",
+    );
     res.status(500).json({ success: false, error: "Failed to create demo project" });
   }
 });
@@ -570,7 +579,16 @@ dashboardRouter.post("/projects", async (req: Request, res: Response) => {
       const projectDir = resolveProjectWorkspace(workspacePath);
       pluginInstallResult = await installGodotMCPPlugin(projectDir, projectDir);
       if (!pluginInstallResult.success && pluginInstallResult.error) {
-        logger.warn({ error: pluginInstallResult.error, projectDir }, "Failed to auto-install Godot MCP plugin");
+        // 24-M-logger-event-convention: tag the auto-install failure
+        // with an `event` discriminator. The plugin install runs
+        // fire-and-forget on project create; without a discriminator
+        // these warnings get lost in the noise. Pair with the
+        // existing `dashboard_godot_mcp_install_*` event names so a
+        // single filter catches every plugin install attempt.
+        logger.warn(
+          { error: pluginInstallResult.error, projectDir, event: "dashboard_godot_mcp_auto_install_failed" },
+          "Failed to auto-install Godot MCP plugin",
+        );
       }
     }
 

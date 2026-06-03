@@ -58,6 +58,14 @@ const envSchema = z
     SHIPTHIS_BIN: z.string().optional().default(""),
     SHIPTHIS_CLI_PATH: z.string().optional().default(""),
     GODOT_MCP_SERVER_PATH: z.string().optional().default(""),
+    // 24-M-env-var-zod-orphan: GODOT_EDITOR_PATH was being read at
+    // godot-mcp-service.ts:1151 but was missing from the Zod
+    // schema — the runtime and the schema disagreed about what the
+    // env var is *named* (the schema had GODOT_BIN but not
+    // GODOT_EDITOR_PATH). Add it so the schema is the single source
+    // of truth. Default empty string lets the consumer's auto-detect
+    // path take over when the env is unset.
+    GODOT_EDITOR_PATH: z.string().optional().default(""),
     LOG_TO_FILE: z
       .union([z.literal("true"), z.literal("false")])
       .default("true")
@@ -112,6 +120,7 @@ export function loadConfig() {
     SHIPTHIS_BIN: process.env.SHIPTHIS_BIN,
     SHIPTHIS_CLI_PATH: process.env.SHIPTHIS_CLI_PATH,
     GODOT_MCP_SERVER_PATH: process.env.GODOT_MCP_SERVER_PATH,
+    GODOT_EDITOR_PATH: process.env.GODOT_EDITOR_PATH,
     LOG_TO_FILE: process.env.LOG_TO_FILE,
     RAILWAY_ENVIRONMENT_ID: process.env.RAILWAY_ENVIRONMENT_ID,
   };
@@ -171,4 +180,43 @@ export const SUBPROCESS_MAX_BUFFER = 10 * 1024 * 1024;
  */
 export function resolvePipelinePython(): string {
   return process.env.PIPELINE_PYTHON?.trim() || "python3";
+}
+
+/**
+ * Read only the logger-relevant env vars without invoking the full
+ * `loadConfig()` chain. `utils/logger.ts` runs at module-load time —
+ * before `loadConfig()` has been called by any other module — and
+ * pulling in the full schema (which validates `API_SECRET` min-length
+ * 16) would force the logger to be the canary for missing config,
+ * which it doesn't actually need. Just the two logger keys.
+ *
+ * 24-M-env-var-drift: this is the canonical place for logger.ts to
+ * read LOG_TO_FILE and RAILWAY_ENVIRONMENT_ID now that the 23rd pass
+ * added both to the Zod schema. The schema owns the type, default,
+ * and (potential future) transforms; the logger just consumes the
+ * values.
+ */
+export interface LoggerConfig {
+  logToFile: boolean;
+  isRailway: boolean;
+}
+export function readLoggerConfig(): LoggerConfig {
+  // Parse the two keys directly. We don't go through envSchema here
+  // because the logger module is loaded at process boot, before
+  // `loadConfig()` has a chance to validate API_SECRET and the other
+  // required keys. The full Zod parse is still the source of truth for
+  // other consumers; this is the side door for the one module that
+  // needs the values before validation completes.
+  const logToFileRaw = process.env.LOG_TO_FILE;
+  const railwayRaw = process.env.RAILWAY_ENVIRONMENT_ID;
+  return {
+    // Default true (matches the Zod schema default). Only the literal
+    // string "false" disables file logs — empty string, unset, and
+    // anything else all mean "enabled".
+    logToFile: logToFileRaw !== "false",
+    // Default false. Truthy iff RAILWAY_ENVIRONMENT_ID is a non-empty
+    // string. Same semantics the inline `!process.env.X` check used
+    // before.
+    isRailway: !!railwayRaw && railwayRaw.trim().length > 0,
+  };
 }

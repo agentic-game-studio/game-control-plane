@@ -307,7 +307,13 @@ async function runBootCheck(projectPath: string): Promise<{ bootOk: boolean; err
   const scriptDir = join(config.WORKSPACE_DIR, "scripts", "godot");
   const pythonBin = resolvePipelinePython();
   const home = resolveHomeDir();
-  const godotBin = process.env.GODOT_BIN ?? (home ? join(home, ".local/bin/godot_bin/Godot") : "");
+  // 24-M-env-var-drift: read GODOT_BIN from the Zod-validated
+  // config (already bound to `config` two lines above) instead of
+  // `process.env.GODOT_BIN` directly. The 23rd pass added GODOT_BIN
+  // to the env schema (config.ts:57) but didn't migrate this
+  // consumer. The Zod default is the empty string, so `||` matches
+  // the original `??` behavior at the empty-string boundary.
+  const godotBin = config.GODOT_BIN || (home ? join(home, ".local/bin/godot_bin/Godot") : "");
 
   // Validate projectPath is inside the workspace to prevent command injection
   // or path traversal before we even build the command array.

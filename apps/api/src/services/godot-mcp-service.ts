@@ -98,9 +98,16 @@ const REPO_ROOT_FROM_THIS_FILE = resolve(THIS_FILE_DIR, "..", "..", "..");
 
 /** Auto-detect MCP server path from env var or relative paths */
 function resolveServerPath(): string {
-  // 1. Explicit env var (highest priority)
-  if (process.env.GODOT_MCP_SERVER_PATH) {
-    return process.env.GODOT_MCP_SERVER_PATH;
+  // 1. Explicit env var (highest priority).
+  // 24-M-env-var-drift: read GODOT_MCP_SERVER_PATH from the
+  // Zod-validated config instead of `process.env.GODOT_MCP_SERVER_PATH`
+  // directly. The 23rd pass added GODOT_MCP_SERVER_PATH to the env
+  // schema (config.ts:60) but didn't migrate this consumer. A future
+  // Zod transform (e.g. `z.string().transform(s => path.resolve(s))`)
+  // applied to the schema would silently not take effect here.
+  const configGodotMcp = loadConfig().GODOT_MCP_SERVER_PATH;
+  if (configGodotMcp) {
+    return configGodotMcp;
   }
 
   // 2. Try relative to API root (apps/api) and project root
@@ -1140,8 +1147,15 @@ export async function launchGodotEditor(projectDir: string): Promise<{ success: 
     ...(home ? globSync(`${home}/.local/bin/godot*`) : []),
   ];
 
-  // Check env var override first (highest priority)
-  let godotBin: string | null = process.env.GODOT_EDITOR_PATH ?? null;
+  // Check env var override first (highest priority).
+  // 24-M-env-var-drift-schema-orphan: GODOT_EDITOR_PATH is read
+  // here but was missing from the Zod schema entirely. The schema
+  // listed GODOT_BIN but not GODOT_EDITOR_PATH — the runtime and
+  // the schema disagreed about what the env var is *named*. Add
+  // GODOT_EDITOR_PATH to the schema (see config.ts:67 in this
+  // commit) and consume the validated value here so the single
+  // Zod-validated path is the only one.
+  let godotBin: string | null = loadConfig().GODOT_EDITOR_PATH || null;
 
   // Auto-detect if no env override
   if (!godotBin) {

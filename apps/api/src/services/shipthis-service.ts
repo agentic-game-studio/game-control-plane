@@ -7,7 +7,7 @@ import { join, dirname } from "path";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { fileURLToPath } from "url";
-import { SUBPROCESS_MAX_BUFFER } from "../config.js";
+import { SUBPROCESS_MAX_BUFFER, loadConfig } from "../config.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -21,8 +21,15 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 function findShipThisCli(): string | null {
+  // 24-M-env-var-drift: read SHIPTHIS_CLI_PATH from the Zod-validated
+  // config instead of `process.env.SHIPTHIS_CLI_PATH` directly. The
+  // 23rd pass added SHIPTHIS_CLI_PATH to the env schema (config.ts:59)
+  // but didn't migrate this consumer. The Zod default is the empty
+  // string, so `.filter(Boolean)` drops it the same way the original
+  // `undefined` was dropped — the schema change is a no-op when the
+  // env is unset.
   const candidates = [
-    process.env.SHIPTHIS_CLI_PATH,
+    loadConfig().SHIPTHIS_CLI_PATH || undefined,
     join(__dirname, "..", "..", "..", "..", "cli-main", "bin", "dev.tsc.js"),
     join(__dirname, "..", "..", "..", "cli-main", "bin", "dev.tsc.js"),
   ].filter(Boolean) as string[];

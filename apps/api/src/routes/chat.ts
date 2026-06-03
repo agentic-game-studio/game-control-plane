@@ -1393,7 +1393,16 @@ Max 4000 characters. Respond ONLY with the summary.`;
       summaryText = data.content?.find((c) => c.type === "text")?.text ?? "";
     } else {
       const errText = await summaryResponse.text();
-      logger.error({ status: summaryResponse.status, body: errText.slice(0, 200) }, "Compact summary LLM call failed");
+      // 24-M-logger-event-convention: tag the failure with an
+      // `event` discriminator so on-call can filter for compaction
+      // failures specifically (vs. any other 4xx/5xx LLM call
+      // failure). The `chat_session_compact_*` namespace is already
+      // used for the broadcast event; the logger discriminator keeps
+      // the same shape.
+      logger.error(
+        { status: summaryResponse.status, body: errText.slice(0, 200), event: "compact_summary_llm_failed" },
+        "Compact summary LLM call failed",
+      );
       res.status(500).json({ error: "Failed to generate summary" });
       return;
     }

@@ -44,7 +44,13 @@ function runGodotHeadlessCommand(
   const scriptDir = join(config.WORKSPACE_DIR, "scripts", "godot");
   const pythonBin = resolvePipelinePython();
   const home = resolveHomeDir();
-  const godotBin = process.env.GODOT_BIN ?? (home ? join(home, ".local/bin/godot_bin/Godot") : "");
+  // 24-M-env-var-drift: read GODOT_BIN from the Zod-validated
+  // config instead of `process.env.GODOT_BIN` directly. The 23rd
+  // pass added GODOT_BIN to the env schema (config.ts:57) but
+  // didn't migrate this consumer. The Zod default is the empty
+  // string, so `||` matches the original `??` behavior at the
+  // empty-string boundary.
+  const godotBin = config.GODOT_BIN || (home ? join(home, ".local/bin/godot_bin/Godot") : "");
 
   // Use execFileSync (no shell) to avoid command injection via projectPath
   // or any of the other string inputs. A malicious projectPath like

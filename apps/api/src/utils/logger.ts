@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { existsSync, mkdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import type { Request } from "express";
+import { readLoggerConfig } from "../config.js";
 
 /**
  * Extract a stable request ID from incoming headers, falling back to a
@@ -34,7 +35,19 @@ if (!existsSync(LOG_DIR)) {
 }
 
 const LOG_FILE = join(LOG_DIR, "api.log");
-const enableFileLogs = process.env.LOG_TO_FILE !== "false" && !process.env.RAILWAY_ENVIRONMENT_ID;
+// 24-M-env-var-drift: read LOG_TO_FILE and RAILWAY_ENVIRONMENT_ID
+// from the Zod-validated config via `readLoggerConfig()` instead of
+// the inline `process.env.X` checks. The 23rd pass added both to the
+// Zod schema (config.ts:62-65) but didn't migrate this consumer —
+// the logger module is the one place that runs before
+// `loadConfig()` is callable (it would force a circular import with
+// the pino transports), so we expose a `readLoggerConfig()` side
+// door in config.ts. Semantics are preserved: `LOG_TO_FILE !== "false"`
+// is true for empty/unset (file logs on) and false only for the
+// literal string "false"; `!RAILWAY_ENVIRONMENT_ID` is true when the
+// var is unset or empty.
+const { logToFile, isRailway } = readLoggerConfig();
+const enableFileLogs = logToFile && !isRailway;
 
 const transport = pino.transport({
   targets: [

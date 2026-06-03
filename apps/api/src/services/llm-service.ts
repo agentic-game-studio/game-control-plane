@@ -1419,7 +1419,14 @@ loop_offset=0
         // without the stat, an env-controlling process could redirect
         // Bash tool calls at an arbitrary binary). Bare names like
         // "godot" are left to PATH lookup, which is the OS's job.
-        const envGodot = process.env.GODOT_BIN;
+        // 24-M-env-var-drift: read GODOT_BIN from the Zod-validated
+        // config. The 23rd pass added GODOT_BIN to the env schema
+        // (config.ts:57) but didn't migrate this consumer. The file
+        // already calls `loadConfig()` two lines below, so this is
+        // a hoisted read for clarity (and to fold the `envGodotValid`
+        // stat check + the loadConfig call into a single source of
+        // truth).
+        const envGodot = loadConfig().GODOT_BIN;
         const envGodotValid =
           envGodot && (await fs.stat(envGodot).then((s) => s.isFile()).catch(() => false));
         const allowedBins = envGodotValid ? [...STATIC_GODOT_BINS, envGodot] : STATIC_GODOT_BINS;
@@ -1507,7 +1514,14 @@ loop_offset=0
         // expected prefix (cli-main/ in the repo, or $SHIPTHIS_BIN if it
         // stat-resolves). This mirrors the GODOT_BIN allowlist above.
         const defaultShipthisBin = path.resolve(__dirname, "..", "..", "..", "..", "cli-main", "bin", "run.js");
-        const candidateShipthisBin = process.env.SHIPTHIS_BIN ?? defaultShipthisBin;
+        // 24-M-env-var-drift: read SHIPTHIS_BIN from the Zod-validated
+        // config. The 23rd pass added SHIPTHIS_BIN to the env schema
+        // (config.ts:58) but didn't migrate this consumer. The Zod
+        // default is the empty string, so `||` matches the original
+        // `??` behavior at the empty-string boundary. We re-use the
+        // `loadConfig()` call already in the file (line 1428) — but
+        // to keep the function-local reads obvious, capture once.
+        const candidateShipthisBin = loadConfig().SHIPTHIS_BIN || defaultShipthisBin;
         let shipthisBin: string;
         try {
           const st = await fs.stat(candidateShipthisBin);

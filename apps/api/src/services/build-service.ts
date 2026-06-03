@@ -127,7 +127,15 @@ export async function executeGodotExport(
   const scriptDir = join(config.WORKSPACE_DIR, "scripts", "godot");
   const pythonBin = resolvePipelinePython();
   const home = resolveHomeDir();
-  const godotBin = process.env.GODOT_BIN ?? (home ? join(home, ".local/bin/godot_bin/Godot") : "");
+  // 24-M-env-var-drift: read GODOT_BIN from the Zod-validated
+  // config instead of `process.env.GODOT_BIN` directly. The 23rd
+  // pass added GODOT_BIN to the env schema (config.ts:57) but
+  // didn't migrate this consumer. A future Zod transform (e.g.
+  // `z.string().transform(s => path.resolve(s))`) applied to the
+  // schema would silently not take effect here. The Zod default
+  // is the empty string, so `||` matches the original `??`
+  // behavior at the empty-string boundary.
+  const godotBin = config.GODOT_BIN || (home ? join(home, ".local/bin/godot_bin/Godot") : "");
 
   try {
     // execFileSync (no shell) so a projectPath or exportPreset containing
