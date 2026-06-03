@@ -7,7 +7,7 @@ import { join } from "path";
 import { execFile } from "child_process";
 import { promisify } from "util";
 const execFileAsync = promisify(execFile);
-import { readData, writeData, broadcastEvent } from "./data-store.js";
+import { readData, writeData, updateData, broadcastEvent } from "./data-store.js";
 import { generateProjectChangelog } from "./changelog-service.js";
 import { resolveProjectWorkspace } from "../utils/workspace.js";
 import { resolveHomeDir } from "../utils/paths.js";
@@ -15,6 +15,7 @@ import { loadConfig, resolvePipelinePython, SUBPROCESS_MAX_BUFFER } from "../con
 import { readProjectVersion, bumpProjectVersion } from "./qa-gate-service.js";
 import type { BuildPlatform, BuildsData, CreateBuildRequest, GameBuild, WSEvent } from "@game-studio/types";
 import { logger } from "../utils/logger.js";
+import { newId } from "../utils/ids.js";
 
 const DEFAULT_BUILDS: BuildsData = { builds: [] };
 
@@ -34,8 +35,15 @@ export async function listBuilds(projectId?: string): Promise<GameBuild[]> {
 
 export async function createBuild(req: CreateBuildRequest): Promise<GameBuild> {
   const now = new Date().toISOString();
+  // 22-M-predictable-build-id: use newId("build") (128 bits of
+  // crypto.randomUUID() entropy, prefixed) instead of
+  // `build-${Date.now()}` (timestamp-only, guessable within a
+  // millisecond window). The id flows into /api/builds/:id/smoke and
+  // any future per-build endpoint, so a predictable id lets an
+  // attacker construct a colliding buildId. Mirrors the
+  // Q4-6th (tickets) and Q5-6th (assets) fix shape.
   const build: GameBuild = {
-    id: `build-${Date.now()}`,
+    id: newId("build"),
     projectId: req.projectId,
     version: req.version ?? "0.1.0",
     platform: req.platform,
@@ -45,9 +53,21 @@ export async function createBuild(req: CreateBuildRequest): Promise<GameBuild> {
     updatedAt: now,
   };
 
-  const data = await readBuildsData();
-  data.builds.unshift(build);
-  await writeData("builds.json", data);
+  // 22-H-create-build-rmw: route the unshift through updateData so
+  // the per-file mutex serializes the read-modify-write. The
+  // previous shape (readBuildsData → unshift → writeData) had two
+  // concurrent executeGodotExport calls (e.g. user triggers builds
+  // for two platforms in parallel, double-clicks) both reading the
+  // same baseline and the second writeData clobbering the first —
+  // one build lost from the registry while its Godot export
+  // continued in the background, and the trailing updateBuild
+  // couldn't find the lost row. The lock-free read was the same
+  // pattern fixed in 21-C-update-project-engine-rmw,
+  // 21-C-dashboard-read-toctou, and 13-M17 (tickets).
+  await updateData<BuildsData>("builds.json", (data) => {
+    data.builds.unshift(build);
+    return data;
+  });
   broadcastEvent({ type: "build:created", build } as WSEvent);
   return build;
 }
@@ -65,11 +85,21 @@ function defaultPresetForPlatform(platform: BuildPlatform): string {
 }
 
 export async function updateBuild(build: GameBuild): Promise<void> {
-  const data = await readBuildsData();
-  const idx = data.builds.findIndex((b) => b.id === build.id);
-  if (idx >= 0) data.builds[idx] = build;
-  else data.builds.unshift(build);
-  await writeData("builds.json", data);
+  // 22-H-update-build-rmw: route the in-place update through updateData so
+  // the per-file mutex serializes the read-modify-write. The previous
+  // shape (readBuildsData → mutate → writeData) had a window where a
+  // concurrent executeGodotExport / runPostExportSmokeTest could read
+  // the same baseline and the second writeData would clobber the first.
+  // Two parallel build completions would lose the second's status
+  // transition (e.g. "building" → "success" never persisted). Same fix
+  // shape as 22-H-create-build-rmw, 21-C-update-project-engine-rmw,
+  // 21-C-dashboard-read-toctou, and 13-M17 (tickets).
+  await updateData<BuildsData>("builds.json", (data) => {
+    const idx = data.builds.findIndex((b) => b.id === build.id);
+    if (idx >= 0) data.builds[idx] = build;
+    else data.builds.unshift(build);
+    return data;
+  });
   broadcastEvent({ type: "build:updated", build } as WSEvent);
 }
 
