@@ -10,23 +10,33 @@
  * The agent reads project state to figure out paths and conventions.
  */
 
-import { existsSync, statSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { newId } from "../utils/ids.js";
-import { readData } from "./data-store.js";
-import { readTicketsBoard, writeTicketsBoard, updateTicketsBoard } from "./ticket-board.js";
+import { readTicketsBoard, updateTicketsBoard } from "./ticket-board.js";
+import { loadConfig } from "../config.js";
 import type { TicketsBoard, Ticket } from "@game-studio/types";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
+// 24-L-config-drift: getWorkspaceDir previously read
+// `process.env.WORKSPACE_DIR` directly and fell back to a hardcoded
+// relative path (`../../../workspace`) when the env var was unset.
+// That drift pattern is exactly what the 23rd/24th passes were
+// scrubbing — services should read the Zod-validated config, not
+// poke at `process.env` and guess at a default. The fallback path
+// is also fragile: it depends on `__dirname` resolving to the API
+// dist location, which is the same assumption `shipthis-service`
+// was wrong about before its 19th-pass fix. Inlining at the call
+// site (two consumers) keeps the lazy loadConfig behavior —
+// loadConfig() is called once per generateTickets/scanProjectState
+// invocation, not at module load, so this module stays usable
+// from `pnpm generate:agents` and tests that don't have a full
+// .env file in place.
 function getWorkspaceDir(): string {
-  const env = process.env.WORKSPACE_DIR;
-  if (env) return env;
-  return join(__dirname, "..", "..", "..", "..", "workspace");
+  return loadConfig().WORKSPACE_DIR;
 }
-
-const WORKSPACE = getWorkspaceDir();
 
 // ─── Genre Detection ──────────────────────────────────────────────────────────
 
@@ -899,7 +909,7 @@ function ticketExistsById(board: TicketsBoard, id: string): boolean {
  */
 export async function generateTickets(projectId: string, workspacePath?: string, projectDescription?: string): Promise<Array<Ticket & { phase?: number; templateId?: string }>> {
   const effectivePath = workspacePath ?? projectId;
-  const projectPath = join(WORKSPACE, effectivePath);
+  const projectPath = join(getWorkspaceDir(), effectivePath);
   if (!workspacePath || !existsSync(projectPath)) {
     return [];
   }

@@ -1359,7 +1359,19 @@ loop_offset=0
           });
 
           // Persist state
-          const { writeData } = await import("../services/data-store.js");
+          // 24-L-dynamic-import-cleanup: the previous
+          // `await import("../services/data-store.js")` was a
+          // dynamic import of a module that is already statically
+          // imported at the top of this file (line 73). The
+          // dynamic import path was a leftover from an earlier
+          // state of this file that was kept across refactors. It
+          // had a real cost: every StartConsultation call paid
+          // a fresh module-load round-trip (cached, but still
+          // not free) for a name that was already in scope. Use
+          // the static binding `writeData` directly. The other
+          // dynamic import a few lines up (chatModule) is
+          // intentional — it breaks the chat.ts ↔ llm-service.ts
+          // circular dependency and is unrelated.
           await writeData("chat-state.json", store);
 
           broadcastLogEntry(sessionId, "info", `[${agentRole}] Started consultation: ${role}`, agentRole);
