@@ -22,6 +22,19 @@ import { loadConfig, resolvePipelinePython, SUBPROCESS_MAX_BUFFER } from "../con
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// 17-C2: ship the python helper scripts from the app source tree, not
+// from `WORKSPACE_DIR/scripts/...`. The workspace is user-writable, so
+// an LLM (or a prompt-injected agent) could overwrite
+// `run_godot_headless.py` and get Python execution under the API uid
+// on every subsequent invocation. The repo's own `scripts/` directory
+// is read-only from the API's perspective.
+//
+// Resolve relative to this file (apps/api/src/services/llm-service.ts),
+// not `process.cwd()`, because the dev server is started from
+// `apps/api/` but Docker runs from `/app/`. `import.meta.url` is
+// environment-agnostic.
+const REPO_SCRIPTS_DIR = path.resolve(__dirname, "..", "..", "..", "..", "scripts");
+
 // Module-level cache for the Godot MCP Pro instructions file. It is a static
 // file shipped with the godot-mcp-pro package and never changes during a
 // server's lifetime, but we were re-reading it synchronously on every chat
@@ -885,7 +898,9 @@ async function executeTool(
         // Resolve Python binary with pipeline dependencies (Pillow, rembg, etc.)
         const PYTHON_BIN = resolvePipelinePython();
 
-        const scriptDir = path.resolve(process.cwd(), "..", "..", "scripts", "asset-pipeline");
+        // 17-C2: see REPO_SCRIPTS_DIR — ship the asset pipeline from the
+        // app's read-only source tree, not the user-writable workspace.
+        const scriptDir = path.join(REPO_SCRIPTS_DIR, "asset-pipeline");
         const outputDir = projectContext?.workspacePath
           ? path.join(resolveProjectWorkspace(projectContext.workspacePath), "assets")
           : path.join(loadConfig().WORKSPACE_DIR, "assets");
@@ -1029,7 +1044,9 @@ async function executeTool(
         }
 
         const config = loadConfig();
-        const scriptDir = path.join(config.WORKSPACE_DIR, "scripts", "asset-pipeline");
+        // 17-C2: see REPO_SCRIPTS_DIR — ship from the app's read-only
+        // source tree, not the user-writable workspace.
+        const scriptDir = path.join(REPO_SCRIPTS_DIR, "asset-pipeline");
         const pythonBin = resolvePipelinePython();
 
         const args = [
@@ -1072,7 +1089,9 @@ async function executeTool(
         }
 
         const config = loadConfig();
-        const scriptDir = path.join(config.WORKSPACE_DIR, "scripts", "asset-pipeline");
+        // 17-C2: see REPO_SCRIPTS_DIR — ship from the app's read-only
+        // source tree, not the user-writable workspace.
+        const scriptDir = path.join(REPO_SCRIPTS_DIR, "asset-pipeline");
         const pythonBin = resolvePipelinePython();
 
         const args = [
@@ -1140,7 +1159,9 @@ async function executeTool(
         }
 
         const config = loadConfig();
-        const scriptDir = path.join(config.WORKSPACE_DIR, "scripts", "asset-pipeline");
+        // 17-C2: see REPO_SCRIPTS_DIR — ship from the app's read-only
+        // source tree, not the user-writable workspace.
+        const scriptDir = path.join(REPO_SCRIPTS_DIR, "asset-pipeline");
         const pythonBin = resolvePipelinePython();
 
         const args = [
@@ -1380,7 +1401,9 @@ loop_offset=0
         const validatedGodotBin = godotBin && allowedBins.includes(godotBin) ? godotBin : undefined;
 
         const config = loadConfig();
-        const scriptDir = path.join(config.WORKSPACE_DIR, "scripts", "godot");
+        // 17-C2: see REPO_SCRIPTS_DIR — ship from the app's read-only
+        // source tree, not the user-writable workspace.
+        const scriptDir = path.join(REPO_SCRIPTS_DIR, "godot");
         const pythonBin = resolvePipelinePython();
 
         const args: string[] = [pythonBin, path.join(scriptDir, "run_godot_headless.py"), "--project", project, "--command", command];

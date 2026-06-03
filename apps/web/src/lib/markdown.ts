@@ -1,7 +1,7 @@
 "use client";
 
 /** Minimal markdown-to-HTML renderer (safe — escapes HTML first) */
-export function renderMarkdown(md: string): string {
+export function renderMarkdown(md: string, options?: { wikilinks?: boolean }): string {
   // Convert literal \n (from LLM JSON) to actual newlines
   let html = md.replace(/\\n/g, "\n");
 
@@ -128,6 +128,25 @@ export function renderMarkdown(md: string): string {
     const safeHref = trimmed.replace(/"/g, "&quot;");
     return `<a href="${safeHref}" target="_blank" rel="noopener noreferrer" class="text-[#0055FF] underline hover:bg-[#0055FF] hover:text-white px-0.5 transition-colors">${text}</a>`;
   });
+
+  // Wikilinks [[target]] — when the `wikilinks` option is set, render as
+  // clickable spans (wiki viewer) instead of plain text. The slug is
+  // sanitized to a-z, 0-9, `-` to mirror the previous DocumentViewer
+  // behavior; the inner `target` text is HTML-escaped upstream, so the
+  // span is XSS-safe.
+  //
+  // 17-C1: previously, `DocumentViewer.tsx` shipped its own `renderMarkdown`
+  // that didn't apply the 4-layer XSS defenses from this file (no link
+  // handler at all, but a future maintainer adding one would have shipped
+  // an XSS because the local renderer skipped the URL allowlist + control-
+  // char reject). Centralising here so the wiki viewer can't drift from
+  // the chat renderer.
+  if (options?.wikilinks) {
+    html = html.replace(/\[\[([^\]]+)\]\]/g, (_m, target) => {
+      const slug = target.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
+      return `<span data-wikilink="${slug}" class="text-blue-600 underline cursor-pointer hover:text-blue-800">[[${target}]]</span>`;
+    });
+  }
 
   // Paragraphs: double newline splits
   html = html.replace(/\n\n/g, '</p><p class="my-2">');
