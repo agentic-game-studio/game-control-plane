@@ -48,6 +48,13 @@ export async function apiFetch<T>(path: string, options?: RequestInit): Promise<
   // request, so callers can compose their own unmount-cleanup
   // signal with our 30s safety net.
   const callerSignal = options?.signal;
+  // 17-H3: only retry safe methods. POST/PATCH/DELETE may have
+  // side effects (ticket create, project delete, etc.) and the
+  // backend doesn't honor an Idempotency-Key, so retrying a 502
+  // from a POST re-fires the original write and produces duplicates.
+  // GET/HEAD/OPTIONS are read-only and safe to retry.
+  const method = (options?.method ?? "GET").toUpperCase();
+  const isRetryable = method === "GET" || method === "HEAD" || method === "OPTIONS";
   let lastError: unknown = undefined;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     const controller = new AbortController();
@@ -71,7 +78,7 @@ export async function apiFetch<T>(path: string, options?: RequestInit): Promise<
         },
       });
 
-      if (RETRYABLE_STATUSES.has(res.status) && attempt < MAX_RETRIES) {
+      if (RETRYABLE_STATUSES.has(res.status) && isRetryable && attempt < MAX_RETRIES) {
         // Drain the body so the connection can be reused by the
         // browser's connection pool.
         try { await res.text(); } catch { /* ignore */ }
@@ -101,15 +108,15 @@ export async function apiFetch<T>(path: string, options?: RequestInit): Promise<
         if (callerSignal?.aborted) {
           throw new DOMException("Aborted", "AbortError");
         }
-        // Our own timeout — retry if we have budget.
-        if (attempt < MAX_RETRIES) {
+        // Our own timeout — retry if we have budget and method is safe.
+        if (isRetryable && attempt < MAX_RETRIES) {
           await sleep(RETRY_DELAYS_MS[attempt], controller.signal);
           continue;
         }
         throw new Error(`API request timed out after ${DEFAULT_TIMEOUT_MS}ms (${path})`);
       }
-      // Network-level failure (fetch rejected). Retry.
-      if (err instanceof TypeError && attempt < MAX_RETRIES) {
+      // Network-level failure (fetch rejected). Retry only safe methods.
+      if (err instanceof TypeError && isRetryable && attempt < MAX_RETRIES) {
         lastError = err;
         await sleep(RETRY_DELAYS_MS[attempt], controller.signal);
         continue;

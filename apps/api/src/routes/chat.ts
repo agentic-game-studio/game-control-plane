@@ -1919,6 +1919,30 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
     }
 
     let heartbeat: ReturnType<typeof setInterval> | undefined;
+    // 17-H1: install the same mid-flight close handler the messages
+    // path uses, so a client disconnect during a long spawn cancels
+    // the in-flight LLM call. Without this, a closed browser tab
+    // leaves the invokeAgent running for the full 20-min budget
+    // and burns tokens the user already gave up on. The handler is
+    // also registered in the module-level `sessionAbortControllers`
+    // map so external events (project delete, broadcast) can cancel
+    // the spawn without depending on the HTTP request lifetime.
+    let spawnAbort: AbortController | undefined;
+    let midFlightCloseHandler: (() => void) | undefined;
+    if (req) {
+      spawnAbort = new AbortController();
+      const clientAbort = spawnAbort;
+      const sessionIdForAbort = sessionId;
+      midFlightCloseHandler = () => {
+        if (!clientAbort.signal.aborted) {
+          logger.info({ sessionId: sessionIdForAbort, event: "spawn_client_disconnected" },
+            "Client disconnected mid-spawn — cancelling in-flight LLM call");
+          clientAbort.abort();
+        }
+      };
+      req.on("close", midFlightCloseHandler);
+      sessionAbortControllers.set(sessionId, spawnAbort);
+    }
     try {
       // Don't broadcast agent events from invokeAgent — we handle them ourselves here
       const projectContext = toProjectContext(project);
@@ -1963,6 +1987,7 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
           // usage accounting.
           updateSessionTokenUsage(newSession as ExtendedChatSession, usage, spawnModel).catch(() => {});
         },
+        spawnAbort?.signal,
       );
 
       clearInterval(heartbeat);
@@ -2112,6 +2137,15 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
       // invariant unconditional and the cleanup idempotent
       // (clearInterval(undefined) is a no-op).
       if (heartbeat) clearInterval(heartbeat);
+      // 17-H1: detach the mid-flight close handler and drop the abort
+      // controller from the module-level map. Without this, the req.on
+      // listener (and its AbortController closure) leak per spawn —
+      // and the same id re-used by a future spawn would inherit a
+      // stale controller from the previous call.
+      if (req && midFlightCloseHandler) req.off("close", midFlightCloseHandler);
+      if (sessionAbortControllers.get(sessionId) === spawnAbort) {
+        sessionAbortControllers.delete(sessionId);
+      }
     }
   }
 

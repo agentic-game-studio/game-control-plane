@@ -79,7 +79,7 @@ regex, and a timing-attackable WebSocket auth were publicly reachable.
 | 5.1, 5.2 | `packages/types/src/skill.ts` + `packages/skills/src/skills-by-phase.ts` | Added `art-bible` and `security-audit` to `SkillName` union with stub definitions. |
 | 5.3 | `packages/types/src/agent.ts`, `leadership.ts`, `engine-godot.ts`, `tiers.ts`, `delegation-map.ts` | Registered the orphan `game-director` (Tier 1) and `godot-csharp-specialist` (Tier 3) agents. |
 | 5.5 | `CLAUDE.md` | Corrected agent count (50 → 53) and tier breakdown. |
-| 5.6 | `.env.example` | Documented `CORS_ORIGIN`, `BODY_LIMIT_MB`, `API_TIMEOUT_MS`, `ENABLE_TEST_ENDPOINTS`, `MAX_CONCURRENT_AGENTS`. |
+| 5.6 | `.env.example` | Documented `CORS_ORIGIN`, `BODY_LIMIT_MB`, `API_TIMEOUT_MS`, `ENABLE_TEST_ENDPOINTS`, `MAX_CONCURRENT_SUBAGENTS_PER_PROJECT`. |
 | 5.7 | `.github/workflows/ci.yml` | Added `pnpm build` step (catches Dockerfile, Next.js, and import-resolution issues). |
 | 5.8 | `apps/api/src/index.ts` | CORS now accepts comma-separated origins. |
 
@@ -330,7 +330,7 @@ against future regressions.
 ### Phase 10.3 — LOW polish
 
 - **`CLAUDE.md`** — Agent count corrected to **54** (5 Tier 1 + 8 Tier 2 + 41 Tier 3) to match the registry output.
-- **`.env.example`** — Documented `RATE_LIMIT_REQUESTS`, `RATE_LIMIT_WINDOW_MS`, `RATE_LIMIT_BUCKET_CAP`, `WORKFLOW_TTL_MS`, `ASSET_WATCHER_LIMIT`, `MAX_SSE_CLIENTS` with descriptions. (Other env vars — `CORS_ORIGIN`, `BODY_LIMIT_MB`, `API_TIMEOUT_MS`, `ENABLE_TEST_ENDPOINTS`, `MAX_CONCURRENT_AGENTS` — were already documented.)
+- **`.env.example`** — Documented `RATE_LIMIT_REQUESTS`, `RATE_LIMIT_WINDOW_MS`, `RATE_LIMIT_BUCKET_CAP`, `WORKFLOW_TTL_MS`, `ASSET_WATCHER_LIMIT`, `MAX_SSE_CLIENTS` with descriptions. (Other env vars — `CORS_ORIGIN`, `BODY_LIMIT_MB`, `API_TIMEOUT_MS`, `ENABLE_TEST_ENDPOINTS`, `MAX_CONCURRENT_SUBAGENTS_PER_PROJECT` — were already documented.)
 - **Toast auto-dismiss** — `NotificationToasts` already had a 5s auto-dismiss; verified.
 
 **Deferred (out of scope for Phase 10):**

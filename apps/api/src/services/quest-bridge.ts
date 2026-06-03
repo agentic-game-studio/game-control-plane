@@ -180,23 +180,29 @@ async function triggerWorkflowVerification(sessionId: string, wf: WorkflowState)
 
   try {
     const board = await readTicketsBoard(projectId);
+    // 17-H2: build a ticketId → ticket index once. The previous code
+    // nested a linear `find` inside the columns loop, making verify
+    // O(tickets × columns) per workflow. With 100 tickets and 5
+    // columns that's 500 scans; with the index it's N lookups.
+    const byId = new Map<string, Ticket>();
+    for (const col of board.columns) {
+      for (const t of col.tickets) byId.set(t.id, t);
+    }
     for (const ticketId of wf.tickets.keys()) {
-      for (const col of board.columns) {
-        const ticket = col.tickets.find((t) => t.id === ticketId);
-        if (ticket && ticket.status === "qa") {
-          // Q10-6th: deep-clone before passing to verification. The
-          // shallow spread `{ ...ticket, sessionId }` shared the
-          // ticket's nested objects (testEvidence, parentTicketId
-          // chain, etc.) with the live board entry; if the verifier
-          // mutated any of them, the change would persist on the
-          // board. structuredClone is built into Node 17+ and is
-          // cheaper than JSON round-trip because it preserves
-          // Date/Map/Set, but for plain JSON this is fine.
-          triggerVerification(
-            structuredClone({ ...ticket, sessionId }),
-            ticket.description || ticket.title,
-          );
-        }
+      const ticket = byId.get(ticketId);
+      if (ticket && ticket.status === "qa") {
+        // Q10-6th: deep-clone before passing to verification. The
+        // shallow spread `{ ...ticket, sessionId }` shared the
+        // ticket's nested objects (testEvidence, parentTicketId
+        // chain, etc.) with the live board entry; if the verifier
+        // mutated any of them, the change would persist on the
+        // board. structuredClone is built into Node 17+ and is
+        // cheaper than JSON round-trip because it preserves
+        // Date/Map/Set, but for plain JSON this is fine.
+        triggerVerification(
+          structuredClone({ ...ticket, sessionId }),
+          ticket.description || ticket.title,
+        );
       }
     }
   } catch (err) {

@@ -1579,7 +1579,12 @@ export function useCommandRoom() {
 
   const spawnAgent = useCallback(async (role: string, task?: string) => {
     const r = role.toLowerCase().trim();
-    const projectId = currentProjectId;
+    // 17-H4: read from the ref, not the React-state closure. The
+    // previous version captured `currentProjectId` from the outer
+    // render, so a project switch between render and click left
+    // spawnAgent pointed at the previous project (and wrote
+    // `allSessionProjectIds` for that stale id).
+    const projectId = currentProjectIdRef.current;
 
     if (!projectId) {
       addSessionMessage(producerSessionIdRef.current, {
