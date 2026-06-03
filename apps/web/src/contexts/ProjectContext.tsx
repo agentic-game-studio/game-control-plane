@@ -12,6 +12,7 @@ import {
 import type { Project, WSEvent } from "@game-studio/types";
 import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "@/hooks/useWebSocket";
+import { WS_REFETCH_DEBOUNCE_MS } from "@/lib/timing";
 const logger = createLogger("ProjectContext");
 
 const STORAGE_KEY = "studio:current-project-id";
@@ -119,7 +120,7 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
         if (debounceRef.current) clearTimeout(debounceRef.current);
         debounceRef.current = setTimeout(() => {
           fetchProjects();
-        }, 300);
+        }, WS_REFETCH_DEBOUNCE_MS);
       }
     },
     [fetchProjects],

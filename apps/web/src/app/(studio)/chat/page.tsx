@@ -41,13 +41,26 @@ function ChatPageInner() {
   const [selectedSubagentId, setSelectedSubagentId] = useState<string | null>(null);
   const [focusMode, setFocusMode] = useState<boolean>(() => {
     if (typeof window === "undefined") return true;
-    const saved = window.localStorage.getItem("studio-chat-focus-mode");
-    return saved === null ? true : saved === "true";
+    try {
+      // 14-L-localstorage-trycatch: Safari private mode + quota
+      // exceeded both throw on localStorage access. Default to
+      // focus mode on (the safer default) and let the user toggle
+      // freely in-memory only.
+      const saved = window.localStorage.getItem("studio-chat-focus-mode");
+      return saved === null ? true : saved === "true";
+    } catch {
+      return true;
+    }
   });
   const isGodot = currentProject?.engine === "godot";
 
   useEffect(() => {
-    window.localStorage.setItem("studio-chat-focus-mode", String(focusMode));
+    try {
+      window.localStorage.setItem("studio-chat-focus-mode", String(focusMode));
+    } catch {
+      // private mode or quota — ignore; the in-memory value is the
+      // source of truth for the rest of this session.
+    }
   }, [focusMode]);
 
   // 14-CR-markdown-cache: keep the markdown render cache bucketed by

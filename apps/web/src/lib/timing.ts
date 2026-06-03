@@ -30,3 +30,25 @@ export const DASHBOARD_SERVER_STATUS_POLL_MS = 60_000;
 // stay until the user dismisses them.
 export const SUCCESS_TOAST_DURATION_MS = 3_000;
 export const NOTIFICATION_TOAST_DURATION_MS = 5_000;
+
+// 14-L-queue-drain: delay between auto-dispatching the next
+// queued message. Long enough to give the previous response a
+// beat to settle (so the user sees the "thinking" indicator
+// transition cleanly), short enough to feel continuous when
+// the user has stacked several commands.
+export const QUEUE_DRAIN_DELAY_MS = 100;
+
+// 14-L-cache-save: debounce window for the per-project chat cache
+// write. 500ms is the sweet spot — short enough that a tab
+// close flushes within the navigation window, long enough to
+// collapse rapid state changes (typing → typing → typing) into
+// one disk write.
+export const CHAT_CACHE_SAVE_DEBOUNCE_MS = 500;
+
+// 14-L-loading-timeout: 5-minute hard cap on the "waiting for
+// response" spinner. Even if the LLM loop hangs forever, the
+// input unlocks after this and the user can send another
+// message. The 5-minute window matches the autonomous loop's
+// per-ticket budget so a single LLM call rarely hits the cap
+// legitimately; the cap is for stuck-stream recovery.
+export const LLM_LOADING_TIMEOUT_MS = 5 * 60 * 1_000;

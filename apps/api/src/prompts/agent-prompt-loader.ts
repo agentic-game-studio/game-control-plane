@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { loadConfig } from "../config.js";
+import { logger } from "../utils/logger.js";
 
 export interface AgentPrompt {
   name: string;
@@ -102,9 +103,9 @@ export async function loadAgentPrompts(): Promise<Map<string, AgentPrompt>> {
       // load". The file is left on disk untouched — a user can
       // fix the file (trim it) and the next API restart will
       // pick it up.
-      console.warn(
-        `[agent-prompt-loader] Skipping ${file}: size ${stat.size} bytes exceeds cap of ${MAX_AGENT_PROMPT_BYTES}. ` +
-        `Trim the file or raise MAX_AGENT_PROMPT_BYTES if the prompt is intentionally large.`,
+      logger.warn(
+        { file, sizeBytes: stat.size, capBytes: MAX_AGENT_PROMPT_BYTES, event: "agent_prompt_oversize" },
+        "Skipping oversized agent prompt file",
       );
       continue;
     }

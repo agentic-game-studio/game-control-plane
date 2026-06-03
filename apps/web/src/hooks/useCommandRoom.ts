@@ -4,6 +4,7 @@ import { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "./useWebSocket";
 import { useProject } from "@/contexts/ProjectContext";
+import { CHAT_CACHE_SAVE_DEBOUNCE_MS, LLM_LOADING_TIMEOUT_MS, QUEUE_DRAIN_DELAY_MS } from "@/lib/timing";
 import type { WSEvent, ContextUsage } from "@game-studio/types";
 const logger = createLogger("useCommandRoom");
 
@@ -1150,7 +1151,7 @@ export function useCommandRoom() {
         messageQueue,
         cachedAt: new Date().toISOString(),
       });
-    }, 500);
+    }, CHAT_CACHE_SAVE_DEBOUNCE_MS);
 
     return () => {
       if (cacheSaveTimerRef.current) {
@@ -2384,10 +2385,10 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
         if (queueDrainTimerRef.current) clearTimeout(queueDrainTimerRef.current);
         queueDrainTimerRef.current = setTimeout(
           () => executeCommandRef.current(next.input, next.images, next.targetSessionId),
-          100,
+          QUEUE_DRAIN_DELAY_MS,
         );
       }
-    }, 5 * 60 * 1000);
+    }, LLM_LOADING_TIMEOUT_MS);
 
     // Call real API for current session
     // 11-M10: create a fresh AbortController and thread its signal

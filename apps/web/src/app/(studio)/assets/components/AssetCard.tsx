@@ -3,8 +3,7 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { createPortal } from "react-dom";
 import type { GameAsset, AssetType, AssetCategory } from "@game-studio/types";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
+import { API_BASE } from "@/lib/api";
 
 const TYPE_ICONS: Record<AssetType, string> = {
   "3d": "view_in_ar",
