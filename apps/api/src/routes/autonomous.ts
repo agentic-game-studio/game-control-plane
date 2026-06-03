@@ -523,7 +523,17 @@ async function loadLoopState(sessionId: string): Promise<LoopState | null> {
   try {
     const raw = await readFileAsync(path, "utf-8");
     return JSON.parse(raw) as LoopState;
-  } catch {
+  } catch (err) {
+    // 20-L-swallow-loop-state: log the parse/read failure so a
+    // corrupted loop-state file doesn't look like "no loop in
+    // progress" to the operator. Sibling failure paths in this
+    // file (L459 debugLog, L582 / L636 logger.warn) all log
+    // something; the previous bare `catch {}` was the only silent
+    // failure in the autonomous startup sequence.
+    logger.warn(
+      { err: err instanceof Error ? err.message : String(err), path, event: "load_loop_state_failed" },
+      "loadLoopState: failed to read or parse — treating as no prior state",
+    );
     return null;
   }
 }
@@ -607,7 +617,15 @@ async function loadHistory(): Promise<LoopRunRecord[]> {
   try {
     const raw = await readFileAsync(path, "utf-8");
     return JSON.parse(raw) as LoopRunRecord[];
-  } catch {
+  } catch (err) {
+    // 20-L-swallow-loop-state: see sibling comment in loadLoopState.
+    // A corrupted run-history file used to silently produce an
+    // empty history — the operator would see the loop restart
+    // from scratch with no explanation.
+    logger.warn(
+      { err: err instanceof Error ? err.message : String(err), path, event: "load_history_failed" },
+      "loadHistory: failed to read or parse — treating as empty history",
+    );
     return [];
   }
 }

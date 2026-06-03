@@ -360,10 +360,27 @@ function hashToolInput(input: Record<string, unknown>): string {
   // can be spoofed by any input shape that JSON-serializes to the
   // same string. SHA-256 is 64 hex chars regardless of input size
   // and has effectively zero collision rate for tool-input space.
+  //
+  // 20-L-hash-fallback: the prior `catch { return String(input) }`
+  // collapsed every unstringifiable input (circular refs, BigInts,
+  // functions) to either `"[object Object]"` or a debuggy recursive
+  // dump — so two structurally-different inputs that both fail
+  // JSON.stringify hashed to the same string and the repetitive-
+  // loop detector silently treated them as identical. The detector
+  // exists to break infinite tool-call loops, so silently merging
+  // distinct loop candidates is the exact failure mode it was
+  // supposed to prevent. Log the failure and return a stable
+  // surrogate that includes the keys' sorted names so a second
+  // structurally-different input still hashes differently.
   try {
     return createHash("sha256").update(JSON.stringify(input, Object.keys(input).sort())).digest("hex");
-  } catch {
-    return String(input);
+  } catch (err) {
+    const keyNames = Object.keys(input).sort().join(",");
+    logger.warn(
+      { err: err instanceof Error ? err.message : String(err), keyCount: Object.keys(input).length, event: "hash_tool_input_fallback" },
+      "hashToolInput: JSON.stringify failed; using key-name surrogate hash",
+    );
+    return createHash("sha256").update(`unstringifiable:${keyNames}`).digest("hex");
   }
 }
 

@@ -897,7 +897,7 @@ function ticketExistsById(board: TicketsBoard, id: string): boolean {
  * Core features (phase 2) only after foundation files exist.
  * Polish (phase 3) only after core features exist.
  */
-export async function generateTickets(projectId: string, workspacePath?: string, projectDescription?: string): Promise<Ticket[]> {
+export async function generateTickets(projectId: string, workspacePath?: string, projectDescription?: string): Promise<Array<Ticket & { phase?: number; templateId?: string }>> {
   const effectivePath = workspacePath ?? projectId;
   const projectPath = join(WORKSPACE, effectivePath);
   if (!workspacePath || !existsSync(projectPath)) {
@@ -908,7 +908,14 @@ export async function generateTickets(projectId: string, workspacePath?: string,
   const genre = detectGenre(projectDescription ?? "");
 
   const board = await readTicketsBoard(projectId);
-  const newTickets: Ticket[] = [];
+  // 20-L-typed-access: the array elements are built as
+  // `Ticket & { templateId?: string; phase?: number }` (L938) so
+  // the sort callback can read `phase` directly without an `as
+  // unknown as Record<string, unknown>` cast. The intersection
+  // widens the public return type, which is fine because every
+  // element is also a valid Ticket — callers iterate or pass to
+  // addTicketsToBoard which accepts the base shape.
+  const newTickets: Array<Ticket & { phase?: number; templateId?: string }> = [];
 
   for (const template of TICKET_TEMPLATES) {
     if (template.genres && template.genres.length > 0) {
@@ -955,10 +962,14 @@ export async function generateTickets(projectId: string, workspacePath?: string,
     newTickets.push(ticket);
   }
 
-  // Sort by phase first, then by credits within each phase
+  // Sort by phase first, then by credits within each phase. The
+  // 20-L-typed-access fix dropped the unnecessary `as unknown as
+  // Record<string, unknown>` cast — the sort callback receives
+  // `Ticket & { templateId?: string; phase?: number }` (L938),
+  // so the field is statically typed as `number | undefined`.
   newTickets.sort((a, b) => {
-    const phaseA = (a as unknown as Record<string, unknown>).phase as number ?? 2;
-    const phaseB = (b as unknown as Record<string, unknown>).phase as number ?? 2;
+    const phaseA = a.phase ?? 2;
+    const phaseB = b.phase ?? 2;
     if (phaseA !== phaseB) return phaseA - phaseB;
     return b.credits - a.credits;
   });

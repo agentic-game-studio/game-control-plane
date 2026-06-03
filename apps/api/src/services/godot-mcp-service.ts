@@ -14,7 +14,9 @@
 
 import { spawn, execFileSync, ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { accessSync, globSync, rmSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname as pathDirname, join, resolve } from "node:path";
+import { accessSync, globSync, rmSync, existsSync, readdirSync, readFileSync } from "node:fs";
 import os from "node:os";
 import type { LLMTool } from "../llm/zai-client.js";
 import { logger } from "../utils/logger.js";
@@ -80,6 +82,20 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 // here and every probe/lookup/error message follows.
 const GODOT_MCP_PRO_VERSION = "v1.11.0";
 
+// 20-L-cwd: derive the search root from this file's location, not
+// process.cwd(). The dev server starts in `apps/api/`, the Docker
+// image starts in `/app/`, and a `pnpm dev` from the repo root
+// lands somewhere else again. `godot-mcp-pro-${VERSION}/` always
+// lives at the repo root, which is 3 levels up from this file. The
+// same pattern was applied to llm-service.ts:36 (19-M) and
+// shipthis-service.ts:13 (19-L) — extend it here too so all three
+// path resolvers agree about where the repo is. Without this, the
+// findServerDir fallback at L1172 always returned a path that
+// doesn't exist in Docker, and the user's "Setup Godot MCP" button
+// in production showed a useless ENOENT error.
+const THIS_FILE_DIR = pathDirname(fileURLToPath(import.meta.url));
+const REPO_ROOT_FROM_THIS_FILE = resolve(THIS_FILE_DIR, "..", "..", "..");
+
 /** Auto-detect MCP server path from env var or relative paths */
 function resolveServerPath(): string {
   // 1. Explicit env var (highest priority)
@@ -88,15 +104,12 @@ function resolveServerPath(): string {
   }
 
   // 2. Try relative to API root (apps/api) and project root
-  // API runs from apps/api, MCP server is in project root
-  const cwd = process.cwd();
+  // API runs from apps/api, MCP server is in project root. Anchor
+  // the search at the repo root derived from this file's location
+  // (REPO_ROOT_FROM_THIS_FILE) rather than process.cwd() so the dev
+  // server and the Docker image agree about where the package is.
   const candidates = [
-    // From project root (cwd = game-control-plane)
-    `${cwd}/godot-mcp-pro-${GODOT_MCP_PRO_VERSION}/server/build/index.js`,
-    // From apps/api (cwd = game-control-plane/apps/api), go up 2 levels
-    `${cwd}/../../godot-mcp-pro-${GODOT_MCP_PRO_VERSION}/server/build/index.js`,
-    // From apps/api (cwd = game-control-plane/apps/api), go up 1 level
-    `${cwd}/../godot-mcp-pro-${GODOT_MCP_PRO_VERSION}/server/build/index.js`,
+    join(REPO_ROOT_FROM_THIS_FILE, `godot-mcp-pro-${GODOT_MCP_PRO_VERSION}`, "server", "build", "index.js"),
   ];
 
   for (const p of candidates) {
@@ -872,9 +885,7 @@ export function getGodotMCPService(projectId: string): GodotMCPService | null {
 
 // ─── Plugin Auto-Installation ──────────────────────────────────────────
 
-import { existsSync, readdirSync, readFileSync } from "node:fs";
 import * as fsp from "node:fs/promises";
-import { join, resolve } from "node:path";
 
 /** Result of a plugin installation attempt */
 export interface InstallPluginResult {
@@ -918,10 +929,10 @@ export async function installGodotMCPPlugin(
       resolve(workspaceDir, "..", `godot-mcp-pro-${GODOT_MCP_PRO_VERSION}`, "addons", "godot_mcp"),
       // Inside workspace
       resolve(workspaceDir, `godot-mcp-pro-${GODOT_MCP_PRO_VERSION}`, "addons", "godot_mcp"),
-      // Current working directory
-      resolve(process.cwd(), `godot-mcp-pro-${GODOT_MCP_PRO_VERSION}`, "addons", "godot_mcp"),
-      // Parent of current working directory
-      resolve(process.cwd(), "..", `godot-mcp-pro-${GODOT_MCP_PRO_VERSION}`, "addons", "godot_mcp"),
+      // From the repo root (the canonical install location — anchors
+      // on this file's location, not process.cwd(), so dev and Docker
+      // agree about where the package is).
+      resolve(REPO_ROOT_FROM_THIS_FILE, `godot-mcp-pro-${GODOT_MCP_PRO_VERSION}`, "addons", "godot_mcp"),
       // Parent of workspace parent
       resolve(workspaceDir, "..", "..", `godot-mcp-pro-${GODOT_MCP_PRO_VERSION}`, "addons", "godot_mcp"),
     ];
@@ -1169,18 +1180,17 @@ export interface SetupServerResult {
  * Returns the server directory (containing package.json and build/).
  */
 export function findServerDir(): string | null {
-  const cwd = process.cwd();
+  // Anchor at the repo root derived from this file's location
+  // (REPO_ROOT_FROM_THIS_FILE) — see 20-L-cwd above. process.cwd()
+  // varies between `apps/api/` (dev) and `/app/` (Docker), so any
+  // candidate built from it produces a non-existent path in
+  // production. The versioned directory is the canonical install
+  // location; the unversioned `godot-mcp-pro` directory is kept as
+  // a fallback for someone who cloned the package without the
+  // version suffix.
   const candidates = [
-    // API runs from apps/api, so go up to project root
-    resolve(cwd, "..", "..", `godot-mcp-pro-${GODOT_MCP_PRO_VERSION}`, "server"),
-    resolve(cwd, `godot-mcp-pro-${GODOT_MCP_PRO_VERSION}`, "server"),
-    resolve(cwd, "..", `godot-mcp-pro-${GODOT_MCP_PRO_VERSION}`, "server"),
-    resolve(cwd, "godot-mcp-pro", "server"),
-    resolve(cwd, "..", "godot-mcp-pro", "server"),
-    resolve(cwd, "..", "..", "godot-mcp-pro", "server"),
-    // From project root
-    resolve(cwd, `godot-mcp-pro-${GODOT_MCP_PRO_VERSION}`, "server"),
-    resolve(cwd, "..", `godot-mcp-pro-${GODOT_MCP_PRO_VERSION}`, "server"),
+    resolve(REPO_ROOT_FROM_THIS_FILE, `godot-mcp-pro-${GODOT_MCP_PRO_VERSION}`, "server"),
+    resolve(REPO_ROOT_FROM_THIS_FILE, "godot-mcp-pro", "server"),
   ];
 
   for (const candidate of candidates) {
@@ -1228,8 +1238,11 @@ export function setupGodotMCPServer(
   try {
     const serverDir = findServerDir();
     if (!serverDir) {
-      result.error = `Could not find godot-mcp-pro server directory.\nSearched in:\n  - ${process.cwd()}/godot-mcp-pro-${GODOT_MCP_PRO_VERSION}/server\n  - ${process.cwd()}/../godot-mcp-pro-${GODOT_MCP_PRO_VERSION}/server\n\nMake sure godot-mcp-pro-${GODOT_MCP_PRO_VERSION} is in the project root.`;
-      logger.error({ searched: [process.cwd(), resolve(process.cwd(), "..")] }, "Godot MCP server not found");
+      // 20-L-cwd: surface the actual repo root we searched, not a
+      // process.cwd() that the operator can't interpret in Docker.
+      const repoRoot = REPO_ROOT_FROM_THIS_FILE;
+      result.error = `Could not find godot-mcp-pro server directory.\nSearched in:\n  - ${repoRoot}/godot-mcp-pro-${GODOT_MCP_PRO_VERSION}/server\n  - ${repoRoot}/godot-mcp-pro/server\n\nMake sure godot-mcp-pro-${GODOT_MCP_PRO_VERSION} is in the project root.`;
+      logger.error({ searched: [resolve(repoRoot, `godot-mcp-pro-${GODOT_MCP_PRO_VERSION}`), resolve(repoRoot, "godot-mcp-pro")] }, "Godot MCP server not found");
       return result;
     }
 
