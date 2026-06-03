@@ -101,6 +101,19 @@ const DEFAULT_CONCURRENCY_LIMIT = 2;
  * waitQueue length before dropping. */
 const MAX_TRACKED_MODELS = 32;
 
+// 18-L-progress-ratios: name the two context-window ratios used
+// by the conversation-history pruner. The thresholds are tied to
+// the model-specific context window: when the in-flight history
+// exceeds `window * 0.5` we trigger summarization, and the pruner
+// keeps the tail of the history once it crosses
+// `window * 0.8`. Naming the ratios makes the relationship
+// between the two thresholds explicit (the summarize trigger
+// sits well below the prune headroom) and avoids the "what does
+// 0.8 mean here" question for future maintainers tuning the
+// numbers.
+const PRUNE_HEADROOM_RATIO = 0.8;
+const SUMMARIZE_TRIGGER_RATIO = 0.5;
+
 const modelSemaphores = new Map<string, Semaphore>();
 
 /** Dedicated semaphore for in-loop summarization calls. Separate from
@@ -230,12 +243,21 @@ const DEFAULT_TOOL_IMPORTANCE = 40;
 const MAX_TOOL_RESULT_BYTES = 15_000;
 const KEEP_RECENT_MESSAGES = 10;       // Never prune last N messages
 
+// 18-L-fetch-timeout-fallback: hard-coded fallback used when
+// loadConfig() itself throws (e.g. the env file is missing or
+// malformed). We can't safely reference the API_TIMEOUT_MS env
+// default here because loadConfig() is what reads the env, and
+// the recursion would be infinite. 120s is generous enough for a
+// 2-minute-max single LLM call and matches the documented default
+// in config.ts.
+const FALLBACK_FETCH_TIMEOUT_MS = 120_000;
+
 function getFetchTimeoutMs(): number {
   try {
     const config = loadConfig();
     return config.API_TIMEOUT_MS;
   } catch {
-    return 120_000;
+    return FALLBACK_FETCH_TIMEOUT_MS;
   }
 }
 
@@ -835,10 +857,12 @@ export async function callLLMWithTools(
   let readWarningInjected = false;
   let buildGateTriggeredAt = 0;
 
-  // Per-model context limits (use 80% of window as max, 50% as summarize threshold)
+  // Per-model context limits (use PRUNE_HEADROOM_RATIO of window as
+  // max, SUMMARIZE_TRIGGER_RATIO as summarize threshold — see
+  // utils/progress.ts-style named constants near the top of the file).
   const contextWindow = getModelContextWindow(request.model ?? "");
-  const maxContextTokens = Math.floor(contextWindow * 0.8);
-  const summarizeThreshold = Math.floor(contextWindow * 0.5);
+  const maxContextTokens = Math.floor(contextWindow * PRUNE_HEADROOM_RATIO);
+  const summarizeThreshold = Math.floor(contextWindow * SUMMARIZE_TRIGGER_RATIO);
 
   while (iteration < 200) {
     iteration++;

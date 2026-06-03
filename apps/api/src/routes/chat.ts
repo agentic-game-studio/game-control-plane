@@ -18,6 +18,7 @@ import { resolveProjectWorkspace } from "../utils/workspace.js";
 import { loadConfig } from "../config.js";
 import { getModelContextWindow, getModelForTier, MAX_CONTEXT_TOKENS, CHARS_PER_TOKEN_ESTIMATE } from "../config/model-mapping.js";
 import { newId } from "../utils/ids.js";
+import { heartbeatProgressPct } from "../utils/progress.js";
 
 export const chatRouter: Router = Router();
 
@@ -1607,8 +1608,10 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
     heartbeat = setInterval(() => {
       heartbeatCount++;
       const elapsed = heartbeatCount * 2;
-      // Smooth progress: start at 10%, climb by 3% each tick, cap at 85%
-      const pct = Math.min(85, 10 + heartbeatCount * 3);
+      // 18-L-progress-dry: shared helper for the heartbeat bar.
+      // Cap/base/increment live in utils/progress.ts so the LLM
+      // service and this handler can't drift.
+      const pct = heartbeatProgressPct(heartbeatCount);
       broadcast({
         type: "chat:progress",
         sessionId: id,
@@ -2067,7 +2070,7 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
       heartbeat = setInterval(() => {
         heartbeatCount++;
         const elapsed = heartbeatCount * 2;
-        const pct = Math.min(85, 10 + heartbeatCount * 3);
+        const pct = heartbeatProgressPct(heartbeatCount);
         broadcast({
           type: "chat:progress",
           sessionId,

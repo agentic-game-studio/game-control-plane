@@ -75,6 +75,7 @@ import { triggerVerification } from "./verification-service.js";
 import { consumeCreditsForAgent } from "./credit-service.js";
 import { logger } from "../utils/logger.js";
 import { newId } from "../utils/ids.js";
+import { toolIterationProgressPct } from "../utils/progress.js";
 
 // 10-M5: hoist the static Godot-binary allowlist to module scope. The
 // previous version rebuilt the array on every Bash tool call — that's
@@ -207,8 +208,12 @@ import { getWorkflow, createQuestTicket, moveQuestTicket } from "./quest-bridge.
 import { readTicketsBoard } from "./ticket-board.js";
 import { ingestProducerSummaryFromSession } from "./producer-summary.js";
 
-/** Helper to broadcast log entries with timestamp */
-function logEntry(sessionId: string, level: string, message: string, agent?: AgentRole) {
+/** Helper to broadcast log entries with timestamp.
+ *  18-L-logentry-rename: renamed from `logEntry` to make the
+ *  side-channel WebSocket broadcast explicit — the actual logger
+ *  is the pino instance in utils/logger.ts; this function is a
+ *  WS broadcast only and the old name suggested it logged locally. */
+function broadcastLogEntry(sessionId: string, level: string, message: string, agent?: AgentRole) {
   broadcast({
     type: "log:entry",
     sessionId,
@@ -430,13 +435,13 @@ export function makeProgressCallback(sessionId: string, progressMsgId: string): 
   let lastBroadcastProgress = 0;
   return (info) => {
     if (info.phase === "executing" && info.currentTool) {
-      logEntry(sessionId, "info", `[TOOL] ${info.currentTool} (iteration ${info.iteration})`);
+      broadcastLogEntry(sessionId, "info", `[TOOL] ${info.currentTool} (iteration ${info.iteration})`);
       // Broadcast tool execution progress so frontend shows activity
       broadcast({
         type: "chat:progress",
         sessionId,
         progressMsgId,
-        progress: Math.min(85, 10 + info.iteration * 2),
+        progress: toolIterationProgressPct(info.iteration),
         content: `${info.currentTool} (iteration ${info.iteration})`,
       } as WSEvent);
     }
@@ -501,7 +506,7 @@ async function executeTool(
         }
         try {
           const content = await fs.readFile(filePath, "utf-8");
-          logEntry(sessionId, "info", `[${agentRole}] Read: ${filePath}`, agentRole);
+          broadcastLogEntry(sessionId, "info", `[${agentRole}] Read: ${filePath}`, agentRole);
           onFileOperation?.({ tool: "Read", path: filePath, result: "success" });
           return content;
         } catch {
@@ -528,7 +533,7 @@ async function executeTool(
         }
         await fs.mkdir(path.dirname(filePath), { recursive: true });
         await fs.writeFile(filePath, content, "utf-8");
-        logEntry(sessionId, "info", `[${agentRole}] Wrote: ${filePath}`, agentRole);
+        broadcastLogEntry(sessionId, "info", `[${agentRole}] Wrote: ${filePath}`, agentRole);
         onFileOperation?.({ tool: "Write", path: filePath, result: "success" });
         return `Successfully wrote ${content.length} characters to ${filePath}`;
       }
@@ -554,7 +559,7 @@ async function executeTool(
           ? fileContent.split(oldString).join(newString)
           : fileContent.replace(oldString, newString);
         await fs.writeFile(filePath, newContent, "utf-8");
-        logEntry(sessionId, "info", `[${agentRole}] Edit: ${filePath} (${replaceAll ? "all" : "first"} of ${occurrences})`, agentRole);
+        broadcastLogEntry(sessionId, "info", `[${agentRole}] Edit: ${filePath} (${replaceAll ? "all" : "first"} of ${occurrences})`, agentRole);
         return `Successfully edited ${filePath} (${replaceAll ? `${occurrences} occurrences` : "1 occurrence"} replaced)`;
       }
 
@@ -690,7 +695,7 @@ async function executeTool(
             // the binary on PATH.
             shell: false,
           });
-          logEntry(sessionId, "info", `[${agentRole}] Bash: ${command}`, agentRole);
+          broadcastLogEntry(sessionId, "info", `[${agentRole}] Bash: ${command}`, agentRole);
           return stderr ? `STDOUT:\n${stdout}\nSTDERR:\n${stderr}` : stdout || "Command completed (no output)";
         } catch (err: unknown) {
           const error = err as { stdout?: string; stderr?: string; message?: string };
@@ -736,7 +741,7 @@ async function executeTool(
           }
         }
 
-        logEntry(sessionId, "info", `[${agentRole}] Spawning subagent: ${agent}`, agentRole);
+        broadcastLogEntry(sessionId, "info", `[${agentRole}] Spawning subagent: ${agent}`, agentRole);
 
         // Quest Bridge: always create a ticket for subagent tasks
         const ticket = await createQuestTicket(
@@ -829,7 +834,7 @@ async function executeTool(
           return "Error: questionId, question, and options are required";
         }
 
-        logEntry(sessionId, "info", `[${agentRole}] Asking question: ${questionId}`, agentRole);
+        broadcastLogEntry(sessionId, "info", `[${agentRole}] Asking question: ${questionId}`, agentRole);
 
         // Return special marker that tells callLLMWithTools to STOP and return the question
         // This prevents the LLM from seeing the question data and responding with "Waiting..."
@@ -857,7 +862,7 @@ async function executeTool(
           return "Error: planId, title, and phases are required";
         }
 
-        logEntry(sessionId, "info", `[${agentRole}] Proposing plan: ${title}`, agentRole);
+        broadcastLogEntry(sessionId, "info", `[${agentRole}] Proposing plan: ${title}`, agentRole);
 
         // Return special marker that tells callLLMWithTools to STOP and return the plan
         return "__PROPOSE_PLAN__" + JSON.stringify({
@@ -889,7 +894,7 @@ async function executeTool(
           }
         } catch { /* use raw prompt */ }
 
-        logEntry(sessionId, "info", `[${agentRole}] Generating asset: ${assetName}`, agentRole);
+        broadcastLogEntry(sessionId, "info", `[${agentRole}] Generating asset: ${assetName}`, agentRole);
 
         const { execFile: execFileTool } = await import("node:child_process");
         const { promisify: promisifyTool } = await import("node:util");
@@ -1021,7 +1026,7 @@ async function executeTool(
             // manifest may not exist
           }
 
-          logEntry(sessionId, "info", `[${agentRole}] Asset generated: ${assetName}`, agentRole);
+          broadcastLogEntry(sessionId, "info", `[${agentRole}] Asset generated: ${assetName}`, agentRole);
           return `Asset generation complete.${manifestInfo}\n\nLog:\n${stdout.slice(-500)}${stderr ? `\nStderr: ${stderr.slice(-200)}` : ""}`;
         } catch (genError: unknown) {
           const err = genError as { message?: string; stderr?: string };
@@ -1069,7 +1074,7 @@ async function executeTool(
             maxBuffer: SUBPROCESS_MAX_BUFFER,
           });
           const summary = stdout.slice(-300);
-          logEntry(sessionId, "info", `[${agentRole}] TilemapSplit: ${_input} -> ${_outputDir}`, agentRole);
+          broadcastLogEntry(sessionId, "info", `[${agentRole}] TilemapSplit: ${_input} -> ${_outputDir}`, agentRole);
           return `Tilemap split complete.\n${summary}${stderr ? `\nStderr: ${stderr.slice(-200)}` : ""}`;
         } catch (err: unknown) {
           const error = err as { stderr?: string; message?: string };
@@ -1111,7 +1116,7 @@ async function executeTool(
             maxBuffer: SUBPROCESS_MAX_BUFFER,
           });
           const summary = stdout.slice(-300);
-          logEntry(sessionId, "info", `[${agentRole}] SpritePack: ${_inputDir} -> ${_output}`, agentRole);
+          broadcastLogEntry(sessionId, "info", `[${agentRole}] SpritePack: ${_inputDir} -> ${_output}`, agentRole);
           return `Sprite pack complete.\n${summary}${stderr ? `\nStderr: ${stderr.slice(-200)}` : ""}`;
         } catch (err: unknown) {
           const error = err as { stderr?: string; message?: string };
@@ -1179,7 +1184,7 @@ async function executeTool(
             maxBuffer: SUBPROCESS_MAX_BUFFER,
           });
           const summary = stdout.slice(-200);
-          logEntry(sessionId, "info", `[${agentRole}] GenerateAudio: ${_sfxType} -> ${_outputPath}`, agentRole);
+          broadcastLogEntry(sessionId, "info", `[${agentRole}] GenerateAudio: ${_sfxType} -> ${_outputPath}`, agentRole);
 
           // Write Godot .import sidecar for audio assets
           try {
@@ -1337,7 +1342,7 @@ loop_offset=0
           const { writeData } = await import("../services/data-store.js");
           await writeData("chat-state.json", store);
 
-          logEntry(sessionId, "info", `[${agentRole}] Started consultation: ${role}`, agentRole);
+          broadcastLogEntry(sessionId, "info", `[${agentRole}] Started consultation: ${role}`, agentRole);
 
           return `${role} consultation session started (${sessionId}). The user can now switch to the ${role} tab to chat directly.`;
         } finally {
@@ -1430,7 +1435,7 @@ loop_offset=0
             resultMsg = `Output:\n${stdout.slice(-500)}${stderr ? `\nStderr: ${stderr.slice(-200)}` : ""}`;
           }
 
-          logEntry(sessionId, "info", `[${agentRole}] RunGodotHeadless: ${command} on ${project}`, agentRole);
+          broadcastLogEntry(sessionId, "info", `[${agentRole}] RunGodotHeadless: ${command} on ${project}`, agentRole);
           return resultMsg;
         } catch (err: unknown) {
           const error = err as { stderr?: string; message?: string };
@@ -1452,7 +1457,7 @@ loop_offset=0
         const { createQuestTicket } = await import("../services/quest-bridge.js");
         const ticket = await createQuestTicket(sessionId, title, agentRole as AgentRole, description, area, subarea);
 
-        logEntry(sessionId, "info", `[${agentRole}] Created ticket: ${ticket.id} — ${title}`, agentRole as AgentRole);
+        broadcastLogEntry(sessionId, "info", `[${agentRole}] Created ticket: ${ticket.id} — ${title}`, agentRole as AgentRole);
         return `Ticket created:\nID: ${ticket.id}\nTitle: ${ticket.title}\nStatus: ${ticket.status}\nAssignee: ${ticket.assignee}\nArea: ${ticket.area}/${ticket.subarea}`;
       }
 
@@ -1533,7 +1538,7 @@ loop_offset=0
             timeout: 600_000,
             maxBuffer: SUBPROCESS_MAX_BUFFER,
           });
-          logEntry(sessionId, "info", `[${agentRole}] GodotCLI ${command}: ${projectPath}`, agentRole);
+          broadcastLogEntry(sessionId, "info", `[${agentRole}] GodotCLI ${command}: ${projectPath}`, agentRole);
           return (stdout as string)?.trim() || "GodotCLI completed";
         } catch (err: unknown) {
           const e = err as { stdout?: string; stderr?: string; message?: string };
@@ -1556,7 +1561,7 @@ loop_offset=0
         if (!result.success) {
           return `Error: ShipThis export failed: ${result.error}\n${result.output.slice(-500)}`;
         }
-        logEntry(sessionId, "info", `[${agentRole}] ShipThisExport ${platform}`, agentRole);
+        broadcastLogEntry(sessionId, "info", `[${agentRole}] ShipThisExport ${platform}`, agentRole);
         return `ShipThis export initiated.\n${result.output.slice(-800)}`;
       }
 
@@ -1565,14 +1570,14 @@ loop_offset=0
         if (isGodotMCPTool(name)) {
           // Use projectId from ProjectContext to lookup the service (shared across sessions)
           const projectId = projectContext?.projectId;
-          logEntry(sessionId, "info", `[${agentRole}] Godot MCP lookup: projectId=${projectId}`, agentRole);
+          broadcastLogEntry(sessionId, "info", `[${agentRole}] Godot MCP lookup: projectId=${projectId}`, agentRole);
           const godotService = projectId ? getGodotMCPService(projectId) : null;
           if (godotService?.running()) {
-            logEntry(sessionId, "info", `[${agentRole}] Godot MCP: ${name}`, agentRole);
+            broadcastLogEntry(sessionId, "info", `[${agentRole}] Godot MCP: ${name}`, agentRole);
             const result = await godotService.executeTool(name, input);
             return result;
           } else {
-            logEntry(sessionId, "info", `[${agentRole}] Godot MCP service not running for projectId=${projectId}`, agentRole);
+            broadcastLogEntry(sessionId, "info", `[${agentRole}] Godot MCP service not running for projectId=${projectId}`, agentRole);
             return `Error: Godot MCP tool '${name}' called but Godot MCP service is not running for this project. ` +
               `Ensure project engine is "godot" and the Godot editor is running with the MCP plugin enabled.`;
           }
@@ -1581,7 +1586,7 @@ loop_offset=0
     }
   } catch (err: unknown) {
     const error = err as Error;
-    logEntry(sessionId, "error", `[TOOL ERROR: ${name}] ${error.message}`, agentRole);
+    broadcastLogEntry(sessionId, "error", `[TOOL ERROR: ${name}] ${error.message}`, agentRole);
     return `[TOOL ERROR: ${name}] ${error.message}`;
   }
 }

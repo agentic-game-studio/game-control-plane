@@ -167,12 +167,12 @@ function purgeStaleCacheKeys(): void {
     }
     keysToRemove.forEach((k) => localStorage.removeItem(k));
     if (keysToRemove.length > 0) {
-      // Dev-time visibility only. Removing this would lose signal in
-      // troubleshooting but keeping it as console.log floods production
-      // devtools. The cache-purge marker is the persistent artifact; this
-      // log is best-effort.
+      // 18-L-consolelog-debug: use the file's pino-style logger
+      // (logger.debug) for consistency with the rest of the
+      // file's logging. The NODE_ENV gate stays — debug-level
+      // messages are still stripped in production.
       if (process.env.NODE_ENV !== "production") {
-        console.log("[Cache] Purged", keysToRemove.length, "stale keys");
+        logger.debug("[Cache] Purged stale keys", { count: keysToRemove.length });
       }
     }
     localStorage.setItem(CACHE_PURGE_MARKER, "1");
@@ -2683,7 +2683,10 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
 
   const compactSession = useCallback(async (sessionId: string) => {
     if (process.env.NODE_ENV !== "production") {
-      console.log("[Compact] Requested for sessionId:", sessionId, "producerRef:", producerSessionIdRef.current);
+      // 18-L-consolelog-debug: use the file's pino-style logger
+      // (logger.debug) for consistency. The NODE_ENV gate stays so
+      // dev-only signal is stripped in production.
+      logger.debug("[Compact] Requested", { sessionId, producerRef: producerSessionIdRef.current });
     }
     setCompactingSessionId(sessionId);
     addSessionMessage(producerSessionIdRef.current, {
