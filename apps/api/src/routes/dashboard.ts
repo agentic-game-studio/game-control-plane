@@ -523,10 +523,42 @@ dashboardRouter.post("/projects", async (req: Request, res: Response) => {
     // readData + writeData pair had a lost-update race: both callers would
     // read the same baseline and the second's writeData would clobber the
     // first's project.
+    // 19-H-dashboard-double-create: idempotency check inside the
+    // lock. The previous code only checked name+workspacePath after
+    // creating the entry, so a user double-clicking "Create" (or a
+    // frontend retry on a slow network) would push two distinct
+    // projects with the same workspacePath. Worse, the
+    // Godot-plugin auto-install at line 535 would race on the
+    // filesystem rm+cp — concurrent installs to the same projectDir
+    // could corrupt the addons/godot_mcp/ tree. Detect the dup
+    // inside the mutex (read+check+append is one atomic step) and
+    // return the existing project so the client gets a deterministic
+    // answer. We use a closure-captured flag rather than widening
+    // updateData's return type — the helper's `T → T` signature
+    // shouldn't be polluted with side-channel metadata.
+    let deduped: Project | null = null;
     await updateData<DashboardData>("dashboard.json", (data) => {
+      // Match by workspacePath when present (most specific — two
+      // projects can't share a workspace) or by name when not. The
+      // dedup is intentionally lenient on name only because users
+      // often want multiple projects named similarly; a strict
+      // name-only match would be a foot-gun.
+      const dup = data.projects.find((p) =>
+        (workspacePath && p.workspacePath && p.workspacePath === workspacePath) ||
+        (!workspacePath && p.name === body.name),
+      );
+      if (dup) {
+        deduped = dup;
+        return data;
+      }
       data.projects.push(newProject);
       return data;
     });
+
+    if (deduped) {
+      res.json({ success: true, data: deduped, deduplicated: true });
+      return;
+    }
 
     // Auto-install Godot MCP plugin for Godot projects with workspacePath
     let pluginInstallResult: { success: boolean; pluginCopied: boolean; pluginEnabled: boolean; error?: string } | null = null;

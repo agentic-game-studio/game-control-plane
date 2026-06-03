@@ -94,10 +94,23 @@ function connect(): void {
       // B's interval — leaving the live socket with no keepalive and
       // getting disconnected by the server 60s later.
       const stillCurrent = sharedSocket === ws;
-      notifyConnected(false);
-      if (stillCurrent && pingInterval) {
-        clearInterval(pingInterval);
-        pingInterval = null;
+      // 19-H-ws-stale-disconnect: guard `notifyConnected(false)` on
+      // stillCurrent too. The previous code flipped the global
+      // `sharedConnected = false` unconditionally, so a late
+      // onclose from socket A (after socket B's onopen had
+      // already set it to true) would re-flip to false. The UI
+      // would render "disconnected" while the live socket B was
+      // OPEN, gating connection-aware features (the
+      // connection-status dot, the WS-gated tool calls) on a
+      // false signal. React StrictMode's double-mount triggers
+      // this on every reconnect because the mount-1 socket
+      // closes *after* the mount-2 socket is already OPEN.
+      if (stillCurrent) {
+        notifyConnected(false);
+        if (pingInterval) {
+          clearInterval(pingInterval);
+          pingInterval = null;
+        }
       }
       // 12-H13: detect auth failure on close. The server-side WS
       // auth in apps/api/src/services/websocket.ts closes the
