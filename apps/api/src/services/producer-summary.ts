@@ -237,7 +237,7 @@ function scheduleEmit(projectId: string, delayMs: number): void {
  *  paths so a deleted project can't fire an emit against a torn-down
  *  state — the callback would import chat.js and broadcast to a dead
  *  project. */
-export function clearProjectProducerSummary(projectId: string): void {
+export async function clearProjectProducerSummary(projectId: string): Promise<void> {
   const t = pendingEmitTimers.get(projectId);
   if (t) {
     clearTimeout(t);
@@ -251,6 +251,25 @@ export function clearProjectProducerSummary(projectId: string): void {
   // deleted project left a permanent Map entry (one Promise reference
   // each, ~100 bytes). Drop the chain entry so the Map shrinks back
   // to the active-project count.
+  //
+  // 31-CR-prod-sum-clear-drops-inflight: the previous synchronous
+  // delete-then-return could race a fact ingest that's mid-chain.
+  // The chain's in-flight tail is the *previous* ingest's
+  // `nextTail` — the caller that installed it has already
+  // `await nextTail`-ed, so the work continues running after
+  // clearProjectProducerSummary returns. That work calls
+  // `flushEmitProducerUpdate(projectId)`, which dynamically imports
+  // chat.js and walks `resolveActiveProducerSession(projectId)` —
+  // by the time the import resolves (module-graph races) the
+  // project may be partially torn down. The fix: await the
+  // in-flight tail so any work-in-progress completes against
+  // the still-live session *before* the caller finishes the
+  // project-delete teardown. The chain's `.catch(() => undefined)`
+  // wrapper means this `await` never throws.
+  const tail = producerSummaryPersistChains.get(projectId);
+  if (tail) {
+    try { await tail; } catch { /* swallowed by chain's own catch */ }
+  }
   producerSummaryPersistChains.delete(projectId);
 }
 

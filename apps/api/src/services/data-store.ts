@@ -170,47 +170,63 @@ export async function readData<T>(filename: string): Promise<T> {
   throw new Error(`Data file ${filename} is temporarily unavailable. Retry in a moment.`);
 }
 
-export async function writeData<T>(filename: string, data: T): Promise<void> {
-  // 15-H-write-mutex: writeData used to bypass the per-file mutex that
-  // updateData enforces. Two concurrent writes to the same file (e.g.,
-  // a /settings PATCH landing while the autonomous loop is also writing
-  // settings.json, or two /api/chat/sessions calls racing on
-  // chat-state.json) would both write to the shared .tmp path, and the
-  // second's rename could interleave with the first's writeFile —
-  // leaving a truncated, corrupted, or partially-old file. Wrap the
-  // body in a per-file lock so any updateData + writeData call (and
-  // any two writeData calls) for the same filename are serialized.
-  await withFileLock(filename, async () => {
-    await ensureDataDir();
-    const filePath = path.join(DATA_DIR, filename);
-    const tmpPath = filePath + ".tmp";
-    try {
-      await fs.writeFile(tmpPath, JSON.stringify(data, null, 2), "utf-8");
-      await fs.rename(tmpPath, filePath);
-    } catch (writeErr) {
-      // Clean up tmp file on failure to avoid stale .tmp files
-      await fs.unlink(tmpPath).catch(() => {});
-      // 12-H5: surface EROFS specifically with a clearer error. A
-      // read-only filesystem (mounted data volume in CI, container
-      // with the data dir bind-mounted read-only, accidental chmod)
-      // produces an EROFS error from rename(). The default message
-      // is "EROFS: read-only filesystem, rename '...tmp' -> '...'"
-      // which is informative, but the caller has no way to
-      // distinguish "disk full" from "permission denied" from
-      // "read-only mount". Wrap with a tagged error so route
-      // handlers can decide whether to retry (transient) or surface
-      // 503 (read-only is a config problem, not a request problem).
-      if (writeErr instanceof Error && /EROFS/.test(writeErr.message)) {
-        const err = new Error(
-          `Cannot write ${filename}: data directory is on a read-only filesystem. ` +
-          `Check that ${DATA_DIR} is mounted with read-write permissions.`,
-        );
-        (err as Error & { code: string }).code = "DATA_DIR_READONLY";
-        throw err;
-      }
-      throw writeErr;
+// 31-CR-data-store-write-reentrant: factored the write body into a
+// private helper that does NOT acquire the per-file mutex. `updateData`
+// and `getOrCreateData` both call `writeData` while still holding the
+// lock that the caller passed in; the previous `writeData` itself
+// wrapped its body in `withFileLock(filename, ...)`, so any
+// updateData → writeData call would re-acquire the same key and
+// deadlock (the second `await prev` waits on a promise that only the
+// first writer will resolve). The public `writeData` retains its
+// lock for callers that *don't* already hold one (e.g. direct POST
+// handlers, route-layer initialization); the unlocked variant is
+// used only from inside `updateData` and `getOrCreateData`, which
+// are themselves responsible for the surrounding mutex.
+async function writeDataUnlocked<T>(filename: string, data: T): Promise<void> {
+  await ensureDataDir();
+  const filePath = path.join(DATA_DIR, filename);
+  const tmpPath = filePath + ".tmp";
+  try {
+    await fs.writeFile(tmpPath, JSON.stringify(data, null, 2), "utf-8");
+    await fs.rename(tmpPath, filePath);
+  } catch (writeErr) {
+    // Clean up tmp file on failure to avoid stale .tmp files
+    await fs.unlink(tmpPath).catch(() => {});
+    // 12-H5: surface EROFS specifically with a clearer error. A
+    // read-only filesystem (mounted data volume in CI, container
+    // with the data dir bind-mounted read-only, accidental chmod)
+    // produces an EROFS error from rename(). The default message
+    // is "EROFS: read-only filesystem, rename '...tmp' -> '...'"
+    // which is informative, but the caller has no way to
+    // distinguish "disk full" from "permission denied" from
+    // "read-only mount". Wrap with a tagged error so route
+    // handlers can decide whether to retry (transient) or surface
+    // 503 (read-only is a config problem, not a request problem).
+    if (writeErr instanceof Error && /EROFS/.test(writeErr.message)) {
+      const err = new Error(
+        `Cannot write ${filename}: data directory is on a read-only filesystem. ` +
+        `Check that ${DATA_DIR} is mounted with read-write permissions.`,
+      );
+      (err as Error & { code: string }).code = "DATA_DIR_READONLY";
+      throw err;
     }
-  });
+    throw writeErr;
+  }
+}
+
+export async function writeData<T>(filename: string, data: T): Promise<void> {
+  // 15-H-write-mutex: writeData previously acquired the per-file mutex
+  // itself. That was correct in isolation, but the same lock is
+  // already held by `updateData`/`getOrCreateData` callers — making
+  // `writeData` re-acquire the same key deadlocks those callers
+  // (await prev waits on a promise only the outer caller can resolve).
+  // The 31-CR-data-store-write-reentrant fix factors the body into
+  // `writeDataUnlocked` and wraps THIS entry point in the mutex for
+  // standalone callers (POST handlers, route init, etc.). The
+  // in-mutex callers (updateData/getOrCreateData) use the unlocked
+  // helper directly so the surrounding `withFileLock` is the only
+  // lock acquired for that filename during a RMW.
+  await withFileLock(filename, () => writeDataUnlocked(filename, data));
 }
 
 /**
@@ -232,7 +248,16 @@ export async function updateData<T>(
     // need to do disk I/O inside the mutex so concurrent demo-project
     // POSTs don't both write the same files at once.
     const updated = await updater(data);
-    await writeData(filename, updated);
+    // 31-CR-data-store-write-reentrant: call the unlocked write
+    // helper while the per-file lock is held. The previous
+    // `await writeData(filename, updated)` re-acquired the same
+    // mutex this function already holds, deadlocking every
+    // concurrent caller (the in-flight `lockPromise` is the one
+    // we're awaiting on the second `withFileLock` call, but only
+    // *this* task will resolve it). The data-store test suite
+    // (updateData-mutex:3 tests) has been timing out since the
+    // 15-H-write-mutex pass for this reason.
+    await writeDataUnlocked(filename, updated);
     return updated;
   });
 }
@@ -286,7 +311,10 @@ export async function getOrCreateData<T>(
       // surface a real data-loss signal.
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
       const value = defaultValue();
-      await writeData(filename, value);
+      // 31-CR-data-store-write-reentrant: same reason as updateData
+      // — call the unlocked write helper. writeData would
+      // re-acquire this same per-file mutex and deadlock.
+      await writeDataUnlocked(filename, value);
       return value;
     }
   });

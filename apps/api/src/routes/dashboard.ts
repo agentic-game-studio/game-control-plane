@@ -743,7 +743,13 @@ dashboardRouter.delete("/projects/:id", async (req: Request, res: Response) => {
     const projectIdStr = String(id);
     const ticketsFile = getTicketsBoardFile(projectIdStr);
     const [{ clearProjectProducerSummary }] = await Promise.all([
-      import("../services/producer-summary.js").catch(() => ({ clearProjectProducerSummary: () => {} })),
+      // 31-CR-prod-sum-clear-drops-inflight: clearProjectProducerSummary
+      // is now async (awaits the in-flight chain tail). The import
+      // fallback for a producer-summary module-graph failure has to
+      // match the new shape — an async noop, not a sync one, or
+      // `Promise.resolve(clearProjectProducerSummary(...))` would
+      // schedule a sync return value that callers don't await.
+      import("../services/producer-summary.js").catch(() => ({ clearProjectProducerSummary: async () => {} })),
     ]);
     await Promise.all([
       removeGodotMCPService(projectIdStr).catch(() => {}),

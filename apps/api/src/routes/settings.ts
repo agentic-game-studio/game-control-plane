@@ -59,6 +59,18 @@ export const settingsRouter: Router = Router();
 
 // GET /api/settings - Get settings (with auto weekly reset check)
 settingsRouter.get("/", async (_req: Request, res: Response) => {
+  // 31-CR-settings-get-destroy-state: the previous catch-all silently
+  // overwrote the on-disk settings with `createDefaultSettings()` on
+  // *any* error from the read-check-reset-write. A transient parse
+  // failure (the 30-M data-store parse-fail path surfaces
+  // "temporarily unavailable" to the caller), a disk-full EIO
+  // from writeData, or an unrelated retry-throw from updateData would
+  // all destroy the user's tier, topUpHistory, usageLog, and
+  // subscription state in a single GET. Distinguish the only
+  // legitimate "no file yet" case (ENOENT) from every other failure
+  // and only seed defaults in that single case. Every other error
+  // bubbles as 500 so the operator sees the real failure and the
+  // user's persisted state is preserved.
   try {
     // 23-H-weekly-reset-rmw: route the read-check-reset-write through
     // updateData so the per-file mutex serializes against a concurrent
@@ -81,10 +93,25 @@ settingsRouter.get("/", async (_req: Request, res: Response) => {
       return reset;
     });
     res.json({ success: true, data });
-  } catch {
-    const fresh = createDefaultSettings();
-    await writeData("settings.json", fresh);
-    res.json({ success: true, data: fresh });
+  } catch (err) {
+    // Seed defaults ONLY when the file is genuinely missing. Every
+    // other failure (corrupted JSON, EIO, EROFS, parse retry
+    // exhaustion) propagates as 500 so the user's persisted state is
+    // preserved on the next retry. getOrCreateData already does this
+    // for the create-if-missing case, so the seed-and-return path
+    // here is reachable only on the very first GET before the data
+    // store has ever seen the file.
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      const fresh = createDefaultSettings();
+      await writeData("settings.json", fresh);
+      res.json({ success: true, data: fresh });
+      return;
+    }
+    logger.error(
+      { err: err instanceof Error ? err.message : String(err), event: "settings_get_failed" },
+      "Failed to read settings — preserving on-disk state",
+    );
+    res.status(500).json({ success: false, error: "Failed to read settings" });
   }
 });
 

@@ -77,10 +77,25 @@ export async function runShipThisExport(
   // never resolves.
   const SHIPTHIS_TIMEOUT_MS = 600_000;
   const SHIPTHIS_KILL_GRACE_MS = 5_000;
+  // 31-CR-shipthis-no-reject: bound the total wait with an outer
+  // timeout that's strictly *longer* than the inner kill window. If
+  // the child refuses to die within SIGKILL+grace (a SIGKILL-immune
+  // process, an OS-level stuck-zombie, an event-loop starvation
+  // scenario), the `close` event may never fire and the previous
+  // Promise — constructed with only `resolve` and no `reject` —
+  // would hang forever, pinning the route handler. The route caller
+  // `await runShipThisExport(...)` would itself never resolve,
+  // burning an HTTP request slot. Cap the total wait at
+  // `OUTER_TIMEOUT_MS` after the inner kill fires and reject the
+  // promise with an explicit error so the caller can return 500
+  // and the orphan process becomes an OS-level concern (`ps`
+  // / `lsof`) rather than a Promise-graph leak.
+  const OUTER_TIMEOUT_MS = 30_000;
   let killTimer: NodeJS.Timeout | null = null;
+  let outerTimer: NodeJS.Timeout | null = null;
   let timedOut = false;
 
-  return new Promise<ShipThisExportResult>((resolve) => {
+  return new Promise<ShipThisExportResult>((resolve, reject) => {
     const child = spawn(
       process.execPath,
       [cli, "game", "export", "--path", projectPath, "--platform", platform],
@@ -106,7 +121,16 @@ export async function runShipThisExport(
       if (settled) return;
       settled = true;
       if (killTimer) clearTimeout(killTimer);
+      if (outerTimer) clearTimeout(outerTimer);
       resolve(result);
+    };
+
+    const settleReject = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      if (killTimer) clearTimeout(killTimer);
+      if (outerTimer) clearTimeout(outerTimer);
+      reject(err);
     };
 
     child.on("error", (err) => {
@@ -147,6 +171,21 @@ export async function runShipThisExport(
           "Failed to SIGKILL ShipThis child",
         );
       }
+      // Schedule the outer cap: if the child is still alive
+      // OUTER_TIMEOUT_MS after the SIGKILL fired, give up and
+      // reject. The orphaned process is now an OS-level leak
+      // (findable via `ps -p $pid`) — better than pinning the
+      // route handler forever.
+      outerTimer = setTimeout(() => {
+        logger.error(
+          { projectPath, platform, pid: child.pid, event: "shipthis_outer_timeout" },
+          "ShipThis child refused to die within outer timeout — rejecting with orphan process",
+        );
+        settleReject(new Error(
+          `ShipThis export failed: child refused to exit within ${OUTER_TIMEOUT_MS}ms of SIGKILL. ` +
+          `Orphan process pid=${child.pid} — find via 'ps -p ${child.pid}' and reap manually.`,
+        ));
+      }, OUTER_TIMEOUT_MS);
     }, SHIPTHIS_TIMEOUT_MS + SHIPTHIS_KILL_GRACE_MS);
   });
 }
