@@ -91,7 +91,8 @@ class PipelineResult:
 # Step 1 — Generate with mflux
 # ---------------------------------------------------------------------------
 
-def generate_mflux(preset: AssetPreset, output_dir: Path, dry_run: bool = False) -> Path:
+def generate_mflux(preset: AssetPreset, output_dir: Path, dry_run: bool = False,
+                   gen_timeout: int = 600) -> Path:
     """Run mflux-generate-flux2 and return the output image path."""
     slug = re.sub(r'[^a-z0-9]+', '_', preset.name.lower()).strip('_')
     raw_path = output_dir / "raw" / f"{slug}.png"
@@ -131,7 +132,7 @@ def generate_mflux(preset: AssetPreset, output_dir: Path, dry_run: bool = False)
     try:
         # 28-M-asset-pipeline-gen-timeout: use the CLI flag instead
         # of the hardcoded 600s.
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=args.gen_timeout)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=gen_timeout)
     except subprocess.TimeoutExpired as exc:
         elapsed = time.time() - t0
         raise RuntimeError(
@@ -565,12 +566,13 @@ def build_manifest_entry(
 # ---------------------------------------------------------------------------
 
 def run_pipeline(preset: AssetPreset, output_dir: Path, dry_run: bool = False,
-                 workspace_dir: Optional[Path] = None) -> PipelineResult:
+                 workspace_dir: Optional[Path] = None,
+                 gen_timeout: int = 600) -> PipelineResult:
     """Execute the full asset generation pipeline for one preset."""
     t0 = time.time()
     try:
         # Step 1: Generate
-        raw_path = generate_mflux(preset, output_dir, dry_run)
+        raw_path = generate_mflux(preset, output_dir, dry_run, gen_timeout=gen_timeout)
 
         # Step 2: Remove background
         slug = re.sub(r'[^a-z0-9]+', '_', preset.name.lower()).strip('_')
@@ -716,7 +718,8 @@ def main():
 
     for i, preset in enumerate(presets, 1):
         print(f"[{i}/{len(presets)}] {preset.name}")
-        result = run_pipeline(preset, output_dir, args.dry_run, workspace_dir=workspace_dir)
+        result = run_pipeline(preset, output_dir, args.dry_run,
+                              workspace_dir=workspace_dir, gen_timeout=args.gen_timeout)
         results.append(result)
         if result.manifest_entry:
             manifest_entries.append(result.manifest_entry)

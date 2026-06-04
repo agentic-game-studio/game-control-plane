@@ -4,13 +4,10 @@
 
 import { existsSync } from "fs";
 import { join, dirname } from "path";
-import { execFile } from "child_process";
-import { promisify } from "util";
+import { spawn } from "child_process";
 import { fileURLToPath } from "url";
 import { SUBPROCESS_MAX_BUFFER, loadConfig } from "../config.js";
 import { logger } from "../utils/logger.js";
-
-const execFileAsync = promisify(execFile);
 
 // 19-L-shipthis-cwd: derive the search root from this file's location
 // instead of process.cwd(). The dev server starts in `apps/api/` and
@@ -60,40 +57,98 @@ export async function runShipThisExport(
     };
   }
 
-  // 28-M-shipthis-force-kill: execFileAsync sends SIGKILL on
-  // timeout, but a stubborn subprocess that catches SIGKILL and
-  // keeps writing to the buffer can still pin the route handler
-  // indefinitely. Mirror the godot-mcp-service force-kill pattern
-  // with a manual kill timer that fires at timeout+5s. The route
-  // handler awaits this directly, so a stuck ShipThis call used
-  // to block the `ShipThisExport` tool call forever.
+  // 29-C-shipthis-actually-kill: previous shape used execFileAsync,
+  // which sends SIGKILL on timeout but offers no handle to the
+  // child for a manual force-kill. The 28th pass added a kill
+  // timer that *logged* the timeout — but never actually killed
+  // anything. A stubborn ShipThis export (network call to cloud
+  // signing, stuck in a state where it ignores SIGKILL for a few
+  // seconds) could pin the route handler indefinitely because
+  // execFile's internal kill already fired and the child was
+  // already a zombie, but the awaited promise was still pending
+  // on the stdout/stderr streams draining.
+  //
+  // Switch to `spawn` directly so we hold a ChildProcess handle,
+  // and have the kill timer call `child.kill('SIGKILL')` for real.
+  // Use a Promise.race against the drain to bound the wait. If the
+  // child refuses to die within the grace window we give up and
+  // reject — the orphaned process is now an OS-level leak the
+  // operator can find via `ps`, instead of an awaitable that
+  // never resolves.
   const SHIPTHIS_TIMEOUT_MS = 600_000;
   const SHIPTHIS_KILL_GRACE_MS = 5_000;
   let killTimer: NodeJS.Timeout | null = null;
-  try {
-    const subprocessPromise = execFileAsync(
+  let timedOut = false;
+
+  return new Promise<ShipThisExportResult>((resolve) => {
+    const child = spawn(
       process.execPath,
       [cli, "game", "export", "--path", projectPath, "--platform", platform],
-      { timeout: SHIPTHIS_TIMEOUT_MS, maxBuffer: SUBPROCESS_MAX_BUFFER },
+      { stdio: ["ignore", "pipe", "pipe"] },
     );
-    killTimer = setTimeout(() => {
-      logger.warn(
-        { projectPath, platform, timeoutMs: SHIPTHIS_TIMEOUT_MS, event: "shipthis_force_kill_timeout" },
-        "ShipThis export exceeded timeout — process may be unresponsive",
-      );
-    }, SHIPTHIS_TIMEOUT_MS + SHIPTHIS_KILL_GRACE_MS);
-    const { stdout, stderr } = await subprocessPromise;
-    return { success: true, output: stdout + stderr };
-  } catch (err: unknown) {
-    const e = err as { message?: string; stdout?: string; stderr?: string };
-    return {
-      success: false,
-      output: (e.stdout ?? "") + (e.stderr ?? ""),
-      error: e.message ?? "ShipThis export failed",
+
+    let stdout = "";
+    let stderr = "";
+    let outBytes = 0;
+    let errBytes = 0;
+    let settled = false;
+
+    child.stdout?.on("data", (chunk: Buffer) => {
+      outBytes += chunk.length;
+      if (outBytes <= SUBPROCESS_MAX_BUFFER) stdout += chunk.toString("utf-8");
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      errBytes += chunk.length;
+      if (errBytes <= SUBPROCESS_MAX_BUFFER) stderr += chunk.toString("utf-8");
+    });
+
+    const settle = (result: ShipThisExportResult) => {
+      if (settled) return;
+      settled = true;
+      if (killTimer) clearTimeout(killTimer);
+      resolve(result);
     };
-  } finally {
-    if (killTimer) clearTimeout(killTimer);
-  }
+
+    child.on("error", (err) => {
+      settle({
+        success: false,
+        output: stdout + stderr,
+        error: err.message,
+      });
+    });
+
+    child.on("close", (code, signal) => {
+      if (timedOut) {
+        settle({
+          success: false,
+          output: stdout + stderr,
+          error: `ShipThis export exceeded timeout and was killed (signal=${signal ?? "unknown"})`,
+        });
+        return;
+      }
+      settle({
+        success: code === 0,
+        output: stdout + stderr,
+        error: code === 0 ? undefined : `ShipThis exited with code ${code}${signal ? ` (signal ${signal})` : ""}`,
+      });
+    });
+
+    killTimer = setTimeout(() => {
+      timedOut = true;
+      logger.warn(
+        { projectPath, platform, timeoutMs: SHIPTHIS_TIMEOUT_MS, pid: child.pid, event: "shipthis_force_kill_timeout" },
+        "ShipThis export exceeded timeout — sending SIGKILL",
+      );
+      try {
+        child.kill("SIGKILL");
+      } catch (err) {
+        logger.warn(
+          { err: err instanceof Error ? err.message : String(err), event: "shipthis_kill_failed" },
+          "Failed to SIGKILL ShipThis child",
+        );
+      }
+    }, SHIPTHIS_TIMEOUT_MS + SHIPTHIS_KILL_GRACE_MS);
+  });
 }
 
 export function isShipThisAvailable(): boolean {

@@ -1142,6 +1142,26 @@ if (loadConfig().ENABLE_TEST_ENDPOINTS) {
       return;
     }
 
+    // 29-C-chat-consultation-role-validation: same fix as the /spawn
+    // sibling — the body is cast as-is into session.role and the
+    // session is persisted, so a typo would stick around in
+    // chat-state.json. Validate against the union.
+    if (!isAgentRole(role)) {
+      res.status(400).json({ success: false, error: `Unknown agent role: ${role}` });
+      return;
+    }
+
+    // 29-C-chat-consultation-brief-cap: `brief` is embedded in the
+    // session's first system message and persisted. A 50MB brief
+    // would survive across reloads and inflate every session-list
+    // response that reads the project. Cap at 50KB to match the
+    // other chat input caps.
+    const MAX_BRIEF = 50_000;
+    if (brief !== undefined && (typeof brief !== "string" || brief.length > MAX_BRIEF)) {
+      res.status(400).json({ success: false, error: `brief must be a string up to ${MAX_BRIEF} chars` });
+      return;
+    }
+
     const project = await getProjectById(projectId);
     if (!project) {
       res.status(404).json({ success: false, error: "Project not found" });
@@ -2047,6 +2067,30 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
     return;
   }
 
+  // 29-C-chat-spawn-role-validation: previous shape `as AgentRole`
+  // cast the body's role without checking it against the union.
+  // A typo (e.g. "godot_speciallist") or attacker-supplied string
+  // would slip past this endpoint, reach `createQuestTicket(...,
+  // agentRole, ...)` and `getModelForTier(agentRole)`, then either
+  // throw at the system-prompt loader or silently fall through to
+  // the unmapped DEFAULT_COST path in credit-service. The /sessions
+  // sibling (L892) already validates; mirror it here.
+  if (!isAgentRole(role)) {
+    res.status(400).json({ success: false, error: `Unknown agent role: ${role}` });
+    return;
+  }
+
+  // 29-C-chat-spawn-task-cap: `task` was unbounded. A 50MB body
+  // would land in createQuestTicket's title slice (slice(0, 80)
+  // already protected there) and in the message content that gets
+  // persisted to chat-state.json and reloaded on every session
+  // list. Cap at 50KB to match MAX_CONTENT.
+  const MAX_TASK = 50_000;
+  if (task !== undefined && (typeof task !== "string" || task.length > MAX_TASK)) {
+    res.status(400).json({ success: false, error: `task must be a string up to ${MAX_TASK} chars` });
+    return;
+  }
+
   if (!projectId) {
     res.status(400).json({ success: false, error: "projectId is required" });
     return;
@@ -2061,7 +2105,7 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
   const invocationId = newId("invoke");
   const sessionId = role.toLowerCase().replace(/\s+/g, "-");
   const now = new Date().toISOString();
-  const agentRole = role as AgentRole;
+  const agentRole = role;
 
   // R2 + spawn TOCTOU: Return 409 if session ID is already being spawned
   // or already exists. The check + add below is sync (no await between),
