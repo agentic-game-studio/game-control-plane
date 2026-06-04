@@ -285,23 +285,51 @@ function parseVerdict(
   }
 
   // Check for partial matches
+  // 32-CR-parseverdict-partial-fail-open: the previous branches
+  // returned "APPROVE" / "READY" (PASS) and "CONCERNS" (PASS) as
+  // fallbacks even when those verdicts were NOT in the gate's
+  // `expectedOptions`. For a gate whose expectedOptions are
+  // `["VIABLE", "INFEASIBLE"]` (TD-FEASIBILITY) or
+  // `["ADEQUATE", "INADEQUATE"]` (QL-TEST-COVERAGE), an LLM first
+  // line containing "APPROVE" / "READY" / "STRONG" / "CONCERNS"
+  // bypassed the exact-match check and was classified as PASS
+  // anyway. isGatePassing() returns true for "READY" /
+  // "CONCERNS" (both in PASS_VERDICTS in
+  // milestone-gate-service.ts:20-23), so a TD-FEASIBILITY gate
+  // could silently approve an infeasible milestone. Restrict
+  // each partial-match branch to a verdict that is actually in
+  // expectedOptions; otherwise fall through to the 20-M
+  // fail-closed throw at the bottom.
   if (firstLine.includes("APPROVE") || firstLine.includes("READY") || firstLine.includes("STRONG")) {
-    return { parsed: expectedOptions.includes("APPROVE") ? "APPROVE" : "READY", raw: firstLine };
-  }
-  if (firstLine.includes("REJECT") || firstLine.includes("NOT READY") || firstLine.includes("INFEASIBLE") || firstLine.includes("INADEQUATE") || firstLine.includes("UNREALISTIC") || firstLine.includes("OFF TRACK") || firstLine.includes("HIGH RISK")) {
+    if (expectedOptions.includes("APPROVE")) return { parsed: "APPROVE", raw: firstLine };
+    if (expectedOptions.includes("READY")) return { parsed: "READY", raw: firstLine };
+    if (expectedOptions.includes("STRONG")) return { parsed: "STRONG", raw: firstLine };
+    // fall through to throw below
+  } else if (firstLine.includes("REJECT") || firstLine.includes("NOT READY") || firstLine.includes("INFEASIBLE") || firstLine.includes("INADEQUATE") || firstLine.includes("UNREALISTIC") || firstLine.includes("OFF TRACK") || firstLine.includes("HIGH RISK")) {
     // Map to closest expected option
     if (expectedOptions.includes("NOT_READY")) return { parsed: "NOT_READY", raw: firstLine };
     if (expectedOptions.includes("REJECT")) return { parsed: "REJECT", raw: firstLine };
     if (expectedOptions.includes("INFEASIBLE")) return { parsed: "INFEASIBLE", raw: firstLine };
     if (expectedOptions.includes("INADEQUATE")) return { parsed: "INADEQUATE", raw: firstLine };
     if (expectedOptions.includes("UNREALISTIC")) return { parsed: "UNREALISTIC", raw: firstLine };
-    return { parsed: "REJECT", raw: firstLine };
-  }
-  if (firstLine.includes("CONCERNS") || firstLine.includes("CONCERN") || firstLine.includes("GAPS") || firstLine.includes("AT RISK") || firstLine.includes("OPTIMISTIC")) {
+    if (expectedOptions.includes("OFF_TRACK")) return { parsed: "OFF_TRACK", raw: firstLine };
+    if (expectedOptions.includes("HIGH_RISK")) return { parsed: "HIGH_RISK", raw: firstLine };
+    // 32-CR-parseverdict-block-fallback: only fall back to "REJECT"
+    // if the gate actually accepts "REJECT". The previous shape
+    // returned "REJECT" regardless of expectedOptions, which
+    // would silently mis-classify a "READY" / "VIABLE" gate.
+    if (expectedOptions.includes("REJECT")) return { parsed: "REJECT", raw: firstLine };
+    // fall through to throw below
+  } else if (firstLine.includes("CONCERNS") || firstLine.includes("CONCERN") || firstLine.includes("GAPS") || firstLine.includes("AT RISK") || firstLine.includes("OPTIMISTIC")) {
     if (expectedOptions.includes("CONCERNS")) return { parsed: "CONCERNS", raw: firstLine };
     if (expectedOptions.includes("GAPS")) return { parsed: "GAPS", raw: firstLine };
     if (expectedOptions.includes("AT_RISK")) return { parsed: "AT_RISK", raw: firstLine };
-    return { parsed: "CONCERNS", raw: firstLine };
+    // 32-CR-parseverdict-concerns-fallback: same as above — the
+    // previous fallback to "CONCERNS" was fail-open for gates
+    // whose expectedOptions don't include "CONCERNS" (e.g. a
+    // QL-TEST-COVERAGE gate that expects ["ADEQUATE", "INADEQUATE"]).
+    if (expectedOptions.includes("CONCERNS")) return { parsed: "CONCERNS", raw: firstLine };
+    // fall through to throw below
   }
 
   // 20-M-verdict-fail-open: the previous default returned

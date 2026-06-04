@@ -1915,9 +1915,37 @@ export async function invokeAgent(
   }
 
   try {
-    void consumeCreditsForAgent(agentRole, task.slice(0, 80))
-      .catch((err) => logger.error({ event: "consume_credits_failed", agentRole, err: String(err) },
-        "consumeCreditsForAgent rejected — credits not deducted but agent invocation continues"));
+    // 32-CR-credit-consume-fail-open: the previous shape was
+    //   `void consumeCreditsForAgent(...).catch(log)`
+    // which swallowed BOTH the boolean return value AND any
+    // rejection. The function returns `false` (not throws) when
+    // `onTopCurrent + subCurrent < creditsUsed` — a user with 0
+    // credits could still invoke any agent and burn real LLM
+    // tokens; the platform pays the ZAI API bill, the user's
+    // account shows 0 deductions, and `usageLog` is never
+    // written. `await` the result; on `false`, throw an
+    // InsufficientCreditsError that the route catch handler
+    // surfaces as `agent:failed` (so the user sees the reason
+    // in the chat transcript) AND a 402-equivalent server
+    // response. Keep a try/catch around the call so a
+    // writeData-throws-after-deduct case doesn't double-charge
+    // — the function itself returns false in that path, and
+    // we treat any non-OK as a hard block here.
+    let creditsOk = false;
+    try {
+      creditsOk = await consumeCreditsForAgent(agentRole, task.slice(0, 80));
+    } catch (consumeErr) {
+      logger.error(
+        { event: "consume_credits_threw", agentRole, err: String(consumeErr) },
+        "consumeCreditsForAgent threw unexpectedly — blocking agent invocation",
+      );
+      throw new Error(`Credit deduction failed for ${agentRole}: ${consumeErr instanceof Error ? consumeErr.message : String(consumeErr)}`);
+    }
+    if (!creditsOk) {
+      throw new Error(
+        `Insufficient credits to invoke ${agentRole}. Top up via /api/settings/topup to continue.`,
+      );
+    }
 
     // Load agent's system prompt and model tier from MD file
     const [rawSystemPrompt, prompts] = await Promise.all([
