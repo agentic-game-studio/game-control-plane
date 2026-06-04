@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import type { WSEvent } from "@game-studio/types";
-import { WS_PING_INTERVAL_MS, WS_RECONNECT_DELAY_MS } from "@/lib/timing";
+import { WS_PING_INTERVAL_MS, WS_RECONNECT_DELAY_MS, WS_RECONNECT_MAX_DELAY_MS } from "@/lib/timing";
 import { createLogger } from "@/lib/logger";
 
 const logger = createLogger("useWebSocket");
@@ -223,9 +223,10 @@ function connect(): void {
       }
       const attempt = reconnectAttempt;
       // 14-M-reconnect-backoff: starting from WS_RECONNECT_DELAY_MS
-      // (1s) and doubling up to 30s, so a downed server doesn't get
-      // hammered and a flaky network still recovers within ~30s.
-      const delay = Math.min(30_000, WS_RECONNECT_DELAY_MS * Math.pow(2, attempt));
+      // (1s) and doubling up to WS_RECONNECT_MAX_DELAY_MS, so a
+      // downed server doesn't get hammered and a flaky network
+      // still recovers within the cap.
+      const delay = Math.min(WS_RECONNECT_MAX_DELAY_MS, WS_RECONNECT_DELAY_MS * Math.pow(2, attempt));
       reconnectAttempt = attempt + 1;
       reconnectTimer = setTimeout(() => {
         if (sharedSocket === ws) {

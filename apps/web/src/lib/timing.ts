@@ -12,6 +12,13 @@
 // hammer the server when it's down.
 export const WS_RECONNECT_DELAY_MS = 1_000;
 
+// 32-M-ws-reconnect-max-delay: cap the exponential backoff. The
+// previous shape inlined the 30_000 magic number in
+// useWebSocket.ts:228, so a future bump to e.g. 45s needed to
+// touch both the timing constants and the call site. Lifted here
+// so the audit reviewer sees every reconnect cap in one place.
+export const WS_RECONNECT_MAX_DELAY_MS = 30_000;
+
 // WebSocket server ping interval. The server expects a ping
 // every 25s and drops the socket after 30s of silence.
 export const WS_PING_INTERVAL_MS = 25_000;

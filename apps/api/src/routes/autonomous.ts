@@ -426,13 +426,22 @@ function extractErrors(output: string): string[] {
   const lines = output.split("\n");
 
   // Fatal: always indicate a real problem that will prevent the game from running
-  const fatalPatterns = [
-    { pattern: /SCRIPT ERROR:/, label: "SCRIPT ERROR" },
-    { pattern: /Parse Error/, label: "Parse Error" },      // space = Godot parse error
-    { pattern: /Parser Error/, label: "Parser Error" },
-    { pattern: /Invalid set index/, label: "Invalid set index" },
-    { pattern: /Function not found/, label: "Function not found" },
-    { pattern: /Export variable not found/, label: "Export not found" },
+  // 32-M-extract-errors-unused-label: the `label` field was
+  // destructured in the inner loop but never used — the function
+  // returns the original line text, not a label. Drop the field
+  // (and the destructuring) so the dead struct key doesn't drift
+  // independently from the patterns. The list is the same 6
+  // patterns qa-gate-service.ts:extractFatalErrors uses (plus
+  // "Export variable not found"); dedup with that function is a
+  // follow-up — that file uses a RegExp[] shape, so the merge
+  // would need a shared util, not a copy-paste.
+  const fatalPatterns: RegExp[] = [
+    /SCRIPT ERROR:/,
+    /Parse Error/,        // space = Godot parse error
+    /Parser Error/,
+    /Invalid set index/,
+    /Function not found/,
+    /Export variable not found/,
     // Non-fatal (too broad — skip):
     //   /ERROR:/    — Godot driver init messages, vulkan warnings, etc. not fatal
     //   /Failed to load/ — may be non-critical asset warnings
@@ -440,7 +449,7 @@ function extractErrors(output: string): string[] {
 
   const errorLines: string[] = [];
   for (const line of lines) {
-    for (const { pattern, label } of fatalPatterns) {
+    for (const pattern of fatalPatterns) {
       if (pattern.test(line)) {
         errorLines.push(line.trim());
         break;
