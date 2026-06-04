@@ -1,7 +1,7 @@
 import { Router } from "express";
 import type { Request, Response, NextFunction } from "express";
 import { join } from "node:path";
-import type { AgentRole, ChatSession, ChatMessage, CreateMessageRequest, CreateChatSessionRequest, ContextUsage, DashboardData, Project, ProjectEngine } from "@game-studio/types";
+import { isAgentRole, type AgentRole, type ChatSession, type ChatMessage, type CreateMessageRequest, type CreateChatSessionRequest, type ContextUsage, type DashboardData, type Project, type ProjectEngine } from "@game-studio/types";
 import { emptyProducerSummarySnapshot, safeIngestProducerSummaryFact } from "../services/producer-summary.js";
 import type { LLMMessage } from "../llm/zai-client.js";
 import { broadcastEvent, readData, writeData, updateData } from "../services/data-store.js";
@@ -883,7 +883,17 @@ chatRouter.get("/sessions/:id", (req: Request, res: Response) => {
 chatRouter.post("/sessions", async (req: Request, res: Response) => {
   const body = req.body as CreateChatSessionRequest;
 
-  const role = (body.role ?? "agent") as AgentRole;
+  // 25-L-agent-role-guard: validate the request body's `role`
+  // against the AgentRole union. The previous `as AgentRole` was
+  // a thin barrier — a typo or attacker-supplied string would
+  // reach the LLM call with a no-such-agent name and waste a
+  // request round-trip. Reject with 400 for any unknown role.
+  const rawRole = body.role ?? "agent";
+  if (rawRole !== "agent" && !isAgentRole(rawRole)) {
+    res.status(400).json({ error: `Unknown agent role: ${rawRole}` });
+    return;
+  }
+  const role = rawRole as AgentRole | "agent";
 
   // Producer sessions go through GET /sessions/producer/:projectId, not this endpoint
   if (role === "producer") {
@@ -1740,6 +1750,13 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
     const heartbeatStart = Date.now();
     let heartbeatCount = 0;
     // Heartbeat: broadcast periodic progress updates during long API waits
+    // 25-L-heartbeat-unref: pair the setInterval with .unref() so
+    // a future refactor that skips the clearInterval(heartbeat) on
+    // the success / error paths doesn't keep the process alive
+    // after the response ends. The interval is paid per request;
+    // a stray one is invisible in production but blocks process
+    // exit during tests / graceful shutdown. Same pattern as
+    // index.ts:52 (rate cleanup) and producer-summary.ts:219.
     heartbeat = setInterval(() => {
       heartbeatCount++;
       const elapsed = heartbeatCount * 2;
@@ -1755,6 +1772,7 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
         content: `${agentRole} is thinking... (${elapsed}s)`,
       } as WSEvent);
     }, 2000);
+    heartbeat.unref?.();
 
     // Wire the HTTP request's "close" event to an AbortController so that
     // when the client disconnects mid-LLM-call (browser tab closed, page
@@ -2214,6 +2232,11 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
           content: `${agentRole} is working... (${elapsed}s)`,
         } as WSEvent);
       }, 2000);
+      // 25-L-heartbeat-unref: same defense-in-depth as the /messages
+      // heartbeat above. The spawn path also broadcasts every 2s
+      // and is cleared in the same set of places; .unref() makes
+      // any missed clearInterval non-fatal for the event loop.
+      heartbeat.unref?.();
       const result = await invokeAgent(
         agentRole,
         task,

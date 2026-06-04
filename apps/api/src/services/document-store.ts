@@ -98,6 +98,20 @@ function slugify(text: string): string {
 const recentSelfWrites = new Map<string, number>();
 const SELF_WRITE_TTL_MS = 3_000;
 
+// 25-L-recent-self-writes-prune: bound the registry. The map
+// grows on every markDocumentSelfWrite call and only shrinks
+// when a watcher actually fires for the path (line ~420). If a
+// writer registers a path that no active watcher observes (e.g.
+// a write to a project dir whose DocumentStore is lazy-init
+// and hasn't yet attached its fs.watch, or an event that
+// fs.watch coalesces away), the entry sits in the map until
+// the next LLM call lands on the same path. Over a long
+// session with hundreds of unique paths, this leaks. Cap to
+// MAX_RECENT_SELF_WRITES and evict the oldest entry on
+// overflow (FIFO). 256 covers the worst-case burst of
+// LLM-driven writes within the 3s TTL window.
+const MAX_RECENT_SELF_WRITES = 256;
+
 /**
  * 12-H19: register that the current process is about to write
  * `filePath`. Any active DocumentStore's watcher will ignore events
@@ -107,7 +121,14 @@ const SELF_WRITE_TTL_MS = 3_000;
  * registry survives different working-directory invocations.
  */
 export function markDocumentSelfWrite(filePath: string): void {
-  recentSelfWrites.set(path.basename(filePath), Date.now());
+  const key = path.basename(filePath);
+  if (recentSelfWrites.size >= MAX_RECENT_SELF_WRITES) {
+    // Map iteration order is insertion order; the first key
+    // is the oldest. Drop it. set() inserts in O(1).
+    const oldest = recentSelfWrites.keys().next().value;
+    if (oldest !== undefined) recentSelfWrites.delete(oldest);
+  }
+  recentSelfWrites.set(key, Date.now());
 }
 
 /** 12-H19: test/cleanup hook for the self-write registry. */

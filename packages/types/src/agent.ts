@@ -69,6 +69,77 @@ export type AgentRole =
   // Code review
   | "code-reviewer";
 
+/**
+ * Compile-time array of every AgentRole literal. Derived from the
+ * union above via a single sentinel. Adding a new role to the
+ * union is automatically reflected here (TS errors if the union
+ * and this list drift), and the runtime guard below stays in
+ * sync without anyone having to remember to update a manual
+ * string array.
+ *
+ * 25-L-agent-role-guard: provides the source of truth for
+ * `isAgentRole(x)`, used by the route handlers that previously
+ * cast `body.role as AgentRole` without validation. The cast
+ * was a thin barrier — a typo or attacker-supplied string in
+ * the request body would propagate to the LLM call and could
+ * match no registered agent, wasting a request round-trip.
+ */
+type AgentRoleTuple = [
+  // Tier 1
+  "autonomous-producer", "creative-director", "technical-director",
+  "producer", "game-director",
+  // Tier 2
+  "game-designer", "lead-programmer", "art-director", "audio-director",
+  "narrative-director", "qa-lead", "release-manager", "localization-lead",
+  // Tier 3 (gameplay / engineering)
+  "systems-designer", "level-designer", "economy-designer", "ux-designer",
+  "gameplay-programmer", "engine-programmer", "ai-programmer",
+  "network-programmer", "tools-programmer", "ui-programmer",
+  "technical-artist", "writer", "world-builder", "sound-designer",
+  "qa-tester", "performance-analyst", "devops-engineer",
+  "analytics-engineer", "security-engineer", "prototyper",
+  "accessibility-specialist", "live-ops-designer", "community-manager",
+  // Engine specialists
+  "godot-scaffolder", "godot-specialist", "godot-gdscript-specialist",
+  "godot-csharp-specialist", "godot-shader-specialist",
+  "godot-gdextension-specialist", "unity-specialist", "unity-dots-specialist",
+  "unity-shader-specialist", "unity-addressables-specialist",
+  "unity-ui-specialist", "unreal-specialist", "ue-gas-specialist",
+  "ue-blueprint-specialist", "ue-replication-specialist", "ue-umg-specialist",
+  // Code review
+  "code-reviewer",
+];
+
+export const AGENT_ROLES = [
+  // Tier 1
+  "autonomous-producer", "creative-director", "technical-director",
+  "producer", "game-director",
+  // Tier 2
+  "game-designer", "lead-programmer", "art-director", "audio-director",
+  "narrative-director", "qa-lead", "release-manager", "localization-lead",
+  // Tier 3 (gameplay / engineering)
+  "systems-designer", "level-designer", "economy-designer", "ux-designer",
+  "gameplay-programmer", "engine-programmer", "ai-programmer",
+  "network-programmer", "tools-programmer", "ui-programmer",
+  "technical-artist", "writer", "world-builder", "sound-designer",
+  "qa-tester", "performance-analyst", "devops-engineer",
+  "analytics-engineer", "security-engineer", "prototyper",
+  "accessibility-specialist", "live-ops-designer", "community-manager",
+  // Engine specialists
+  "godot-scaffolder", "godot-specialist", "godot-gdscript-specialist",
+  "godot-csharp-specialist", "godot-shader-specialist",
+  "godot-gdextension-specialist", "unity-specialist", "unity-dots-specialist",
+  "unity-shader-specialist", "unity-addressables-specialist",
+  "unity-ui-specialist", "unreal-specialist", "ue-gas-specialist",
+  "ue-blueprint-specialist", "ue-replication-specialist", "ue-umg-specialist",
+  // Code review
+  "code-reviewer",
+] as const satisfies AgentRoleTuple;
+
+export function isAgentRole(value: unknown): value is AgentRole {
+  return typeof value === "string" && (AGENT_ROLES as readonly string[]).includes(value);
+}
+
 export type AgentTool =
   | "Read"
   | "Write"
