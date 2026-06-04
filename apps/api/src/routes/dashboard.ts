@@ -1,6 +1,13 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
-import fs from "fs";
+// 32-L-dashboard-fs-import: was `import fs from "fs"` — the
+// CommonJS-default-import shape. The file uses only the promise
+// APIs (12 call sites: mkdir/writeFile/stat/readdir), so the bare
+// `fs` import also pulled in the entire sync `fs` namespace (the
+// file doesn't touch) via Node's CJS-default interop. Switched to
+// the named-promise alias to make the dependency intent obvious
+// and dropped the `fs.promises.*` chain on every call.
+import { promises as fsp } from "node:fs";
 import { readData, writeData, updateData, broadcastEvent, deleteData, getOrCreateData } from "../services/data-store.js";
 import { logger } from "../utils/logger.js";
 import type {
@@ -90,11 +97,11 @@ async function writeDemoGodotProject(projectDir: string): Promise<void> {
   // sync write could block the event loop for tens of ms per call,
   // serializing the entire Express server. `fs.promises` keeps the
   // ergonomics and yields properly.
-  await fs.promises.mkdir(path.join(projectDir, "scenes"), { recursive: true });
-  await fs.promises.mkdir(path.join(projectDir, "scripts"), { recursive: true });
-  await fs.promises.mkdir(path.join(projectDir, "design"), { recursive: true });
+  await fsp.mkdir(path.join(projectDir, "scenes"), { recursive: true });
+  await fsp.mkdir(path.join(projectDir, "scripts"), { recursive: true });
+  await fsp.mkdir(path.join(projectDir, "design"), { recursive: true });
 
-  await fs.promises.writeFile(
+  await fsp.writeFile(
     path.join(projectDir, "project.godot"),
     [
       "; Engine configuration file.",
@@ -112,7 +119,7 @@ async function writeDemoGodotProject(projectDir: string): Promise<void> {
     ].join("\n"),
   );
 
-  await fs.promises.writeFile(
+  await fsp.writeFile(
     path.join(projectDir, "scenes/main.tscn"),
     [
       '[gd_scene load_steps=2 format=3 uid="uid://railway-demo-main"]',
@@ -130,7 +137,7 @@ async function writeDemoGodotProject(projectDir: string): Promise<void> {
     ].join("\n"),
   );
 
-  await fs.promises.writeFile(
+  await fsp.writeFile(
     path.join(projectDir, "scripts/player.gd"),
     [
       "extends CharacterBody2D",
@@ -154,7 +161,7 @@ async function writeDemoGodotProject(projectDir: string): Promise<void> {
     ].join("\n"),
   );
 
-  await fs.promises.writeFile(
+  await fsp.writeFile(
     path.join(projectDir, "design/gdd.md"),
     [
       "# Railway Demo Platformer",
@@ -173,7 +180,7 @@ async function writeDemoGodotProject(projectDir: string): Promise<void> {
     ].join("\n"),
   );
 
-  await fs.promises.writeFile(
+  await fsp.writeFile(
     path.join(projectDir, "README.md"),
     [
       "# Railway Demo Platformer",
@@ -372,7 +379,7 @@ dashboardRouter.post("/browse-directory", async (req: Request, res: Response) =>
     }
 
     try {
-      const stat = await fs.promises.stat(resolved);
+      const stat = await fsp.stat(resolved);
       if (!stat.isDirectory()) {
         res.status(400).json({ success: false, error: "Not a valid directory" });
         return;
@@ -391,7 +398,7 @@ dashboardRouter.post("/browse-directory", async (req: Request, res: Response) =>
     // generic 500.
     let dirents: import("node:fs").Dirent[];
     try {
-      dirents = await fs.promises.readdir(resolved, { withFileTypes: true });
+      dirents = await fsp.readdir(resolved, { withFileTypes: true });
     } catch (err) {
       logger.warn(
         { resolved, error: err instanceof Error ? err.message : String(err), event: "dashboard_browse_readdir_failed" },
