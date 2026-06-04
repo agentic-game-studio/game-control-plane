@@ -47,13 +47,27 @@ function AssetsPageInner() {
   const [isGenerateModalOpen, setIsGenerateModalOpen] = useState(false);
   const [availablePresets, setAvailablePresets] = useState<string[]>([]);
 
-  // Fetch available presets when the generate modal opens
+  // 28-M-assets-page-presets-abort: route the presets fetch
+  // through a per-modal AbortController and cancel on unmount or
+  // when the modal closes mid-flight. The previous shape had no
+  // abort and no mountedRef — closing the modal mid-fetch still
+  // triggered setAvailablePresets after the modal had re-rendered
+  // with isGenerateModalOpen = false (no warning, but unnecessary
+  // state churn and a fetch that couldn't be cancelled).
   useEffect(() => {
-    if (isGenerateModalOpen) {
-      apiFetch<string[]>("/api/assets/generate/presets")
-        .then((data) => setAvailablePresets(data))
-        .catch(() => setAvailablePresets([]));
-    }
+    if (!isGenerateModalOpen) return;
+    const controller = new AbortController();
+    apiFetch<string[]>("/api/assets/generate/presets", { signal: controller.signal })
+      .then((data) => {
+        if (!controller.signal.aborted) setAvailablePresets(data);
+      })
+      .catch((err) => {
+        if (controller.signal.aborted) return;
+        if (!(err instanceof DOMException && err.name === "AbortError")) {
+          setAvailablePresets([]);
+        }
+      });
+    return () => controller.abort();
   }, [isGenerateModalOpen]);
 
   const handleBatchGenerate = useCallback(

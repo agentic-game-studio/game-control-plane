@@ -61,7 +61,13 @@ export async function externalizeProductionNote(
   const workspaceDir = resolve(config.WORKSPACE_DIR);
 
   const dir = safeUnderWorkspace(join(workspaceDir, safeProjectId, "production"), workspaceDir);
-  if (!existsSync(dir)) await fs.mkdir(dir, { recursive: true });
+  // 28-M-wiki-mem-async-exists: the file already uses async
+  // fs.appendFile (the comment at L75-78 bragged about it) but
+  // these two existsSync calls were sync stat calls. mkdir with
+  // recursive:true is a no-op if the dir exists, so the
+  // existsSync guard is redundant — drop it and let mkdir do
+  // the right thing.
+  await fs.mkdir(dir, { recursive: true });
 
   const decisionsPath = safeUnderWorkspace(join(dir, "decisions.md"), workspaceDir);
   const wikiPath = safeUnderWorkspace(
@@ -69,7 +75,7 @@ export async function externalizeProductionNote(
     workspaceDir,
   );
   const wikiDir = safeUnderWorkspace(join(workspaceDir, "docs", "architecture"), workspaceDir);
-  if (!existsSync(wikiDir)) await fs.mkdir(wikiDir, { recursive: true });
+  await fs.mkdir(wikiDir, { recursive: true });
 
   const line = `\n## ${new Date().toISOString()} — ${safeCategory}\n\n${note.trim()}\n`;
   // Run both appends in parallel — they hit different files and have no

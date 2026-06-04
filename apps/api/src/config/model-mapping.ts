@@ -17,6 +17,15 @@ export const KIMI_MODEL_MAPPING: Record<string, string> = {
   opus: "kimi-for-coding",
   sonnet: "kimi-k2.6",
   haiku: "kimi-k2-turbo-preview",
+  // 28-M-model-mapping-kimi-k2.5: drift between consumer modules.
+  // MODEL_CONTEXT_WINDOWS and (presumably) MODEL_CONCURRENCY_LIMITS
+  // both have entries for `kimi-k2.5`, but the tier-mapping table
+  // only routed opus/sonnet/haiku. If `DEFAULT_MODEL=kimi-k2.5` was
+  // set in .env, getModelForTier would fall through to
+  // KIMI_DEFAULT_MODEL = "kimi-for-coding" and silently route to
+  // a different model than the user asked for. Add the missing
+  // direct key so a kimi-k2.5 user gets kimi-k2.5.
+  "kimi-k2.5": "kimi-k2.5",
 };
 
 export const DEFAULT_MODEL = "glm-5.1";

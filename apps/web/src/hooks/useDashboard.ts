@@ -61,9 +61,12 @@ export function useDashboard() {
       ) {
         if (debounceRef.current) clearTimeout(debounceRef.current);
         debounceRef.current = setTimeout(() => {
-          // Pass an AbortController so a subsequent debounce can
-          // cancel the previous one.
+          // 28-M-use-dashboard-debounce-abort: abort the previous
+          // debounced fetch (if any) and install a fresh controller
+          // in the ref. The unmount cleanup also aborts the latest.
+          debounceControllerRef.current?.abort();
           const controller = new AbortController();
+          debounceControllerRef.current = controller;
           void fetchDashboard(controller.signal);
         }, WS_REFETCH_DEBOUNCE_MS);
       }
@@ -73,9 +76,18 @@ export function useDashboard() {
 
   useWebSocket(onWSEvent);
 
+  // 28-M-use-dashboard-debounce-abort: hold the in-flight debounced
+  // fetch controller in a ref and abort it before installing a new
+  // one. The previous comment promised cancellation but the local
+  // `controller` var was never ref-tracked — nothing could abort
+  // it. A burst of `project:*` events fired N parallel GETs that all
+  // ran to completion. Now: each new debounced fetch aborts the
+  // previous one (and the unmount cleanup aborts the latest).
+  const debounceControllerRef = useRef<AbortController | null>(null);
   useEffect(() => {
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
+      debounceControllerRef.current?.abort();
     };
   }, []);
 

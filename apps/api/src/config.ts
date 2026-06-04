@@ -63,6 +63,10 @@ const envSchema = z
     GODOT_BIN: z.string().optional().default(""),
     SHIPTHIS_BIN: z.string().optional().default(""),
     SHIPTHIS_CLI_PATH: z.string().optional().default(""),
+    // 28-M-config-debug-env: "0" or "1" string union — the autonomous
+    // loop treats the var as a boolean flag. The default of "0"
+    // matches the absence in production.
+    DEBUG_AUTONOMOUS: z.union([z.literal("0"), z.literal("1")]).default("0"),
     GODOT_MCP_SERVER_PATH: z.string().optional().default(""),
     // 24-M-env-var-zod-orphan: GODOT_EDITOR_PATH was being read at
     // godot-mcp-service.ts:1151 but was missing from the Zod
@@ -129,6 +133,11 @@ export function loadConfig() {
     GODOT_EDITOR_PATH: process.env.GODOT_EDITOR_PATH,
     LOG_TO_FILE: process.env.LOG_TO_FILE,
     RAILWAY_ENVIRONMENT_ID: process.env.RAILWAY_ENVIRONMENT_ID,
+    // 28-M-config-debug-env: drift between .env.example (L119) and
+    // the Zod schema. Documented and read at autonomous.ts:99 but
+    // missing here. Add to the schema so loadConfig().DEBUG_AUTONOMOUS
+    // returns a typed value instead of `undefined`.
+    DEBUG_AUTONOMOUS: process.env.DEBUG_AUTONOMOUS,
   };
 
   const result = envSchema.safeParse(raw);

@@ -3,17 +3,6 @@
  * Connects the Task tool (agent spawning) to the Quest/Ticket board.
  * When a workflow is active, every Task call automatically creates and tracks a ticket.
  */
-import { randomBytes } from "node:crypto";
-
-/** Monotonic per-process counter for ticket IDs. Backs the base36
- * segment of the ID so two tickets created in the same millisecond
- * (rare but possible under burst ingest) still get unique IDs even
- * before the random suffix. */
-let _ticketCounter = 0;
-function ticketIdCounter(): number {
-  _ticketCounter = (_ticketCounter + 1) >>> 0;
-  return _ticketCounter;
-}
 
 import { broadcastEvent } from "./data-store.js";
 import { readData } from "./data-store.js";
@@ -300,11 +289,16 @@ export async function createQuestTicket(
   const resolvedProjectId = projectId ?? await resolveProjectIdForSession(sessionId);
   const now = new Date().toISOString();
   const ticket: Ticket = {
-    // 4-char base36 has only 36^4 ≈ 1.68M combinations. With Date.now()
-    // prefix and 100 active tickets/sec, birthday-paradox collisions hit
-    // ~50% around 1.5K tickets. Bump to 8 hex chars (4.3B combos) and
-    // tag a counter as a tie-breaker for sub-millisecond bursts.
-    id: `ticket-${Date.now()}-${ticketIdCounter().toString(36)}-${randomBytes(4).toString("hex")}`,
+    // 28-M-quest-bridge-newid: previous shape concatenated
+    // Date.now() (ms resolution, 0 bits) + a 32-bit counter
+    // (base36) + 8 hex chars (32 bits) ≈ 64 bits of effective
+    // entropy, of which only the random part is unpredictable.
+    // The Q4-6th pass migrated the POST /api/tickets route to
+    // `randomUUID()` (122 bits) but this auto-create path was
+    // missed. The 26th pass established newId("prefix") as the
+    // unified helper (128 bits, prefixed); use it here and drop
+    // the now-unused randomBytes import + ticketIdCounter helper.
+    id: newId("ticket"),
     projectId: resolvedProjectId ?? undefined,
     title,
     description,

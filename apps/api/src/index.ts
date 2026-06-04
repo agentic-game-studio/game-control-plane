@@ -58,11 +58,26 @@ function rateLimiter(req: express.Request, res: express.Response, next: express.
   const bucket = rateBuckets.get(ip);
 
   if (!bucket || now >= bucket.resetAt) {
-    // LRU cap: a botnet rotating IPs can otherwise grow the map forever —
-    // periodic cleanup only removes EXPIRED entries, never over-cap ones.
+    // 28-M-rate-limiter-fifo-comment: previous comment said "LRU"
+    // but the implementation evicts by Map insertion order, which
+    // is FIFO. An active client's bucket is at risk of eviction if
+    // the map is full of one-shot bots that arrived before it. The
+    // fix that preserves the per-process cost (no per-key timestamp):
+    // rename the comment to match the code, and track a separate
+    // LRU-but-bounded-by-count policy that prefers to evict the
+    // entry with the soonest resetAt (i.e. a client that just made
+    // its request and is now idle, not a client currently in the
+    // middle of a request burst).
     if (rateBuckets.size >= RATE_LIMIT_BUCKET_CAP) {
-      const oldest = rateBuckets.keys().next().value;
-      if (oldest) rateBuckets.delete(oldest);
+      let evictKey: string | null = null;
+      let evictResetAt = Infinity;
+      for (const [k, b] of rateBuckets) {
+        if (b.resetAt < evictResetAt) {
+          evictResetAt = b.resetAt;
+          evictKey = k;
+        }
+      }
+      if (evictKey) rateBuckets.delete(evictKey);
     }
     rateBuckets.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
     return next();

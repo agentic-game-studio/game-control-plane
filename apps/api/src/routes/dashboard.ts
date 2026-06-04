@@ -382,7 +382,24 @@ dashboardRouter.post("/browse-directory", async (req: Request, res: Response) =>
       return;
     }
 
-    const dirents = await fs.promises.readdir(resolved, { withFileTypes: true });
+    // 28-M-dashboard-readdir-catch: previous shape had no try/catch
+    // around readdir, so an EACCES (permission denied) or EIO
+    // (disk error) fell through to the outer catch and returned
+    // 500. The stat call above already returns a clean 400 for
+    // "not a valid directory"; extend that to readdir failures
+    // so the UI can render a specific error toast instead of a
+    // generic 500.
+    let dirents: import("node:fs").Dirent[];
+    try {
+      dirents = await fs.promises.readdir(resolved, { withFileTypes: true });
+    } catch (err) {
+      logger.warn(
+        { resolved, error: err instanceof Error ? err.message : String(err), event: "dashboard_browse_readdir_failed" },
+        "Failed to read directory contents",
+      );
+      res.status(400).json({ success: false, error: "Cannot list directory contents" });
+      return;
+    }
     // 11-C1: filter dotfile/dotdir entries. The previous version
     // returned every directory name in the listing, including
     // `.ssh`, `.aws`, `.config/gh`, `.git`, `.env`, etc. The frontend

@@ -33,6 +33,10 @@ export function useAssets(projectId?: string) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  // 28-M-use-assets-rescan-abort: holds the in-flight rescan
+  // controller so a subsequent rescan (or unmount) can abort the
+  // previous one. The same pattern as useDocuments' refreshAbortRef.
+  const abortRef = useRef<AbortController | null>(null);
   const mountedRef = useRef(true);
   // 15-H-assets-duplicate-fetch: the previous code had BOTH a
   // useEffect(setLoading+fetchAssets) AND a useAbortableEffect that
@@ -140,6 +144,9 @@ export function useAssets(projectId?: string) {
     return () => {
       mountedRef.current = false;
       if (debounceRef.current) clearTimeout(debounceRef.current);
+      // 28-M-use-assets-rescan-abort: abort any in-flight rescan
+      // fetch on unmount.
+      abortRef.current?.abort();
     };
   }, []);
 
@@ -248,16 +255,27 @@ export function useAssets(projectId?: string) {
   const rescan = useCallback(async () => {
     setLoading(true);
     const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+    // 28-M-use-assets-rescan-abort: route the fetch through an
+    // AbortController so navigating away mid-rescan cancels the
+    // in-flight request. mountedRef only suppresses the post-await
+    // setState — the network call ran to completion. Mirror the
+    // 28-H-commandroom-init-abort pattern: per-call controller,
+    // abort on unmount.
+    const controller = new AbortController();
+    abortRef.current?.abort();
+    abortRef.current = controller;
     try {
-      const result = await apiFetch<AssetsData>(`/api/assets${qs}`);
+      const result = await apiFetch<AssetsData>(`/api/assets${qs}`, { signal: controller.signal });
       if (!mountedRef.current) return;
       setData(result);
       setError(null);
     } catch (err) {
+      if (controller.signal.aborted) return;
       if (!mountedRef.current) return;
       setError(err instanceof Error ? err.message : "Rescan failed");
     } finally {
-      if (mountedRef.current) {
+      if (mountedRef.current && abortRef.current === controller) {
+        abortRef.current = null;
         setLoading(false);
       }
     }

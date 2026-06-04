@@ -163,7 +163,16 @@ export async function executeGodotExport(
     await execFileAsync(pythonBin, args, { timeout: 240_000, maxBuffer: SUBPROCESS_MAX_BUFFER });
     build.status = "success";
     build.artifactPath = join("builds", artifactName);
-    build.smokeTestPassed = existsSync(artifactAbs);
+    // 28-M-build-smoke-premature: previous shape set
+    // `smokeTestPassed = existsSync(artifactAbs)` immediately after
+    // the export, then later broadcast that "passed" to every
+    // connected client. A 0-byte partial export that would fail
+    // the real verifyBuildArtifact check was shown as "passed" in
+    // the UI. The 27th pass fixed the sibling runPostExportSmokeTest
+    // call to do a real size+magic-header check; set the field to
+    // false here so the explicit smoke-test call writes the real
+    // value, matching the pattern at L196.
+    build.smokeTestPassed = false;
     try {
       build.changelog = await generateProjectChangelog(projectId, workspacePath);
     } catch { /* non-fatal */ }

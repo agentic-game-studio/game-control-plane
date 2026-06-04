@@ -129,7 +129,9 @@ def generate_mflux(preset: AssetPreset, output_dir: Path, dry_run: bool = False)
     # Apple-Silicon ML and the first generation in a session can run
     # several minutes past the wall-clock budget on cold cache).
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        # 28-M-asset-pipeline-gen-timeout: use the CLI flag instead
+        # of the hardcoded 600s.
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=args.gen_timeout)
     except subprocess.TimeoutExpired as exc:
         elapsed = time.time() - t0
         raise RuntimeError(
@@ -660,6 +662,11 @@ def main():
     parser.add_argument("--sprite-rows", type=int, default=1)
     parser.add_argument("--tags", nargs="*", default=[])
     parser.add_argument("--presets", help="YAML file with batch presets")
+    # 28-M-asset-pipeline-gen-timeout: was hardcoded to 600s. A
+    # warm-cache second generation finishes in ~30s but would still
+    # block for the full 10 minutes on a hang. Make it a CLI flag
+    # so callers can tune per environment.
+    parser.add_argument("--gen-timeout", type=int, default=600, help="Per-asset mflux subprocess timeout (seconds)")
     parser.add_argument("--output-dir", default=".", help="Output root directory")
     parser.add_argument("--workspace-dir", default=None,
                         help="Workspace root dir — manifest paths are stored relative to this")

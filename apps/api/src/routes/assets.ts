@@ -818,6 +818,43 @@ assetsRouter.delete("/:id", async (req: Request, res: Response) => {
 assetsRouter.post("/generate", async (req: Request, res: Response) => {
   const body = req.body as GenerateAssetRequest;
   const config = loadConfig();
+
+  // 28-M-assets-batch-validation: previous shape only validated
+  // `body.tags` length and the `isSafe` filename check on the
+  // single-asset branch. The batch branch (`body.presetsFile`)
+  // accepted ANY payload — a 5MB `body.tags` array, a 5MB
+  // `body.prompt`, a 5MB `body.name`, etc. — and forwarded
+  // straight to the Python pipeline. Hoist the validation above
+  // the `if (body.presetsFile)` branch so it covers both.
+  const MAX_NAME = 200;
+  const MAX_PROMPT = 5_000;
+  // 28-M-assets-batch-validation: MAX_TAGS collision with the
+  // single-asset block at L999 (which uses MAX_TAGS=32 for the
+  // per-preset name check). Hoist a single shared constant for
+  // the body-level tag list (50 entries) and let the per-preset
+  // name check keep its own cap.
+  const MAX_TAGS_BODY = 50;
+  const MAX_TAG_LEN = 100;
+  if (body.name !== undefined && (typeof body.name !== "string" || body.name.length > MAX_NAME)) {
+    res.status(400).json({ success: false, error: `name must be a string up to ${MAX_NAME} chars` });
+    return;
+  }
+  if (body.prompt !== undefined && (typeof body.prompt !== "string" || body.prompt.length > MAX_PROMPT)) {
+    res.status(400).json({ success: false, error: `prompt must be a string up to ${MAX_PROMPT} chars` });
+    return;
+  }
+  if (body.tags !== undefined) {
+    if (!Array.isArray(body.tags) || body.tags.length > MAX_TAGS_BODY) {
+      res.status(400).json({ success: false, error: `tags must be an array up to ${MAX_TAGS_BODY} entries` });
+      return;
+    }
+    for (const tag of body.tags) {
+      if (typeof tag !== "string" || tag.length > MAX_TAG_LEN) {
+        res.status(400).json({ success: false, error: `each tag must be a string up to ${MAX_TAG_LEN} chars` });
+        return;
+      }
+    }
+  }
   // 11-H4: resolve the asset-pipeline script directory relative to
   // THIS file's location instead of process.cwd(). The previous
   // `path.resolve(process.cwd(), "..", "..", "scripts", "...")`

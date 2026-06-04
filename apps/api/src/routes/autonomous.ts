@@ -96,7 +96,12 @@ let debugStream: ReturnType<typeof openSync> | null = null;
 let debugBytesWritten = 0;
 
 function debugLog(msg: string): void {
-  if (process.env.DEBUG_AUTONOMOUS !== "1") return;
+  // 28-M-config-debug-env: the env var is documented in .env.example
+  // (L119) and read via process.env here, but missing from the Zod
+  // schema in config.ts. The 23rd/24th passes explicitly aimed to
+  // close this kind of env-var drift; this one was missed. Reading
+  // from the validated config keeps the single source of truth.
+  if (loadConfig().DEBUG_AUTONOMOUS !== "1") return;
   const line = `[${new Date().toISOString()}] ${msg}\n`;
 
   // Open the stream on first use.
@@ -856,7 +861,15 @@ async function getProjectContext(projectId: string): Promise<ProjectContext | un
 
   let engine = project.engine;
   // Auto-detect engine if not set
-  const effectiveWorkspacePath = project.workspacePath ?? project.id;
+  // 28-M-autonomous-workspace-fallback: previous shape used
+  // `project.workspacePath ?? project.id`, which produced a
+  // "workspacePath" for a project that didn't have one configured.
+  // The downstream `if (!workspacePath) → 400` check at L1410 was
+  // then unreachable, and a project with `workspacePath: null`
+  // fell through to `resolveProjectWorkspace(workspacePath)` →
+  // 500 from the outer try/catch. Return undefined for the
+  // workspacePath so the existing 400 path works correctly.
+  const effectiveWorkspacePath = project.workspacePath ?? undefined;
   if (!engine && effectiveWorkspacePath) {
     const detected = await detectEngineFromWorkspace(effectiveWorkspacePath);
     if (detected) engine = detected as "godot" | "unreal" | "unity" | "phaser" | "threejs";
@@ -866,7 +879,12 @@ async function getProjectContext(projectId: string): Promise<ProjectContext | un
     name: project.name,
     description: project.description,
     engine,
-    workspacePath: effectiveWorkspacePath,
+    // 28-M-autonomous-workspace-fallback: ProjectContext.workspacePath
+    // is typed as `string | null`, not `string | null | undefined`.
+    // The 28-M-autonomous-workspace-fallback change above uses
+    // `?? undefined` to feed the 400 path, but the return type
+    // requires null. Coerce explicitly.
+    workspacePath: effectiveWorkspacePath ?? null,
     projectId: project.id,
   };
 }

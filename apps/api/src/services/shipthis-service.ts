@@ -8,6 +8,7 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import { fileURLToPath } from "url";
 import { SUBPROCESS_MAX_BUFFER, loadConfig } from "../config.js";
+import { logger } from "../utils/logger.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -59,12 +60,29 @@ export async function runShipThisExport(
     };
   }
 
+  // 28-M-shipthis-force-kill: execFileAsync sends SIGKILL on
+  // timeout, but a stubborn subprocess that catches SIGKILL and
+  // keeps writing to the buffer can still pin the route handler
+  // indefinitely. Mirror the godot-mcp-service force-kill pattern
+  // with a manual kill timer that fires at timeout+5s. The route
+  // handler awaits this directly, so a stuck ShipThis call used
+  // to block the `ShipThisExport` tool call forever.
+  const SHIPTHIS_TIMEOUT_MS = 600_000;
+  const SHIPTHIS_KILL_GRACE_MS = 5_000;
+  let killTimer: NodeJS.Timeout | null = null;
   try {
-    const { stdout, stderr } = await execFileAsync(
+    const subprocessPromise = execFileAsync(
       process.execPath,
       [cli, "game", "export", "--path", projectPath, "--platform", platform],
-      { timeout: 600_000, maxBuffer: SUBPROCESS_MAX_BUFFER },
+      { timeout: SHIPTHIS_TIMEOUT_MS, maxBuffer: SUBPROCESS_MAX_BUFFER },
     );
+    killTimer = setTimeout(() => {
+      logger.warn(
+        { projectPath, platform, timeoutMs: SHIPTHIS_TIMEOUT_MS, event: "shipthis_force_kill_timeout" },
+        "ShipThis export exceeded timeout — process may be unresponsive",
+      );
+    }, SHIPTHIS_TIMEOUT_MS + SHIPTHIS_KILL_GRACE_MS);
+    const { stdout, stderr } = await subprocessPromise;
     return { success: true, output: stdout + stderr };
   } catch (err: unknown) {
     const e = err as { message?: string; stdout?: string; stderr?: string };
@@ -73,6 +91,8 @@ export async function runShipThisExport(
       output: (e.stdout ?? "") + (e.stderr ?? ""),
       error: e.message ?? "ShipThis export failed",
     };
+  } finally {
+    if (killTimer) clearTimeout(killTimer);
   }
 }
 

@@ -88,6 +88,15 @@ const MODEL_CONCURRENCY_LIMITS: Record<string, number> = {
 
 const DEFAULT_CONCURRENCY_LIMIT = 2;
 
+// 28-M-zai-semaphore-fallback: shared fallback semaphore returned
+// when the per-model map is at cap and all entries have waiters.
+// Created once at module load (not per overflow) so overflow
+// callers share a single contention domain instead of getting
+// their own fresh semaphore that would let the map grow past the
+// cap. Uses DEFAULT_CONCURRENCY_LIMIT to match the original
+// cap-grow behavior's effective concurrency.
+const FALLBACK_MODEL_SEMAPHORE = new Semaphore(DEFAULT_CONCURRENCY_LIMIT);
+
 /** Per-model semaphores — keyed by model name.
  *
  * Capped at MAX_TRACKED_MODELS to prevent unbounded growth if a caller
@@ -136,9 +145,16 @@ function getSemaphore(model: string): Semaphore {
   }
 
   if (modelSemaphores.size >= MAX_TRACKED_MODELS) {
-    // Evict the oldest entry that has no waiters. If all entries have
-    // waiters, refuse the eviction and just grow past the cap — losing
-    // a semaphore mid-acquire would deadlock the waiter.
+    // 28-M-zai-semaphore-fallback: previous shape fell through to
+    // `new Semaphore(limit)` and `modelSemaphores.set(model, sem)`
+    // even when no eviction was possible, so the cap was effectively
+    // advisory — a burst of 100+ distinct model strings (e.g. from
+    // a client passing arbitrary request.model) could grow the map
+    // forever. The eviction guard's stated purpose
+    // ("deadlock the waiter") is correct, but the fallback should
+    // at least return a SHARED semaphore so the cap holds. The
+    // shared semaphore uses DEFAULT_CONCURRENCY_LIMIT and is
+    // created once at module load.
     let evicted = false;
     for (const [key, sem] of modelSemaphores) {
       if ((sem as unknown as { waitQueue: unknown[] }).waitQueue.length === 0) {
@@ -150,8 +166,9 @@ function getSemaphore(model: string): Semaphore {
     if (!evicted) {
       logger.warn(
         { event: "model_semaphore_overflow", model, tracked: modelSemaphores.size },
-        "modelSemaphores hit cap and all entries have waiters — growing past cap",
+        "modelSemaphores hit cap and all entries have waiters — using shared fallback",
       );
+      return FALLBACK_MODEL_SEMAPHORE;
     }
   }
 
