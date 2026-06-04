@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import fsp from "node:fs";
 import path from "node:path";
 import { logger } from "../utils/logger.js";
+import { parseFrontmatter } from "../utils/frontmatter.js";
 import type {
   DocumentCategory,
   CategoryMeta,
@@ -44,30 +45,6 @@ const CATEGORY_META: CategoryMeta[] = [
   { id: "prototype", label: "Prototypes", icon: "science", color: "#6B5B95", directory: "prototypes" },
 ];
 
-/** Parse YAML frontmatter from markdown */
-function parseFrontmatter(content: string): { frontmatter: Record<string, string | string[]>; body: string } {
-  const match = content.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
-  if (!match) return { frontmatter: {}, body: content };
-
-  const raw = match[1];
-  const body = match[2];
-  const result: Record<string, string | string[]> = {};
-
-  for (const line of raw.split("\n")) {
-    const colonIdx = line.indexOf(":");
-    if (colonIdx === -1) continue;
-    const key = line.slice(0, colonIdx).trim();
-    const value = line.slice(colonIdx + 1).trim();
-    if (value.startsWith("[") && value.endsWith("]")) {
-      result[key] = value.slice(1, -1).split(",").map((s) => s.trim());
-    } else {
-      result[key] = value;
-    }
-  }
-
-  return { frontmatter: result, body };
-}
-
 /** Extract [[wikilink]] targets from markdown body. Supports the
  * `[[link|alias]]` form (Obsidian-style) — only the link portion before
  * the pipe is used as the slug. Without this, `[[foo|bar]]` was being
@@ -95,6 +72,16 @@ function slugify(text: string): string {
 // simplest cross-instance handoff: any store's watcher consults
 // the same registry, and any writer (LLM tool, route handler)
 // registers the path it intends to write.
+//
+// 30-C-recent-self-writes-basename-collision: the registry key is
+// now the absolute path, not the basename. The basename key
+// collided when two files in the same workspace shared a name
+// (e.g. `design/gdd/game.md` and `docs/architecture/game.md`):
+// registering a write to one would suppress the watcher's event
+// for the other for 3s, forcing a stale cache and a wasted
+// /api/documents refetch storm. Path normalisation handles the
+// relative-vs-absolute and trailing-slash variants so callers
+// can pass the path they have.
 const recentSelfWrites = new Map<string, number>();
 const SELF_WRITE_TTL_MS = 3_000;
 
@@ -112,16 +99,30 @@ const SELF_WRITE_TTL_MS = 3_000;
 // LLM-driven writes within the 3s TTL window.
 const MAX_RECENT_SELF_WRITES = 256;
 
+/** Normalise an absolute or workspace-relative path to a key the
+ * watcher event's `filename` argument can match. `fs.watch(..., {recursive:true})`
+ * emits `filename` as a path relative to the watched directory. The
+ * Write tool may pass either an absolute path or one relative to
+ * `WORKSPACE_DIR`; resolve both into a single canonical form before
+ * keying. */
+function selfWriteKey(filePath: string): string {
+  const resolved = path.isAbsolute(filePath) ? path.normalize(filePath) : path.resolve(filePath);
+  // Strip a trailing separator and any `.` segments so two callers
+  // with superficially-different paths collide as expected.
+  return path.normalize(resolved).replace(/[\\/]+$/, "");
+}
+
 /**
  * 12-H19: register that the current process is about to write
  * `filePath`. Any active DocumentStore's watcher will ignore events
  * for this path for the next SELF_WRITE_TTL_MS (covering the
  * write+rename+close cycle plus a small grace window for fs.watch
- * delivery latency). Path is normalised to its basename so the
- * registry survives different working-directory invocations.
+ * delivery latency). The key is the absolute path so collisions
+ * between two same-named files in different directories don't
+ * suppress the wrong watcher event.
  */
 export function markDocumentSelfWrite(filePath: string): void {
-  const key = path.basename(filePath);
+  const key = selfWriteKey(filePath);
   if (recentSelfWrites.size >= MAX_RECENT_SELF_WRITES) {
     // Map iteration order is insertion order; the first key
     // is the oldest. Drop it. set() inserts in O(1).
@@ -431,14 +432,28 @@ export class DocumentStore {
         // for the very file we just wrote via markDocumentSelfWrite()
         // — re-broadcasting that change costs every connected client
         // a wasted /api/documents refetch and triggers a re-render
-        // storm in the wiki UI. Drop the event if the basename was
-        // registered within the last SELF_WRITE_TTL_MS.
-        const selfWriteAt = recentSelfWrites.get(path.basename(filename));
+        // storm in the wiki UI. Drop the event if the absolute path
+        // was registered within the last SELF_WRITE_TTL_MS. The watcher
+        // receives `filename` as a path relative to workspaceDir, so
+        // resolve it before the lookup.
+        //
+        // 30-C-recent-self-writes-basename-collision: the previous
+        // shape keyed the registry on `path.basename(filename)`,
+        // which collided between two same-named files in different
+        // directories (e.g. design/gdd/game.md vs.
+        // docs/architecture/game.md). An LLM Write to one would
+        // suppress the watcher's event for the other for 3s, leaving
+        // a stale cache. Use the absolute path instead.
+        const selfWriteAt = recentSelfWrites.get(
+          selfWriteKey(path.join(this.workspaceDir, filename)),
+        );
         if (selfWriteAt !== undefined) {
           if (Date.now() - selfWriteAt < SELF_WRITE_TTL_MS) {
             return;
           }
-          recentSelfWrites.delete(path.basename(filename));
+          recentSelfWrites.delete(
+            selfWriteKey(path.join(this.workspaceDir, filename)),
+          );
         }
 
         // Check if file is in a tracked directory (direct or docs/ prefixed)

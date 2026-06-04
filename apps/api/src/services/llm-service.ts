@@ -716,8 +716,22 @@ async function executeTool(
         // we let execFile use the inherited PATH (which `spawn`/`execFile`
         // do by default). Disallow `..` to keep traversal out of argv[0]
         // even though execFile won't go through a shell.
-        if (!/^[A-Za-z0-9._+-]+$/.test(argv[0])) {
-          return `Error: command name contains invalid characters: ${argv[0]}`;
+        //
+        // 30-C-bash-argv-reserved-names: the character class accepts
+        // `.` and `..` (the regex `[A-Za-z0-9._+-]+` includes them),
+        // but the comment above claimed to reject them. `execFileAsync("..")`
+        // would fail at execve(2) (no such binary on PATH), so this is
+        // a code-correctness / comment-mismatch rather than an RCE —
+        // but a future tightening of the regex that relies on the
+        // comment will be incorrect. Reject reserved names explicitly.
+        if (
+          !/^[A-Za-z0-9._+-]+$/.test(argv[0]) ||
+          argv[0] === "." ||
+          argv[0] === ".." ||
+          argv[0] === "..." ||
+          argv[0] === "-"
+        ) {
+          return `Error: command name is invalid: ${argv[0]}`;
         }
 
         try {

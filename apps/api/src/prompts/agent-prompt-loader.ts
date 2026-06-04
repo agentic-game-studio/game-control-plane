@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { loadConfig } from "../config.js";
 import { logger } from "../utils/logger.js";
+import { parseFrontmatter } from "../utils/frontmatter.js";
 
 export interface AgentPrompt {
   name: string;
@@ -13,45 +14,6 @@ export interface AgentPrompt {
   disallowedTools?: string[];
   skills?: string[];
   systemPrompt: string;
-}
-
-/**
- * Parse YAML frontmatter from markdown files.
- * Example:
- * ---
- * name: creative-director
- * tools: Read, Glob, Grep, Write
- * ---
- * Content here...
- */
-function parseFrontmatter(content: string): { frontmatter: Record<string, string | string[]>; body: string } {
-  const match = content.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
-  if (!match) {
-    return { frontmatter: {}, body: content };
-  }
-
-  const raw = match[1];
-  const body = match[2];
-
-  const result: Record<string, string | string[]> = {};
-  const lines = raw.split("\n");
-
-  for (const line of lines) {
-    const colonIdx = line.indexOf(":");
-    if (colonIdx === -1) continue;
-
-    const key = line.slice(0, colonIdx).trim();
-    const value = line.slice(colonIdx + 1).trim();
-
-    // Handle inline arrays like [brainstorm, design-review]
-    if (value.startsWith("[") && value.endsWith("]")) {
-      result[key] = value.slice(1, -1).split(",").map((s) => s.trim());
-    } else {
-      result[key] = value;
-    }
-  }
-
-  return { frontmatter: result, body };
 }
 
 let agentPrompts: Map<string, AgentPrompt> | null = null;
