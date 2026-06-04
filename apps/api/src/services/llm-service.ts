@@ -359,14 +359,23 @@ function tokenizeShellCommand(input: string): string[] {
   return argv;
 }
 
-// Hoist the home-prefix matcher to module load. `process.env.HOME` is
-// constant for the lifetime of the process, so building a RegExp inside
-// `safePath` (which is called once per Read/Write/Edit tool invocation)
-// is wasted work. Cached as null on platforms without HOME / USERPROFILE.
-const HOME_DIR_FOR_REGEX = process.env.HOME || process.env.USERPROFILE || "";
-const HOME_PREFIX_REGEX: RegExp | null = HOME_DIR_FOR_REGEX
-  ? new RegExp(`^${escapeRegExp(HOME_DIR_FOR_REGEX).replace(/\//g, "\\/")}\\/([^\\/]+)(\\/.*)?$`)
-  : null;
+// 26-L-home-regex-lazy: build the home-prefix RegExp lazily on first
+// use instead of at module load. The previous module-load read of
+// `process.env.HOME` happened before logger config was available, so
+// any later home-resolution test had to re-read the env anyway. The
+// regex itself is built once via the lazy initializer pattern below;
+// safePath's first call pays the cost, every subsequent call hits the
+// module-scope cache. Drops the module-load direct env read that the
+// 25th pass moved into the Zod config schema's HOME_DIR.
+let HOME_PREFIX_REGEX: RegExp | null | undefined;
+function getHomePrefixRegex(): RegExp | null {
+  if (HOME_PREFIX_REGEX !== undefined) return HOME_PREFIX_REGEX;
+  const homeDir = process.env.HOME || process.env.USERPROFILE || "";
+  HOME_PREFIX_REGEX = homeDir
+    ? new RegExp(`^${escapeRegExp(homeDir).replace(/\//g, "\\/")}\\/([^\\/]+)(\\/.*)?$`)
+    : null;
+  return HOME_PREFIX_REGEX;
+}
 
 // 10-H8: per-process lock for StartConsultation. Without this set, two
 // concurrent StartConsultation tool calls for the same director role
@@ -418,8 +427,8 @@ function safePath(inputPath: string, baseDir: string): string {
   // like /Users/choguun/.ssh/id_rsa would otherwise smuggle ".ssh" as
   // a "project name" and Write the file under workspace/.ssh/, which
   // falls within the workspaceDir fallthrough but isn't a real project.
-  if (HOME_PREFIX_REGEX) {
-    const godotPathMatch = inputPath.match(HOME_PREFIX_REGEX);
+  if (getHomePrefixRegex()) {
+    const godotPathMatch = inputPath.match(getHomePrefixRegex()!);
     if (godotPathMatch && godotPathMatch[2]) {
       const projectName = godotPathMatch[1];
       if (projectName && !projectName.includes("/") && !projectName.includes("\\")
