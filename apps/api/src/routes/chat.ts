@@ -1222,58 +1222,76 @@ chatRouter.post("/sessions/:id/clear", async (req: Request, res: Response) => {
   }
   sessionsResponding.add(id);
 
-  session.conversationHistory = [];
-  (session as ExtendedChatSession).fileOperations = [];
-  (session as ExtendedChatSession).completedPhases = [];
-  (session as ExtendedChatSession).currentTask = "";
-  (session as ExtendedChatSession).cumulativeInputTokens = 0;
-  (session as ExtendedChatSession).cumulativeOutputTokens = 0;
-  session.contextUsage = undefined;
-  session.progress = 0;
-  session.status = "active";
+  try {
+    session.conversationHistory = [];
+    (session as ExtendedChatSession).fileOperations = [];
+    (session as ExtendedChatSession).completedPhases = [];
+    (session as ExtendedChatSession).currentTask = "";
+    (session as ExtendedChatSession).cumulativeInputTokens = 0;
+    (session as ExtendedChatSession).cumulativeOutputTokens = 0;
+    session.contextUsage = undefined;
+    session.progress = 0;
+    session.status = "active";
 
-  // Reset producer session with welcome message; other sessions start empty
-  if (id === "producer" || id.startsWith("producer-")) {
-    session.messages = [
-      {
-        id: newId("msg-welcome"),
-        type: "welcome" as const,
-        sender: "Producer",
-        content:
-          "Welcome to the Board Room. I'm the Producer, orchestrating our studio's multi-agent game development pipeline.",
-        timestamp: new Date().toISOString(),
-        showActions: false,
-      },
-      {
-        id: newId("msg-prompt"),
+    // Reset producer session with welcome message; other sessions start empty
+    if (id === "producer" || id.startsWith("producer-")) {
+      session.messages = [
+        {
+          id: newId("msg-welcome"),
+          type: "welcome" as const,
+          sender: "Producer",
+          content:
+            "Welcome to the Board Room. I'm the Producer, orchestrating our studio's multi-agent game development pipeline.",
+          timestamp: new Date().toISOString(),
+          showActions: false,
+        },
+        {
+          id: newId("msg-prompt"),
+          type: "system" as const,
+          sender: "SYSTEM",
+          content:
+            "Type a command to spawn an agent or request a task. Use /spawn <role> to bring in a specialist.",
+          timestamp: new Date().toISOString(),
+          showActions: false,
+        },
+      ];
+    } else {
+      session.messages = [];
+    }
+
+    broadcast({
+      type: "chat:message",
+      sessionId: id,
+      message: {
+        id: newId("msg"),
         type: "system" as const,
         sender: "SYSTEM",
-        content:
-          "Type a command to spawn an agent or request a task. Use /spawn <role> to bring in a specialist.",
+        content: "Session cleared.",
         timestamp: new Date().toISOString(),
         showActions: false,
       },
-    ];
-  } else {
-    session.messages = [];
+    } as WSEvent);
+
+    await saveChatState();
+    res.json({ success: true });
+  } catch (err) {
+    // 28-C-chat-clear-lock-leak: previous shape called
+    // `sessionsResponding.delete(id)` AFTER `await saveChatState()`
+    // without a try/finally. If the save threw (disk full, fs
+    // permission, json.stringify error) the lock would leak and
+    // every subsequent /clear and /messages on that session would
+    // 409 until the API restarted. The /messages sibling route
+    // already uses try/finally for this; mirror it here.
+    logger.error(
+      { sessionId: id, error: err instanceof Error ? err.message : String(err), event: "chat_clear_failed" },
+      "Failed to clear chat session",
+    );
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, error: "Failed to clear session" });
+    }
+  } finally {
+    sessionsResponding.delete(id);
   }
-
-  broadcast({
-    type: "chat:message",
-    sessionId: id,
-    message: {
-      id: newId("msg"),
-      type: "system" as const,
-      sender: "SYSTEM",
-      content: "Session cleared.",
-      timestamp: new Date().toISOString(),
-      showActions: false,
-    },
-  } as WSEvent);
-
-  await saveChatState();
-  sessionsResponding.delete(id);
-  res.json({ success: true });
 });
 
 // POST /api/chat/sessions/:id/compact — Compact session into new generation

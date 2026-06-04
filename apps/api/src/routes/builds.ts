@@ -20,9 +20,20 @@ function getProjectId(req: Request): string | null {
 }
 
 async function resolveWorkspace(projectId: string): Promise<string | null> {
+  // 28-C-builds-resolve-workspace: previous shape returned
+  // `project?.workspacePath ?? projectId` — a non-null string even
+  // when the project didn't exist. The five downstream routes
+  // (`if (!workspace) res.status(404)`) were dead checks that always
+  // resolved falsy. A bogus projectId would then fall through to
+  // `executeGodotExport(projectId, projectId, ...)` →
+  // `resolveProjectWorkspace(projectId)` → `mkdirSync` on a fake
+  // path, creating a 0-byte build record and a 500 instead of the
+  // expected 404. The single fix: return null when the project is
+  // not found, and let each route's existing guard do its job.
   const data = await readData<DashboardData>("dashboard.json");
   const project = data.projects.find((p) => p.id === projectId);
-  return project?.workspacePath ?? projectId;
+  if (!project) return null;
+  return project.workspacePath ?? null;
 }
 
 // GET /api/builds
