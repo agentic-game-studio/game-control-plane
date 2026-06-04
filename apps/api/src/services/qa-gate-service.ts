@@ -290,10 +290,40 @@ export async function runQAGateChain(workspacePath: string, projectId?: string):
     }
   }
 
+  // 30-H-gut-skip-honest-summary: the previous summary hardcoded
+  // "All QA gates passed (boot, GUT, smoke, regression)" regardless
+  // of the actual evidence. In `solo` review mode a GUT-less project
+  // would mark the gut step as `skipped` (see L244-261) and the
+  // chain would proceed — but the summary still claimed GUT ran.
+  // Derive the summary from the actual evidence so the activity log
+  // and ticket-verdict UI reflect what really executed. The
+  // evidence list is built in the order gates ran, so the join
+  // preserves the same display order as the old hardcoded string.
+  const evidenceLabels: Array<keyof TicketTestEvidence> = ["bootCheck", "gut", "smokePlaytest", "regression"];
+  const parts: string[] = [];
+  for (const k of evidenceLabels) {
+    const ev = evidence[k];
+    if (!ev) continue;
+    // llmVerification is an evidence entry too but doesn't have a
+    // `passed` field — its `verdict` string is the source of truth.
+    // The QA chain here only writes the first four, so we filter
+    // out anything that lacks a boolean `passed` to keep the
+    // summary coherent.
+    if (typeof (ev as { passed?: boolean }).passed !== "boolean") continue;
+    if ((ev as { passed: boolean }).passed) {
+      parts.push(k === "gut" && gut.skipped ? `${String(k)} (skipped)` : String(k));
+    } else {
+      parts.push(`${String(k)} (failed)`);
+    }
+  }
+  const summary = parts.length > 0
+    ? `QA gates passed: ${parts.join(", ")}`
+    : "All QA gates passed";
+
   return {
     passed: true,
     evidence,
-    summary: "All QA gates passed (boot, GUT, smoke, regression)",
+    summary,
   };
 }
 

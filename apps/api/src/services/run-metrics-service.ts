@@ -84,6 +84,22 @@ export async function upsertRunMetrics(partial: Partial<AutonomousRunMetrics> & 
     if (typeof addTokens === "number" && addTokens > 0) {
       existing.estimatedTokens = (existing.estimatedTokens ?? 0) + addTokens;
     }
+    // 30-H-run-metrics-prototype-sink: Object.assign copies every
+    // own-enumerable property of `assignable` onto `existing`. If a
+    // future caller passes an object parsed from a JSON body, and the
+    // body contains a `__proto__` / `constructor` / `prototype` key
+    // (all valid JSON object keys that JSON.parse will preserve as
+    // own-enumerable properties), the assignment invokes the
+    // `__proto__` setter on `existing` and corrupts its prototype
+    // chain. Safe today because every call site is internal and
+    // strongly-typed, but a future WebSocket-driven metrics update
+    // or external integration would change that in one line. Strip
+    // the prototype-bearing keys before Object.assign.
+    for (const key of Object.keys(assignable)) {
+      if (key === "__proto__" || key === "constructor" || key === "prototype") {
+        delete (assignable as Record<string, unknown>)[key];
+      }
+    }
     Object.assign(existing, assignable, { lastUpdatedAt: now });
     data.runs = data.runs.slice(0, MAX_RUN_METRICS_ENTRIES);
     return data;

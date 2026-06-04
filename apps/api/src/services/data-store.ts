@@ -146,25 +146,6 @@ export async function writeData<T>(filename: string, data: T): Promise<void> {
   });
 }
 
-/** Acquire a per-file mutex for the duration of `body`. Used by writeData
- * so concurrent writes to the same file (across both writeData and
- * updateData) are serialized. */
-async function withFileLockInternal<T>(filename: string, body: () => Promise<T>): Promise<T> {
-  // 29-M-data-store-single-lock-primitive: previous shape had three
-  // near-identical lock helpers — `withFileLock` (used by writeData
-  // only), and the inline copy inside updateData + getOrCreateData.
-  // All three did the same `prev = fileLocks.get(...) ?? resolve;
-  // resolveLock=noop; new Promise; fileLocks.set; await prev; ...;
-  // finally resolveLock() + cleanup` dance. The duplication is
-  // dangerous: a future fix in one would have to be mirrored in
-  // the other two, and the resolveLock initial-value + set() try/catch
-  // shape is non-trivial. Consolidate to the exported
-  // `withFileLock` helper. The thin wrapper here stays as
-  // `withFileLockInternal` only because it was historically scoped
-  // to writeData; a follow-up pass could drop it entirely.
-  return withFileLock(filename, body);
-}
-
 /**
  * Serialized read-modify-write — prevents lost updates when multiple callers
  * modify the same file concurrently (e.g., autonomous loop + quest bridge).

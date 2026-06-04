@@ -1768,7 +1768,31 @@ async function walkDirSimple(dir: string, parts: string[], idx: number, results:
   }
 }
 
+// 30-H-match-pattern-length-cap: cap on the regex pattern length
+// before compile. The pattern is untrusted LLM output (a
+// Glob/Grep tool call) and a multi-megabyte string would hang
+// the event loop on the regex compile or on the
+// catastrophic-backtrack guard. 4 KiB is generous for any glob
+// pattern and well above the longest legitimate pattern in the
+// codebase.
+const MAX_PATTERN_BYTES = 4 * 1024;
+
 function matchPattern(filename: string, pattern: string): boolean {
+  // 30-H-match-pattern-length-cap: bound the pattern before compile.
+  // The pattern is untrusted LLM output (it can be a multi-megabyte
+  // string passed to a Glob/Grep tool call) and the regex compiler
+  // is O(n²) on the worst case — a 1MB pattern with lots of
+  // alternation would freeze the event loop for seconds, and a
+  // catastrophic-backtrack pattern on a 1MB string would do much
+  // worse. 4 KiB is generous for any glob/grep pattern and well
+  // above the longest legitimate pattern in the codebase.
+  if (pattern.length > MAX_PATTERN_BYTES) {
+    logger.warn(
+      { patternLength: pattern.length, capBytes: MAX_PATTERN_BYTES, event: "match_pattern_oversize" },
+      "matchPattern received an oversized pattern — returning no-match",
+    );
+    return false;
+  }
   // Escape all regex metacharacters including glob wildcards, then restore globs
   const escaped = pattern
     .replace(/[.+^${}()|[\]\\*?]/g, "\\$&") // escape ALL metacharacters including * and ?
