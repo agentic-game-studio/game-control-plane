@@ -19,6 +19,7 @@ import { loadConfig } from "../config.js";
 import { getModelContextWindow, getModelForTier, MAX_CONTEXT_TOKENS, CHARS_PER_TOKEN_ESTIMATE } from "../config/model-mapping.js";
 import { newId } from "../utils/ids.js";
 import { heartbeatProgressPct } from "../utils/progress.js";
+import { escapeRegExp } from "../utils/regex.js";
 
 export const chatRouter: Router = Router();
 
@@ -180,10 +181,6 @@ interface ExtendedChatSession extends ChatSession {
   // Token tracking
   cumulativeInputTokens: number;
   cumulativeOutputTokens: number;
-}
-
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 const CHAT_STATE_FILE = "chat-state.json";

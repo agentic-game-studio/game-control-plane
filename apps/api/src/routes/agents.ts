@@ -4,6 +4,7 @@ import { agents } from "@game-studio/agents";
 import { broadcast } from "../services/websocket.js";
 import { getAgentSystemPrompt } from "../prompts/agent-prompt-loader.js";
 import { logger } from "../utils/logger.js";
+import { newId } from "../utils/ids.js";
 import type { AgentRole } from "@game-studio/types";
 
 export const agentsRouter: Router = Router();
@@ -60,7 +61,7 @@ agentsRouter.post("/spawn", async (req: Request, res: Response) => {
     return;
   }
 
-  const invocationId = crypto.randomUUID();
+  const invocationId = newId("invoke");
 
   broadcast({
     type: "agent:spawned",

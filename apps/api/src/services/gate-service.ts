@@ -29,33 +29,41 @@ interface GateDefinition {
 }
 
 // Gate to agent mapping
-const GATE_AGENTS: Record<string, { agent: AgentRole; model: string }> = {
-  "CD-PILLARS": { agent: "creative-director", model: "opus" },
-  "CD-GDD-ALIGN": { agent: "creative-director", model: "opus" },
-  "CD-SYSTEMS": { agent: "creative-director", model: "opus" },
-  "CD-NARRATIVE": { agent: "creative-director", model: "opus" },
-  "CD-PLAYTEST": { agent: "creative-director", model: "opus" },
-  "CD-PHASE-GATE": { agent: "creative-director", model: "opus" },
-  "TD-FEASIBILITY": { agent: "technical-director", model: "opus" },
-  "TD-ARCHITECTURE": { agent: "technical-director", model: "opus" },
-  "TD-SYSTEM-BOUNDARY": { agent: "technical-director", model: "opus" },
-  "TD-PHASE-GATE": { agent: "technical-director", model: "opus" },
-  "TD-ADR": { agent: "technical-director", model: "opus" },
-  "TD-ENGINE-RISK": { agent: "technical-director", model: "opus" },
-  "PR-SCOPE": { agent: "producer", model: "opus" },
-  "PR-SPRINT": { agent: "producer", model: "opus" },
-  "PR-MILESTONE": { agent: "producer", model: "opus" },
-  "PR-EPIC": { agent: "producer", model: "opus" },
-  "PR-PHASE-GATE": { agent: "producer", model: "opus" },
-  "AD-CONCEPT-VISUAL": { agent: "art-director", model: "sonnet" },
-  "AD-ART-BIBLE": { agent: "art-director", model: "sonnet" },
-  "AD-PHASE-GATE": { agent: "art-director", model: "sonnet" },
-  "AD-VISUAL": { agent: "art-director", model: "sonnet" },
-  "LP-FEASIBILITY": { agent: "lead-programmer", model: "sonnet" },
-  "LP-CODE-REVIEW": { agent: "lead-programmer", model: "sonnet" },
-  "QL-STORY-READY": { agent: "qa-lead", model: "sonnet" },
-  "QL-TEST-COVERAGE": { agent: "qa-lead", model: "sonnet" },
-  "ND-CONSISTENCY": { agent: "narrative-director", model: "sonnet" },
+// 31-M-gate-model-dead-field: the `model` field is dead. Model
+// selection happens inside `invokeAgent` via `getModelForTier` from
+// the agent's `tier` field (read from the agent's MD file), not from
+// this table. Keeping the `model` string here is divergent-fix bait:
+// a future tier→model change in `getModelForTier` would not be
+// reflected in this table, and a maintainer who reads `model` here
+// expecting it to be authoritative would be misled. The agent
+// field is the only one the rest of the file uses.
+const GATE_AGENTS: Record<string, { agent: AgentRole }> = {
+  "CD-PILLARS": { agent: "creative-director" },
+  "CD-GDD-ALIGN": { agent: "creative-director" },
+  "CD-SYSTEMS": { agent: "creative-director" },
+  "CD-NARRATIVE": { agent: "creative-director" },
+  "CD-PLAYTEST": { agent: "creative-director" },
+  "CD-PHASE-GATE": { agent: "creative-director" },
+  "TD-FEASIBILITY": { agent: "technical-director" },
+  "TD-ARCHITECTURE": { agent: "technical-director" },
+  "TD-SYSTEM-BOUNDARY": { agent: "technical-director" },
+  "TD-PHASE-GATE": { agent: "technical-director" },
+  "TD-ADR": { agent: "technical-director" },
+  "TD-ENGINE-RISK": { agent: "technical-director" },
+  "PR-SCOPE": { agent: "producer" },
+  "PR-SPRINT": { agent: "producer" },
+  "PR-MILESTONE": { agent: "producer" },
+  "PR-EPIC": { agent: "producer" },
+  "PR-PHASE-GATE": { agent: "producer" },
+  "AD-CONCEPT-VISUAL": { agent: "art-director" },
+  "AD-ART-BIBLE": { agent: "art-director" },
+  "AD-PHASE-GATE": { agent: "art-director" },
+  "AD-VISUAL": { agent: "art-director" },
+  "LP-FEASIBILITY": { agent: "lead-programmer" },
+  "LP-CODE-REVIEW": { agent: "lead-programmer" },
+  "QL-STORY-READY": { agent: "qa-lead" },
+  "QL-TEST-COVERAGE": { agent: "qa-lead" },
+  "ND-CONSISTENCY": { agent: "narrative-director" },
 };
 
 // Gate prompts from director-gates.md

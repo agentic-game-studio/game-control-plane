@@ -96,6 +96,7 @@ import {
 } from "./godot-mcp-service.js";
 import { triggerVerification } from "./verification-service.js";
 import { consumeCreditsForAgent } from "./credit-service.js";
+import { escapeRegExp } from "../utils/regex.js";
 import { logger } from "../utils/logger.js";
 import { newId } from "../utils/ids.js";
 import { toolIterationProgressPct } from "../utils/progress.js";
@@ -262,10 +263,8 @@ function broadcastLogEntry(sessionId: string, level: string, message: string, ag
 /** Escape special regex metacharacters in a literal string so it can be safely
  * embedded in a `new RegExp(...)` pattern. Without this, characters like `.`,
  * `+`, `*`, `(`, `[`, `\\`, `$`, `^`, `|` in `process.env.HOME` would be
- * interpreted as regex syntax. */
-function escapeRegExp(literal: string): string {
-  return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
+ * interpreted as regex syntax. (Imported from ../utils/regex.js — see
+ * 31-M-duplicate-escape.) */
 
 /** Tokenize a sandboxed shell command into argv. Supports:
  *  - whitespace splitting (space, tab)

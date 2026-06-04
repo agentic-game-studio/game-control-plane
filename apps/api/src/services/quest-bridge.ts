@@ -461,6 +461,19 @@ export async function createFixTicket(
 // (legacy board + every per-project board), so caching the result for
 // a few seconds collapses the read storm on the hot moveQuestTicket path.
 const TICKET_PROJECT_CACHE_TTL_MS = 30_000;
+// 31-M-quest-bridge-negative-cache: a 30s TTL on a `null` lookup pins
+// the "ticket not on any board" result for 30s. If a legacy ticket
+// gets associated with a project in a subsequent API call (the
+// `associateTicket` flow at L???), moveQuestTicket will silently
+// fail to find the ticket for 30s — the autonomous loop sees a
+// "Ticket X not found on board — skipping move" warn on every
+// iteration until the cache expires. Cache positive lookups for the
+// full 30s (they're correct, and the cache exists for the N+1 disk
+// scan cost) but cap negative lookups at 1s so a newly-associated
+// ticket becomes visible almost immediately. The 1s is still
+// enough to absorb an in-flight burst of moveQuestTicket calls for
+// the same unknown ticket.
+const TICKET_PROJECT_CACHE_NEGATIVE_TTL_MS = 1_000;
 // 27-H-ticket-project-cache-cap: hard cap on the cache size. The
 // TTL reaps entries lazily on read, so a long-running API that
 // creates many tickets (one entry per ticketId) grows the map to
@@ -511,7 +524,7 @@ async function resolveProjectIdForTicket(ticketId: string): Promise<string | nul
   try {
     const dashboard = await readData<DashboardData>("dashboard.json");
     if (!dashboard.projects.length) {
-      ticketProjectCache.set(ticketId, { value: null, expiresAt: now + TICKET_PROJECT_CACHE_TTL_MS });
+      ticketProjectCache.set(ticketId, { value: null, expiresAt: now + TICKET_PROJECT_CACHE_NEGATIVE_TTL_MS });
       capTicketProjectCache();
       return null;
     }
@@ -531,7 +544,7 @@ async function resolveProjectIdForTicket(ticketId: string): Promise<string | nul
     // Ignore scan failures and fall back to null.
   }
 
-  ticketProjectCache.set(ticketId, { value: null, expiresAt: now + TICKET_PROJECT_CACHE_TTL_MS });
+  ticketProjectCache.set(ticketId, { value: null, expiresAt: now + TICKET_PROJECT_CACHE_NEGATIVE_TTL_MS });
   capTicketProjectCache();
   return null;
 }

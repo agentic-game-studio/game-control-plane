@@ -1332,18 +1332,29 @@ If the failure is an infinite loop or hang (timeout), suggest a workaround.`,
       state.completedCount++;
       state.lastHeartbeat = new Date().toISOString();
 
-      await moveTicket(state.projectId, activeTicket.id, "qa");
-
-      const verifyTicket = (await readTicketsBoard(state.projectId)).columns
-        .flatMap((c) => c.tickets)
-        .find((t) => t.id === activeTicket.id);
+      // 31-M-autonomous-verify-ticket-return: use the post-move
+      // snapshot returned by `moveTicket` instead of re-reading the
+      // board to find the ticket. The 14-H2 fix added the return
+      // value to `moveTicket` specifically to close this TOCTOU
+      // window, but the call site at L1335-1339 was never updated
+      // and still does the old `(await readTicketsBoard(...))...
+      // .find(...)` re-read. A concurrent UI drag or another
+      // autonomous iteration that moved/removed the ticket in the
+      // gap would silently skip `triggerVerification`, and the
+      // fallback `moveTicket(... "completed")` on the else branch
+      // was dead — if the first move returned null the ticket
+      // wasn't on the board, so the second move also can't find it.
+      const verifyTicket = await moveTicket(state.projectId, activeTicket.id, "qa");
       if (verifyTicket) {
         triggerVerification(
           { ...verifyTicket, sessionId: state.sessionId, testEvidence: qaEvidence as typeof verifyTicket.testEvidence },
           `${agentResult?.content ?? ""}\n\nQA: ${qaSummary}`,
         );
       } else {
-        await moveTicket(state.projectId, activeTicket.id, "completed");
+        logger.warn(
+          { projectId: state.projectId, ticketId: activeTicket.id, event: "verify_ticket_not_on_board" },
+          "QA-passed ticket not found on board after move — skipping verification",
+        );
       }
 
       const gateContext = `Milestone check after ticket "${activeTicket.title}". Completed: ${state.completedCount}. Agent output:\n${agentResult?.content?.slice(0, 1500) ?? ""}`;

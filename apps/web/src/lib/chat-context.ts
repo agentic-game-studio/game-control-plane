@@ -20,7 +20,16 @@ export function contextFillPercentFromUsage(contextUsage: ContextUsage | undefin
   ));
 }
 
-/** Approximate serialized size of persisted conversationHistory entries */
+/** Approximate serialized size of persisted conversationHistory entries.
+ * Mirrors the server's `pruneConversationHistory` estimator in
+ * apps/api/src/routes/chat.ts:215 — every non-text content block
+ * (tool_use, tool_result, image, etc.) is estimated at
+ * NON_TEXT_BLOCK_ESTIMATE_CHARS. The previous client shape returned
+ * 0 for any non-string content, so the UI's "12% full" could mask a
+ * server-side "40%+ and pruning" — pruning still happened, but the
+ * bar lied about how close to the wall the session was. */
+const NON_TEXT_BLOCK_ESTIMATE_CHARS = 1000;
+
 export function countConversationHistoryChars(
   history: Array<{ content?: unknown }> | undefined | null
 ): number {
@@ -32,11 +41,13 @@ export function countConversationHistoryChars(
       return (
         sum +
         c.reduce((s, item) => {
-          if (item && typeof item === "object" && item !== null && "content" in item) {
-            const inner = (item as { content: unknown }).content;
-            return s + (typeof inner === "string" ? inner.length : 0);
+          if (item && typeof item === "object" && item !== null && "type" in item) {
+            const block = item as { type: unknown; text?: unknown };
+            if (block.type === "text" && typeof block.text === "string") {
+              return s + block.text.length;
+            }
           }
-          return s;
+          return s + NON_TEXT_BLOCK_ESTIMATE_CHARS;
         }, 0)
       );
     }
