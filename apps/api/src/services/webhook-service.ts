@@ -55,9 +55,41 @@ function isBlockedAddress(hostname: string): boolean {
     if (a === 100 && b >= 64 && b <= 127) return true;         // 100.64.0.0/10 (CGNAT, RFC 6598)
     if (a === 198 && (b === 18 || b === 19)) return true;      // 198.18.0.0/15 (benchmark, RFC 2544)
   }
-  // IPv6 loopback / link-local
-  if (lower === "::1" || lower === "[::1]") return true;
-  if (lower.startsWith("fe80:") || lower.startsWith("[fe80:")) return true;
+  // 29-H-webhook-ipv6-ula: previous shape blocked only ::1 and
+  // fe80::/10. The IPv6 unique-local-address range fc00::/7
+  // (RFC 4193, used for site-local private networks) was
+  // unblocked, and so was the IPv4-mapped-IPv6 form ::ffff:0:0/96
+  // (RFC 4291, lets a host stack treat an IPv4 address as
+  // ::ffff:127.0.0.1). Both bypasses are commonly abused: a
+  // URL like `http://[fc00::1]/admin` or `http://[::ffff:127.0.0.1]/`
+  // would pass the old guard and reach the fetch.
+  //
+  // Note on brackets: the URL parser strips the surrounding [] from
+  // `parsed.hostname` for IPv6, so we get the raw `fc00::1` form.
+  // Strip any leading/trailing brackets defensively in case the
+  // caller passed a literal rather than a parsed URL.
+  const bare = lower.replace(/^\[|\]$/g, "");
+  // IPv6 loopback
+  if (bare === "::1") return true;
+  // IPv6 link-local (fe80::/10)
+  if (bare.startsWith("fe80:") || bare.startsWith("fe8") ||
+      bare.startsWith("fe9") || bare.startsWith("fea") || bare.startsWith("feb")) return true;
+  // 29-H-webhook-ipv6-ula: IPv6 unique-local (fc00::/7). The /7
+  // means the first 7 bits match, so the first byte is 0xfc or 0xfd.
+  if (bare.startsWith("fc") || bare.startsWith("fd")) return true;
+  // 29-H-webhook-ipv4-mapped-ipv6: ::ffff:0:0/96 — the IPv4-mapped
+  // block. Anything starting with `::ffff:` is suspect; we'll let
+  // the IPv4 octet-prefix checks above catch the well-known
+  // private/loopback ranges once we extract them, but a fully
+  // empty IPv4 tail (e.g. `::ffff:0:0`) needs an explicit block.
+  if (bare.startsWith("::ffff:")) {
+    // `::ffff:127.0.0.1` style — strip the prefix and re-validate
+    // the IPv4 tail with the same prefix rules.
+    const v4Tail = bare.slice(7);
+    return isBlockedAddress(v4Tail);
+  }
+  // Multicast ff00::/8 — never a legitimate webhook target.
+  if (bare.startsWith("ff")) return true;
   return false;
 }
 

@@ -41,6 +41,15 @@ function safeUnderWorkspace(candidate: string, workspaceDir: string): string {
   return resolved;
 }
 
+// 29-H-wiki-mem-note-cap: bound the note size. Previous shape
+// accepted any length; a 5MB note (e.g. a runaway `blockers.join("\n")`
+// from a misbehaving agent) would OOM the appendFile write, hang the
+// event loop on the encoding step, and leave a half-written partial
+// line in both decisions.md and the wiki file. 16KB is enough for
+// any real production note (each line is typically 80-200 chars),
+// so this is a generous ceiling, not a tightening constraint.
+const MAX_NOTE_BYTES = 16_000;
+
 export async function externalizeProductionNote(
   projectId: string,
   category: string,
@@ -55,6 +64,14 @@ export async function externalizeProductionNote(
 
   if (typeof note !== "string") {
     throw new Error("externalizeProductionNote: note must be a string");
+  }
+
+  // Use Buffer.byteLength on the UTF-8 encoding so a 5000-character
+  // emoji-rich note (each char up to 4 bytes) is measured fairly.
+  // Reject before doing the file I/O — the appends below would
+  // either OOM the process or block on a multi-MB write.
+  if (Buffer.byteLength(note, "utf-8") > MAX_NOTE_BYTES) {
+    throw new Error(`externalizeProductionNote: note exceeds ${MAX_NOTE_BYTES} bytes (UTF-8)`);
   }
 
   const config = loadConfig();

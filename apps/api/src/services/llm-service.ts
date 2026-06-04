@@ -1504,7 +1504,12 @@ loop_offset=0
           return "Error: title, description, agentRole, and area are required";
         }
 
-        const { createQuestTicket } = await import("../services/quest-bridge.js");
+        // 29-H-llm-no-dynamic-import: createQuestTicket is already
+        // statically imported at the top of this file (L242); the
+        // previous `await import(...)` was a pay-once-on-first-call
+        // cost that did nothing useful (the module is already loaded
+        // by the time this code runs) and made the call site look
+        // lazy. Use the static binding.
         const ticket = await createQuestTicket(sessionId, title, agentRole as AgentRole, description, area, subarea);
 
         broadcastLogEntry(sessionId, "info", `[${agentRole}] Created ticket: ${ticket.id} — ${title}`, agentRole as AgentRole);

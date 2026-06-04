@@ -36,7 +36,18 @@ const MAX_USAGE_LOG_ENTRIES = 500;
 // charge 20 credits instead of the expected cost, and a removed
 // agent's "decommission" would be invisible. Track the warned
 // set so a single agent doesn't spam the log once per call.
-const warnedAgents = new Set<AgentRole>();
+//
+// 29-H-credit-warned-agents-cap: bound the set with an LRU. The
+// previous shape was unbounded — a long-lived process that sees
+// many distinct role strings (e.g. test traffic with random
+// names, or a misconfigured role factory) would accumulate one
+// entry per role forever. Use a Map (insertion-order) and drop
+// the oldest when we exceed the cap. The cap is sized to the
+// current union (53) plus headroom for experimental roles; a
+// real ops alert would fire from the unmapped-cost log line
+// itself, so the eviction here is purely a memory bound.
+const MAX_WARNED_AGENTS = 128;
+const warnedAgents = new Map<AgentRole, true>();
 
 export async function consumeCreditsForAgent(
   agentRole: AgentRole,
@@ -45,7 +56,13 @@ export async function consumeCreditsForAgent(
   let creditsUsed = AGENT_CREDIT_COST[agentRole];
   if (creditsUsed === undefined) {
     if (!warnedAgents.has(agentRole)) {
-      warnedAgents.add(agentRole);
+      warnedAgents.set(agentRole, true);
+      // Evict the oldest entry if we've exceeded the cap. The
+      // oldest is the first key in the Map (insertion-order).
+      if (warnedAgents.size > MAX_WARNED_AGENTS) {
+        const oldest = warnedAgents.keys().next().value;
+        if (oldest !== undefined) warnedAgents.delete(oldest);
+      }
       logger.warn(
         { agentRole, defaultCost: DEFAULT_COST, event: "agent_credit_cost_unmapped" },
         `No credit cost configured for agent "${agentRole}" — falling back to default ${DEFAULT_COST}. Add an entry to AGENT_CREDIT_COST in credit-service.ts to silence this warning.`,

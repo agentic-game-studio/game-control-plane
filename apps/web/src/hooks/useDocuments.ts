@@ -94,16 +94,32 @@ export function useDocuments(projectId?: string): UseDocumentsReturn {
   }, [fetchDocuments, fetchGraph]);
 
   // Select a document
+  // 29-H-useDocuments-select-abort: hold the in-flight controller
+  // in a ref so a subsequent selectDocument call aborts the
+  // previous one. Previous shape created a fresh controller per
+  // call and never aborted the previous — a user clicking A then
+  // quickly clicking B could see A's response overwrite B's
+  // selection, because the last-write-wins on setSelectedDocument
+  // honors response order, not click order. Mirror the
+  // `useAbortableRefresh` pattern: ref holds the controller, the
+  // next call aborts it.
+  const selectAbortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => selectAbortRef.current?.abort(), []);
   const selectDocument = useCallback(async (slug: string) => {
     setSelectedId(slug);
-    // Per-call controller: aborting the previous select is fine but
-    // we don't want to clobber the *initial* load controller.
+    selectAbortRef.current?.abort();
     const controller = new AbortController();
+    selectAbortRef.current = controller;
     try {
       const data = await apiFetch<{ document: DocumentDetail }>(`/api/documents/${slug}${qs}`, { signal: controller.signal });
+      // Guard against a slow previous request that landed after the
+      // abort: only commit the response if this controller is still
+      // the live one.
+      if (selectAbortRef.current !== controller) return;
       setSelectedDocument(data.document);
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
+      if (selectAbortRef.current !== controller) return;
       setError(extractErrorMessage(err));
     }
   }, [qs]);

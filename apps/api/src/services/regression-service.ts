@@ -2,7 +2,7 @@
  * Regression test baseline — store and compare QA gate fingerprints per project.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { access, mkdir, readFile, writeFile } from "fs/promises";
 import { join } from "path";
 import { resolveProjectWorkspace } from "../utils/workspace.js";
 import type { TicketTestEvidence } from "@game-studio/types";
@@ -72,14 +72,14 @@ export async function runRegressionCheck(
   evidence: TicketTestEvidence,
 ): Promise<RegressionResult> {
   const projectPath = resolveProjectWorkspace(workspacePath);
-  return withRegressionLock(projectPath, () => Promise.resolve(runRegressionCheckUnlocked(workspacePath, projectId, evidence)));
+  return withRegressionLock(projectPath, () => runRegressionCheckUnlocked(workspacePath, projectId, evidence));
 }
 
-function runRegressionCheckUnlocked(
+async function runRegressionCheckUnlocked(
   workspacePath: string,
   projectId: string,
   evidence: TicketTestEvidence,
-): RegressionResult {
+): Promise<RegressionResult> {
   const projectPath = resolveProjectWorkspace(workspacePath);
   const path = baselinePath(projectPath);
   const fp = fingerprint(evidence);
@@ -94,7 +94,16 @@ function runRegressionCheckUnlocked(
     fingerprint: fp,
   };
 
-  if (!existsSync(path)) {
+  // 29-H-regression-async-io: previous shape used sync
+  // existsSync/readFileSync/writeFileSync inside an async-named
+  // function. The 27th pass added the per-file mutex but left the
+  // I/O itself sync — a regression check on a cold path blocked
+  // the event loop for the read+write round-trip. The route
+  // handler awaits this; sync I/O is pure overhead here. Use
+  // fs/promises. mkdir with recursive:true is a no-op if the dir
+  // exists, so the previous existsSync guard was redundant.
+  const baselineExists = await access(path).then(() => true, () => false);
+  if (!baselineExists) {
     // 23-H-regression-first-run: only seed a baseline when the
     // current run actually passed all gates. The previous shape
     // wrote the baseline unconditionally and returned
@@ -121,14 +130,15 @@ function runRegressionCheckUnlocked(
       };
     }
     const dir = join(projectPath, "production");
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    writeFileSync(path, JSON.stringify(current, null, 2), "utf-8");
+    await mkdir(dir, { recursive: true });
+    await writeFile(path, JSON.stringify(current, null, 2), "utf-8");
     return { passed: true, isBaseline: true, baseline: current };
   }
 
   let baseline: RegressionBaseline;
   try {
-    const raw = JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>;
+    const rawText = await readFile(path, "utf-8");
+    const raw = JSON.parse(rawText) as Record<string, unknown>;
     // 27-L-regression-baseline-validate: the previous `as RegressionBaseline`
     // cast trusted JSON.parse to return a fully-shaped object. A
     // hand-edited or partially-written baseline (truncated write,
@@ -147,12 +157,12 @@ function runRegressionCheckUnlocked(
       typeof raw.gutSummary !== "string" ||
       typeof raw.smokeSummary !== "string"
     ) {
-      writeFileSync(path, JSON.stringify(current, null, 2), "utf-8");
+      await writeFile(path, JSON.stringify(current, null, 2), "utf-8");
       return { passed: true, isBaseline: true, baseline: current };
     }
     baseline = raw as unknown as RegressionBaseline;
   } catch {
-    writeFileSync(path, JSON.stringify(current, null, 2), "utf-8");
+    await writeFile(path, JSON.stringify(current, null, 2), "utf-8");
     return { passed: true, isBaseline: true, baseline: current };
   }
 
@@ -173,7 +183,7 @@ function runRegressionCheckUnlocked(
     evidence.smokePlaytest?.passed !== false,
   );
   if (allPass) {
-    writeFileSync(path, JSON.stringify(current, null, 2), "utf-8");
+    await writeFile(path, JSON.stringify(current, null, 2), "utf-8");
   }
 
   return {

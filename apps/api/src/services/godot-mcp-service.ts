@@ -12,12 +12,19 @@
  *     → Response read from MCP server stdout
  */
 
-import { spawn, execFileSync, ChildProcess, execFile } from "node:child_process";
+import { spawn, ChildProcess, execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname as pathDirname, join, resolve } from "node:path";
-import { accessSync, globSync, rmSync, existsSync, readdirSync, readFileSync } from "node:fs";
+// 29-H-godot-mcp-dead-imports: the previous import list had
+// `execFileSync`, `rmSync`, `readFileSync`, `readdirSync` — all
+// dead. They were never called; the 27th/28th passes migrated
+// every sync I/O site to fs/promises but left the imports in
+// place. Drop them so `rg "Sync$" apps/api/src` returns only
+// the live sync sites (accessSync at startup, existsSync /
+// globSync on the binary-detect path).
+import { accessSync, globSync, existsSync } from "node:fs";
 import os from "node:os";
 import type { LLMTool } from "../llm/zai-client.js";
 import { logger } from "../utils/logger.js";

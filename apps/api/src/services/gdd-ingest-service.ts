@@ -54,8 +54,40 @@ export interface ParsedGDDItem {
 
 function resolveTicketMeta(section: string): { area: string; subarea: string; assignee: AgentRole } {
   const key = section.toLowerCase().trim();
+  // 29-H-gdd-area-match: previous shape used a bidirectional
+  // substring match (`key.includes(k) || k.includes(key)`). The
+  // bidirectional form has two failure modes:
+  //  1. A GDD section named "art" matches the first "art/*" map
+  //     key in iteration order, which is "art/sprites" — but a
+  //     GDD that wanted bare "art" should not get the sprites
+  //     assignee. The match order is whichever key was inserted
+  //     first, which is fragile across re-orderings of the map.
+  //  2. A short map key like "ui" appears as a substring inside
+  //     unrelated user sections ("audio", "build", "guide") via
+  //     the `k.includes(key)` direction — "audio".includes("ui")
+  //     is false but the next iteration might find "ui/hud"
+  //     before it should. The original developer was reaching
+  //     for "match exact or hierarchical child"; do that
+  //     explicitly:
+  //     - exact match wins first
+  //     - then `key` is a child path of `k` (e.g. "art/sprites"
+  //       matches "art" parent)
+  //     - then `k` is a child path of `key` (e.g. "art" matches
+  //       "art/sprites" — though usually we want exact, this
+  //       handles the reverse case for one-level parents)
+  // Iteration order of Object.entries is insertion order; the
+  // more specific keys ("art/sprites", "ui/hud") were declared
+  // after the bare "art" / "ui" parents, so the exact-match
+  // pass naturally runs first and the prefix passes only fire
+  // when there's no exact hit.
   for (const [k, v] of Object.entries(AREA_MAP)) {
-    if (key.includes(k) || k.includes(key)) return v;
+    if (key === k) return v;
+  }
+  for (const [k, v] of Object.entries(AREA_MAP)) {
+    if (key.startsWith(k + "/")) return v;
+  }
+  for (const [k, v] of Object.entries(AREA_MAP)) {
+    if (k.startsWith(key + "/")) return v;
   }
   return { area: "engineering", subarea: "misc", assignee: "godot-specialist" };
 }
