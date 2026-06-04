@@ -1723,7 +1723,14 @@ export function useCommandRoom() {
         content: `Failed to spawn ${r}: ${error instanceof Error ? error.message : "Unknown error"}`,
       });
     }
-  }, [addSessionMessage, threadTitle, currentProjectId]);
+  // 28-L-commandroom-spawnagent-deps: previous shape listed
+  // `currentProjectId` in the deps array, but the body reads
+  // `currentProjectIdRef.current` (the ref pattern is the whole
+  // point — see the 17-H4 comment at L1620-1624). Listing the
+  // state in the deps caused this callback (and every child that
+  // receives it) to re-render on every project switch, even
+  // though its behavior is unchanged. Drop currentProjectId.
+  }, [addSessionMessage, threadTitle]);
 
   // Approve agent — send approval via API and wait for response
   const approveAgent = useCallback(async (role: string) => {

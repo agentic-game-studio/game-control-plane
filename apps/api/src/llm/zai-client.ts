@@ -269,14 +269,20 @@ const KEEP_RECENT_MESSAGES = 10;       // Never prune last N messages
 // in config.ts.
 const FALLBACK_FETCH_TIMEOUT_MS = 120_000;
 
-function getFetchTimeoutMs(): number {
+// 28-L-zai-fetch-timeout-modulelevel: previous shape called
+// `loadConfig()` on every fetch via `getFetchTimeoutMs()`. While
+// loadConfig is memoized (configState cache hit after the first
+// call), each call still does a `configState.API_TIMEOUT_MS`
+// property read. With the retry loop calling fetchWithRetry
+// per-attempt, this is hot. Resolve the timeout once at module
+// load (with the same try/catch fallback) and inline a constant.
+const FETCH_TIMEOUT_MS: number = (() => {
   try {
-    const config = loadConfig();
-    return config.API_TIMEOUT_MS;
+    return loadConfig().API_TIMEOUT_MS;
   } catch {
     return FALLBACK_FETCH_TIMEOUT_MS;
   }
-}
+})();
 
 /**
  * Sleep for `ms` milliseconds, but bail out immediately if the
@@ -315,7 +321,8 @@ async function fetchWithRetry(url: string, options: RequestInit, retries = MAX_R
   // upstream deadline (LLM chat is typically bounded to 30-90s). If the
   // caller provided an external signal with a deadline, we honor it;
   // otherwise default to (per-attempt timeout × retries + backoff budget).
-  const perAttemptTimeoutMs = getFetchTimeoutMs();
+  // 28-L-zai-fetch-timeout-modulelevel: inlined the constant.
+  const perAttemptTimeoutMs = FETCH_TIMEOUT_MS;
   const maxTotalMs = Math.min(
     perAttemptTimeoutMs * (retries + 1) + 30_000,
     300_000, // hard ceiling — 5 min, even with MAX_RETRIES raised later
@@ -332,18 +339,27 @@ async function fetchWithRetry(url: string, options: RequestInit, retries = MAX_R
         ...options,
         signal: combinedSignal,
       });
-      if (response.status === 429 && attempt < retries) {
-        // Rate limit — use longer delay (5s, 10s, 20s) to avoid hammering
-        const delay = 5000 * Math.pow(2, attempt) + Math.random() * 2000;
+      // 28-L-zai-retryable-status: previous shape only retried on
+      // 429 and 5xx. The Z.ai / Anthropic gateway commonly returns
+      // 408 Request Timeout and 425 Too Early, and CDN / proxy
+      // layers commonly return 502-504 as transient failures. The
+      // Anthropic / OpenAI retry policies all cover the union
+      // (408 || 425 || 429 || 5xx). Widen the trigger set.
+      const RETRYABLE = (s: number) =>
+        s === 408 || s === 425 || s === 429 || (s >= 500 && s < 600);
+      if (RETRYABLE(response.status) && attempt < retries) {
+        // 429 gets a longer delay (5s, 10s, 20s) to avoid hammering;
+        // 408/425/5xx use the standard exponential backoff.
+        const isRateLimit = response.status === 429;
+        const baseDelay = isRateLimit ? 5000 : RETRY_DELAY_MS;
+        const jitter = isRateLimit ? 2000 : 1000;
+        const delay = baseDelay * Math.pow(2, attempt) + Math.random() * jitter;
         if (Date.now() - startTime + delay > maxTotalMs) break;
-        logger.warn({ status: 429, attempt, delayMs: Math.round(delay), event: "rate_limit_retry" }, "Rate limited — backing off");
+        logger.warn(
+          { status: response.status, attempt, delayMs: Math.round(delay), event: "llm_retry" },
+          `${isRateLimit ? "Rate limited" : "Transient error"} — backing off`,
+        );
         // 11-H6: respect the external abort signal during the backoff.
-        await abortableSleep(delay, externalSignal);
-        continue;
-      }
-      if (response.status >= 500 && attempt < retries) {
-        const delay = RETRY_DELAY_MS * Math.pow(2, attempt) + Math.random() * 1000;
-        if (Date.now() - startTime + delay > maxTotalMs) break;
         await abortableSleep(delay, externalSignal);
         continue;
       }

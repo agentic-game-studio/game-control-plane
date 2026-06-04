@@ -58,13 +58,24 @@ def find_godot_binary() -> str | None:
 def run_godot(cmd: list[str], timeout: int = 120) -> dict:
     """Execute godot command, return structured result."""
     start = time.time()
+    # 28-L-run-godot-path-index: bound the `--path` lookup so a missing
+    # value (i.e. `--path` as the last element, or omitted entirely)
+    # doesn't IndexError inside subprocess.run's pre-flight. Fall back
+    # to None (inherits parent cwd) and let the caller surface the
+    # missing project dir via godot's own stderr.
+    path_idx = -1
+    if "--path" in cmd:
+        candidate = cmd.index("--path") + 1
+        if candidate < len(cmd):
+            path_idx = candidate
+    cwd = cmd[path_idx] if path_idx >= 0 else None
     try:
         proc = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
             timeout=timeout,
-            cwd=cmd[cmd.index("--path") + 1] if "--path" in cmd else None,
+            cwd=cwd,
         )
         elapsed_ms = int((time.time() - start) * 1000)
         return {

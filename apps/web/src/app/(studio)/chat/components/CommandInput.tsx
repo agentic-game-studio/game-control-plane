@@ -10,7 +10,13 @@ interface CommandInputProps {
 }
 
 const MAX_PASTED_IMAGES = 4;
-const MAX_IMAGE_BYTES = 1_000_000; // 1MB per image; matches the 5MB body limit on the API
+// 28-L-commandinput-image-cap-comment: the previous comment
+// said "matches the 5MB body limit" but the constant is 1MB
+// per image. The real invariant is "4 images × 1MB = 4MB
+// comfortably under the 5MB body limit". A future maintainer
+// reading the old comment might raise the cap assuming the API
+// tolerates larger. Clarify the intent.
+const MAX_IMAGE_BYTES = 1_000_000; // 1MB per image; 4 images × 1MB = 4MB stays under the 5MB body limit
 
 export const COMMANDS = [
   { cmd: "/autonomous", desc: "Start autonomous production loop" },

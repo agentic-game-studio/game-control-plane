@@ -10,8 +10,12 @@
  * The agent reads project state to figure out paths and conventions.
  */
 
-import { existsSync } from "node:fs";
-import { readdir, readFile } from "node:fs/promises";
+// 28-L-ticket-gen-async-exists: the previous `existsSync` import
+// was removed; the actual `existsSync` calls were all replaced
+// with `access().then(() => true, () => false)` in this pass.
+// The `fs` import below is `node:fs/promises` (already present
+// at the top of the file) and is reused for the new access checks.
+import { readdir, readFile, access } from "node:fs/promises";
 import { join } from "node:path";
 import { newId } from "../utils/ids.js";
 import { readTicketsBoard, updateTicketsBoard } from "./ticket-board.js";
@@ -815,13 +819,25 @@ async function findProjectFiles(projectPath: string, patterns: string[]): Promis
       }
     }
   };
-  if (existsSync(projectPath)) await search(projectPath, projectPath, 0);
+  // 28-L-ticket-gen-async-exists: replace the `existsSync` sync
+  // stat with an async access check. The 15th pass already moved
+  // the recursive `readdirSync` to `readdir` in `search`; this
+  // entry-point stat was missed. generateTickets runs on every
+  // empty-queue autonomous-loop iteration; with 50 templates ×
+  // 3 requireFilesExist checks, the event loop was being
+  // blocked ~150 times per iteration.
+  if (await access(projectPath).then(() => true, () => false)) {
+    await search(projectPath, projectPath, 0);
+  }
   return found;
 }
 
 async function anyFileExists(projectPath: string, files: string[]): Promise<boolean> {
-  // Fast path: exact match
-  if (files.some((f) => existsSync(join(projectPath, f)))) return true;
+  // 28-L-ticket-gen-async-exists: same fix as findProjectFiles.
+  const checks = await Promise.all(
+    files.map((f) => access(join(projectPath, f)).then(() => true, () => false)),
+  );
+  if (checks.some(Boolean)) return true;
   // Fuzzy fallback: match by basename stem (exact or with separator suffix)
   // e.g. "player.gd" matches "player.gd", "player_controller.gd", "player-character.gd"
   // but NOT "player_died.gd", "player_anim.gd" (those aren't the main player script)
@@ -862,8 +878,11 @@ async function allRequiredFilesExist(projectPath: string, files: string[]): Prom
   const allFiles = await findProjectFiles(projectPath, [".gd", ".tscn"]);
 
   for (const [stem, alternatives] of stemGroups) {
-    // Check if any alternative path exists (exact match)
-    const exactMatch = alternatives.some((f) => existsSync(join(projectPath, f)));
+    // 28-L-ticket-gen-async-exists: parallelize the existsSync
+    // checks via fs.access.
+    const exactMatch = (await Promise.all(
+      alternatives.map((f) => access(join(projectPath, f)).then(() => true, () => false)),
+    )).some(Boolean);
     if (exactMatch) continue;
 
     // Fuzzy fallback: check if any file on disk matches this stem
@@ -921,7 +940,8 @@ function ticketExistsById(board: TicketsBoard, id: string): boolean {
 export async function generateTickets(projectId: string, workspacePath?: string, projectDescription?: string): Promise<Array<Ticket & { phase?: number; templateId?: string }>> {
   const effectivePath = workspacePath ?? projectId;
   const projectPath = join(getWorkspaceDir(), effectivePath);
-  if (!workspacePath || !existsSync(projectPath)) {
+  // 28-L-ticket-gen-async-exists: same fix as the others.
+  if (!workspacePath || !(await access(projectPath).then(() => true, () => false))) {
     return [];
   }
 
@@ -1023,7 +1043,7 @@ export async function scanProjectState(projectPath: string): Promise<string> {
   const lines: string[] = [];
   lines.push("=== PROJECT STATE ===");
 
-  if (!existsSync(projectPath)) {
+  if (!(await access(projectPath).then(() => true, () => false))) {
     lines.push("WARNING: Project directory does not exist!");
     lines.push("=== END PROJECT STATE ===");
     return lines.join("\n");
@@ -1031,7 +1051,7 @@ export async function scanProjectState(projectPath: string): Promise<string> {
 
   // Check project.godot
   const projectGodot = join(projectPath, "project.godot");
-  if (existsSync(projectGodot)) {
+  if (await access(projectGodot).then(() => true, () => false)) {
     const content = await readFile(projectGodot, "utf8");
     const nameMatch = content.match(/config\/name="([^"]+)"/);
     const versionMatch = content.match(/config\/features=PackedStringArray\("([^"]+)"/);
