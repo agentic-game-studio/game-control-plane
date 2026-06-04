@@ -1052,11 +1052,19 @@ export function useCommandRoom() {
     }
 
     let cancelled = false;
+    // 28-H-commandroom-init-abort: route the initial fetches through
+    // a per-call AbortController and abort on unmount or when
+    // currentProjectId changes (the existing cleanup). The previous
+    // `cancelled` flag only blocked the post-await setState — the
+    // network call ran to completion. On a quick project switch, the
+    // stale projectId's producer-session response was still in flight
+    // and could land after the new project's data, clobbering state.
+    const initController = new AbortController();
     const init = async () => {
       try {
         const [allResp, producerSession] = await Promise.all([
-          apiFetch<{ sessions: BackendSession[]; currentSessionId: string }>("/api/chat/sessions"),
-          apiFetch<BackendSession>(`/api/chat/sessions/producer/${currentProjectId}`),
+          apiFetch<{ sessions: BackendSession[]; currentSessionId: string }>("/api/chat/sessions", { signal: initController.signal }),
+          apiFetch<BackendSession>(`/api/chat/sessions/producer/${currentProjectId}`, { signal: initController.signal }),
         ]);
         if (cancelled) return;
 
@@ -1151,6 +1159,11 @@ export function useCommandRoom() {
     init();
     return () => {
       cancelled = true;
+      // 28-H-commandroom-init-abort: abort in-flight fetches so
+      // navigating away or switching project before the response
+      // arrives doesn't waste the round-trip or risk a stale
+      // state-update race.
+      initController.abort();
     };
   }, [currentProjectId]);
 

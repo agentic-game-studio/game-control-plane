@@ -206,11 +206,20 @@ documentsRouter.post("/refresh", async (req: Request, res: Response) => {
   try {
     const store = await resolveStore(req);
     store.invalidateCache();
+    // 28-H-documents-bulk-broadcast: the previous shape iterated
+    // every document and fired one WS broadcast each. A project
+    // with 500 markdown files caused 500 broadcasts, 500 wiki UI
+    // re-renders, and 500× studio-hook work. The wiki renders the
+    // full file tree on every `document:updated` event; the
+    // aggregate cost scales O(N²) with project size. Replace with
+    // a single bulk-updated event carrying just the count — the
+    // studio hook refetches the list when it sees the event.
     const documents = await store.listAll();
-    for (const doc of documents) {
-      broadcast({ type: "document:updated", documentId: doc.id, category: doc.category, title: doc.title });
-    }
-    res.json({ success: true });
+    broadcast({
+      type: "documents:bulk-updated",
+      count: documents.length,
+    });
+    res.json({ success: true, count: documents.length });
   } catch (err) {
     logger.error(
       { err: err instanceof Error ? err.message : String(err), event: "documents_refresh_failed" },

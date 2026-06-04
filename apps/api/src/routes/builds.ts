@@ -138,6 +138,7 @@ buildsRouter.post("/bump-version", async (req: Request, res: Response) => {
     return;
   }
   const projectPath = resolveProjectWorkspace(workspace);
-  const version = bumpProjectVersion(projectPath, bump ?? "patch");
+  // 28-H-qa-gate-async-version-helpers: bumpProjectVersion is now async.
+  const version = await bumpProjectVersion(projectPath, bump ?? "patch");
   res.json({ success: true, data: { version } });
 });

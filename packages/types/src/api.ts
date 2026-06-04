@@ -24,6 +24,7 @@ export type WSEvent =
   | { type: "log:entry"; sessionId: string; level: string; message: string; timestamp: string; agent?: string }
   | { type: "document:created"; documentId: string; category: DocumentCategory; title: string }
   | { type: "document:updated"; documentId: string; category: DocumentCategory; title: string }
+  | { type: "documents:bulk-updated"; count: number }
   | { type: "project:created"; project: Project }
   | { type: "project:updated"; project: Project }
   | { type: "project:deleted"; projectId: string }

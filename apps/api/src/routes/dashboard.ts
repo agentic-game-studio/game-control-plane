@@ -831,7 +831,8 @@ dashboardRouter.get("/projects/:id/plugin-status", async (req: Request, res: Res
 
     const projectDir = resolveProjectWorkspace(project.workspacePath);
     const installed = isGodotMCPPluginInstalled(projectDir);
-    const enabled = isGodotMCPPluginEnabled(projectDir);
+    // 28-H-godot-mcp-async-read: isGodotMCPPluginEnabled is now async.
+    const enabled = await isGodotMCPPluginEnabled(projectDir);
 
     res.json({
       success: true,
@@ -895,7 +896,8 @@ dashboardRouter.post("/setup-server", async (_req: Request, res: Response) => {
   try {
     // 25-M-dynamic-import-cleanup: setupGodotMCPServer is now
     // statically imported at the top of this file.
-    const result = setupGodotMCPServer();
+    // 28-H-godot-mcp-async-exec: now async — await the call.
+    const result = await setupGodotMCPServer();
 
     if (result.success) {
       res.json({

@@ -125,9 +125,16 @@ export function DialogProvider({ children }: { children: React.ReactNode }) {
         // Restore focus to the trigger. Guard with isConnected in case
         // the element was unmounted while the dialog was open (e.g.
         // the parent route changed mid-confirm).
+        // 28-H-dialog-focus-precedence: previous shape
+        //   `if (target && typeof target.isConnected !== "boolean" || target?.isConnected)`
+        // parsed as `(target && typeof ... !== "boolean") || target?.isConnected`
+        // because `&&` binds tighter than `||`. Any truthy target with
+        // isConnected === undefined fell through to the OR branch and
+        // was focused. The intent — focus only when the target is in
+        // the DOM — needs both checks ANDed together.
         const target = previouslyFocusedRef.current;
-        if (target && typeof target.isConnected !== "boolean" || target?.isConnected) {
-          target?.focus();
+        if (target && target.isConnected !== false) {
+          target.focus();
         }
         previouslyFocusedRef.current = null;
       }

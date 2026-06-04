@@ -690,30 +690,19 @@ assetsRouter.patch("/:id", async (req: Request, res: Response) => {
   const updates = req.body as UpdateAssetRequest;
 
   try {
-    // Capture whether the asset existed before the lock so the response
-    // matches the read-compute-write semantics. updateData's lock prevents
-    // two concurrent PATCHes from clobbering each other.
-    let isNew = false;
+    // 28-H-assets-patch-no-upsert: the previous shape upserted —
+    // PATCH on a non-existent ID silently created a new asset with
+    // default field values (filename "unknown", category "prop",
+    // type "texture"). This violated PATCH semantics (should 404
+    // for missing resource) AND let a client bypass POST
+    // `/api/assets`'s required-field validation by sending a PATCH
+    // instead. The fix: return 404 if the asset doesn't exist.
     let updatedAsset: GameAsset | null = null;
 
     await updateData<AssetsData>("assets.json", (d) => {
       const assetIndex = d.assets.findIndex((a) => a.id === id);
       if (assetIndex === -1) {
-        const now = new Date().toISOString();
-        const newAsset: GameAsset = {
-          id: String(id),
-          filename: updates.filename ?? "unknown",
-          type: updates.type ?? "texture",
-          category: updates.category ?? "prop",
-          sizeBytes: updates.sizeBytes ?? 0,
-          tags: updates.tags ?? [],
-          createdAt: now,
-          updatedAt: now,
-          ...updates,
-        };
-        d.assets.push(newAsset);
-        isNew = true;
-        updatedAsset = newAsset;
+        // Don't push — let the post-lock branch return 404.
         return d;
       }
       const assetId = String(id);
@@ -729,7 +718,7 @@ assetsRouter.patch("/:id", async (req: Request, res: Response) => {
     });
 
     if (!updatedAsset) {
-      res.status(500).json({ success: false, error: "Failed to update asset" });
+      res.status(404).json({ success: false, error: "Asset not found" });
       return;
     }
 
@@ -741,7 +730,7 @@ assetsRouter.patch("/:id", async (req: Request, res: Response) => {
       projectId: req.query.projectId as string | undefined ?? null,
     } as WSEvent);
 
-    res.status(isNew ? 201 : 200).json({ success: true, data: updatedAsset });
+    res.status(200).json({ success: true, data: updatedAsset });
   } catch (error) {
     res.status(500).json({ success: false, error: "Failed to update asset" });
   }

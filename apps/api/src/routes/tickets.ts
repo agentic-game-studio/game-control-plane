@@ -84,6 +84,22 @@ ticketsRouter.post("/", async (req: Request, res: Response) => {
     return;
   }
 
+  // 28-H-text-field-length-cap: clamp the free-form title and
+  // description. A 5MB body limit allowed a single POST to flood
+  // the board JSON file and the LLM verifier prompt with a giant
+  // string. 500 chars for a title is generous; 50_000 for
+  // description matches the chat /messages cap.
+  const MAX_TITLE = 500;
+  const MAX_DESCRIPTION = 50_000;
+  if (typeof body.title !== "string" || body.title.length > MAX_TITLE) {
+    res.status(400).json({ success: false, error: `title must be a string up to ${MAX_TITLE} chars` });
+    return;
+  }
+  if (body.description !== undefined && (typeof body.description !== "string" || body.description.length > MAX_DESCRIPTION)) {
+    res.status(400).json({ success: false, error: `description must be a string up to ${MAX_DESCRIPTION} chars` });
+    return;
+  }
+
   try {
     const projectId = getProjectId(req);
     const now = new Date().toISOString();

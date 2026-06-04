@@ -68,6 +68,19 @@ teamsRouter.post("/:team/run", async (req: Request, res: Response) => {
     projectId?: string;
   };
 
+  // 28-H-text-field-length-cap: clamp the free-form `input` so a
+  // 5MB body limit can't be used to flood the LLM with a single
+  // token-burning request. The team workflow concatenates `input`
+  // verbatim into the producer prompt and dispatches it to every
+  // team member — a 5MB input means a 5MB × N-members LLM call.
+  // The cap matches the chat /messages and tickets title/description
+  // caps (50_000 chars ≈ a long user prompt, well under context).
+  const MAX_INPUT = 50_000;
+  if (input !== undefined && (typeof input !== "string" || input.length > MAX_INPUT)) {
+    res.status(400).json({ success: false, error: `input must be a string up to ${MAX_INPUT} chars` });
+    return;
+  }
+
   const effectiveSessionId = sessionId || newId("team");
   const teamMembers = team.teamMembers || [];
 

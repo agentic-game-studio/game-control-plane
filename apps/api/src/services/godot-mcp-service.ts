@@ -12,7 +12,8 @@
  *     → Response read from MCP server stdout
  */
 
-import { spawn, execFileSync, ChildProcess } from "node:child_process";
+import { spawn, execFileSync, ChildProcess, execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname as pathDirname, join, resolve } from "node:path";
@@ -22,6 +23,16 @@ import type { LLMTool } from "../llm/zai-client.js";
 import { logger } from "../utils/logger.js";
 import { loadConfig } from "../config.js";
 import { resolveHomeDir } from "../utils/paths.js";
+
+// 28-H-godot-mcp-async-exec: hoist a promisified execFile to module
+// scope. The 27th pass converted the same pattern in qa-gate-service
+// for runSmokePlaytestGate / runBootCheckGate / runGUTGate; this
+// file's `pgrep` / `tasklist` / `npm install` / `npm run build` calls
+// were missed. execFileSync blocks the event loop for the duration
+// of the subprocess — `npm install` is up to 2 minutes — and the
+// launch/setup route handlers are awaited directly, freezing every
+// WebSocket broadcast and SSE stream on the process.
+const execFileAsync = promisify(execFile);
 
 // Re-export tool type for consumers
 export type { LLMTool } from "../llm/zai-client.js";
@@ -329,7 +340,8 @@ export class GodotMCPService {
     }
 
     // Auto-setup: install dependencies and build if needed
-    const setupResult = setupGodotMCPServer();
+    // 28-H-godot-mcp-async-exec: setupGodotMCPServer is now async.
+    const setupResult = await setupGodotMCPServer();
     if (!setupResult.success) {
       throw new Error(`Failed to setup Godot MCP server: ${setupResult.error}`);
     }
@@ -1084,13 +1096,22 @@ export function isGodotMCPPluginInstalled(projectDir: string): boolean {
  *
  * @param projectDir - Absolute path to the Godot project directory
  */
-export function isGodotMCPPluginEnabled(projectDir: string): boolean {
+// 28-H-godot-mcp-async-read: converted from sync readFileSync to
+// async readFile. The function is called from launchGodotEditor
+// (every "Launch Godot" click) and previously blocked the event
+// loop for the duration of a stat + read. The signature change
+// forces the (one) call site to await.
+export async function isGodotMCPPluginEnabled(projectDir: string): Promise<boolean> {
   const projectGodotPath = join(projectDir, "project.godot");
   if (!existsSync(projectGodotPath)) return false;
 
-  const content = readFileSync(projectGodotPath, "utf-8");
-  // Check Godot 4 format ([editor_plugins] with plugin.cfg path)
-  return content.includes("res://addons/godot_mcp/plugin.cfg");
+  try {
+    const content = await fsp.readFile(projectGodotPath, "utf-8");
+    // Check Godot 4 format ([editor_plugins] with plugin.cfg path)
+    return content.includes("res://addons/godot_mcp/plugin.cfg");
+  } catch {
+    return false;
+  }
 }
 
 // ─── Godot Editor Launch ──────────────────────────────────────────────────
@@ -1105,7 +1126,7 @@ export async function launchGodotEditor(projectDir: string): Promise<{ success: 
   const platform = process.platform; // "darwin" | "linux" | "win32"
 
   // Ensure plugin is installed and enabled before launching
-  if (!isGodotMCPPluginInstalled(projectDir) || !isGodotMCPPluginEnabled(projectDir)) {
+  if (!isGodotMCPPluginInstalled(projectDir) || !(await isGodotMCPPluginEnabled(projectDir))) {
     const config = loadConfig();
     const installResult = await installGodotMCPPlugin(projectDir, config.WORKSPACE_DIR);
     if (!installResult.success) {
@@ -1113,20 +1134,24 @@ export async function launchGodotEditor(projectDir: string): Promise<{ success: 
     }
   }
 
-  // Check if Godot is already running
-  const isAlreadyRunning = (): number | null => {
+  // 28-H-godot-mcp-async-exec: converted from sync execFileSync
+  // (event-loop block during /proc scan) to async execFileAsync.
+  // The pgrep path on macOS/Linux can spike to 30-50ms on busy
+  // CI runners; the launchGodotEditor route awaits this directly.
+  const isAlreadyRunning = async (): Promise<number | null> => {
     try {
       if (platform === "win32") {
         // Windows: use tasklist
-        const output = execFileSync("tasklist", ["/FI", "IMAGENAME eq Godot.exe", "/NH"], { encoding: "utf-8", stdio: ["pipe", "pipe", "ignore"] });
-        const match = output.match(/Godot\.exe\s+(\d+)/);
+        const { stdout } = await execFileAsync("tasklist", ["/FI", "IMAGENAME eq Godot.exe", "/NH"], { encoding: "utf-8", timeout: 5_000 });
+        const match = stdout.match(/Godot\.exe\s+(\d+)/);
         if (match) return parseInt(match[1], 10);
       } else {
         // macOS / Linux: use pgrep. -x matches the exact process name
         // (not a substring), so a system process that happens to contain
         // "Godot" in its full command line doesn't get matched.
-        const output = execFileSync("pgrep", ["-xi", "Godot"], { encoding: "utf-8", stdio: ["pipe", "pipe", "ignore"] }).trim();
-        if (output) return parseInt(output.split("\n")[0], 10);
+        const { stdout } = await execFileAsync("pgrep", ["-xi", "Godot"], { encoding: "utf-8", timeout: 5_000 });
+        const trimmed = stdout.trim();
+        if (trimmed) return parseInt(trimmed.split("\n")[0], 10);
       }
     } catch {
       // Process not found — proceed to launch
@@ -1134,7 +1159,7 @@ export async function launchGodotEditor(projectDir: string): Promise<{ success: 
     return null;
   };
 
-  const existingPid = isAlreadyRunning();
+  const existingPid = await isAlreadyRunning();
   if (existingPid) {
     logger.info({ projectDir, existingPid, event: "godot_editor_already_running" }, "Godot editor already running, skipping launch");
     return { success: true, pid: existingPid };
@@ -1269,9 +1294,13 @@ export function isDependenciesInstalled(serverDir: string): boolean {
  *
  * @param onProgress - Optional callback to report progress
  */
-export function setupGodotMCPServer(
+// 28-H-godot-mcp-async-exec: signature now async to accommodate
+// the awaited execFileAsync calls in the body. The route handler
+// already awaits this (POST /api/dashboard/setup-server) so the
+// call-site change is zero-impact.
+export async function setupGodotMCPServer(
   onProgress?: (stage: string) => void
-): SetupServerResult {
+): Promise<SetupServerResult> {
   const result: SetupServerResult = {
     success: false,
     installed: false,
@@ -1296,13 +1325,16 @@ export function setupGodotMCPServer(
       onProgress?.("Installing npm dependencies...");
       logger.info({ serverDir, event: "godot_mcp_npm_install_started" }, "Installing npm dependencies");
       try {
-        // execFileSync passes argv as a vector — no shell interpolation.
-        // `execSync` would route through a shell, which is unnecessary
-        // here and is a (small) attack-surface for any environment that
-        // can write into serverDir.
-        execFileSync("npm", ["install"], {
+        // 28-H-godot-mcp-async-exec: execFileAsync instead of
+        // execFileSync. execFile passes argv as a vector — no shell
+        // interpolation (a `execSync` shell route would be a small
+        // attack surface for any env that can write into serverDir).
+        // Async because `npm install` blocks the event loop for up
+        // to 2 minutes; the route handler awaits this directly.
+        // (stdio: "pipe" is the default for promisified execFile;
+        // explicit stdio was rejected by the type signature.)
+        await execFileAsync("npm", ["install"], {
           cwd: serverDir,
-          stdio: "pipe",
           timeout: 120000, // 2 minute timeout
         });
         result.installed = true;
@@ -1321,9 +1353,9 @@ export function setupGodotMCPServer(
       onProgress?.("Building TypeScript...");
       logger.info({ serverDir, event: "godot_mcp_npm_build_started" }, "Building TypeScript");
       try {
-        execFileSync("npm", ["run", "build"], {
+        // 28-H-godot-mcp-async-exec: same as above for `npm run build`.
+        await execFileAsync("npm", ["run", "build"], {
           cwd: serverDir,
-          stdio: "pipe",
           timeout: 120000, // 2 minute timeout
         });
         result.built = true;

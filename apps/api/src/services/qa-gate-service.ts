@@ -284,35 +284,48 @@ export async function runQAGateChain(workspacePath: string, projectId?: string):
   };
 }
 
-export function saveTestEvidenceArtifact(
+// 28-H-qa-gate-async-version-helpers: three sync helpers converted
+// to async. The 27th pass fixed the gate chain's subprocess calls
+// (runBootCheckGate / runGUTGate / runSmokePlaytestGate) but left
+// the version / evidence helpers sync. saveTestEvidenceArtifact is
+// called from build-service at the end of every successful Godot
+// export, blocking the event loop on the writeFileSync; bumpProjectVersion
+// is called from POST /api/builds/bump-version directly. The async
+// signatures propagate to the two callers.
+export async function saveTestEvidenceArtifact(
   projectPath: string,
   ticketId: string,
   evidence: TicketTestEvidence,
-): string {
+): Promise<string> {
   const dir = join(projectPath, "production", "qa-evidence");
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  await fs.mkdir(dir, { recursive: true });
   const relPath = join("production", "qa-evidence", `${ticketId}.json`);
-  writeFileSync(join(projectPath, relPath), JSON.stringify(evidence, null, 2), "utf-8");
+  await fs.writeFile(join(projectPath, relPath), JSON.stringify(evidence, null, 2), "utf-8");
   return relPath;
 }
 
-export function readProjectVersion(projectPath: string): string {
+export async function readProjectVersion(projectPath: string): Promise<string> {
   const projectGodot = join(projectPath, "project.godot");
-  if (!existsSync(projectGodot)) return "0.1.0";
   try {
-    const content = readFileSync(projectGodot, "utf-8");
+    const content = await fs.readFile(projectGodot, "utf-8");
     const match = content.match(/config\/version="([^"]+)"/);
     return match?.[1] ?? "0.1.0";
   } catch {
+    // ENOENT (no project.godot) or permission denied — both fall back
+    // to a sensible default so the caller can proceed.
     return "0.1.0";
   }
 }
 
-export function bumpProjectVersion(projectPath: string, bump: "patch" | "minor" | "major" = "patch"): string {
+export async function bumpProjectVersion(projectPath: string, bump: "patch" | "minor" | "major" = "patch"): Promise<string> {
   const projectGodot = join(projectPath, "project.godot");
-  if (!existsSync(projectGodot)) return "0.1.0";
+  let content: string;
+  try {
+    content = await fs.readFile(projectGodot, "utf-8");
+  } catch {
+    return "0.1.0";
+  }
 
-  let content = readFileSync(projectGodot, "utf-8");
   const match = content.match(/config\/version="([^"]+)"/);
   const current = match?.[1] ?? "0.1.0";
   const parts = current.split(".").map((n) => parseInt(n, 10) || 0);
@@ -327,6 +340,6 @@ export function bumpProjectVersion(projectPath: string, bump: "patch" | "minor" 
   } else {
     content += `\nconfig/version="${next}"\n`;
   }
-  writeFileSync(projectGodot, content, "utf-8");
+  await fs.writeFile(projectGodot, content, "utf-8");
   return next;
 }

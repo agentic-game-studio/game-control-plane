@@ -1591,6 +1591,16 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
     return;
   }
 
+  // 28-H-text-field-length-cap: clamp `content` to keep one user
+  // message from blowing up the LLM context (and the session JSON
+  // file, and the WS broadcast). 50_000 chars is generous for any
+  // natural prompt and matches the teams/tickets caps.
+  const MAX_CONTENT = 50_000;
+  if (typeof body.content !== "string" || body.content.length > MAX_CONTENT) {
+    res.status(400).json({ success: false, error: `content must be a string up to ${MAX_CONTENT} chars` });
+    return;
+  }
+
   const session = chatStore.sessions[id];
   if (!session) {
     res.status(404).json({ success: false, error: "Session not found" });

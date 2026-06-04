@@ -19,7 +19,13 @@ const envSchema = z
     MAX_TOOL_CALLS: z.coerce.number().default(100),
     TOOL_CHECKPOINT_INTERVAL: z.coerce.number().default(30),
     CONTEXT_WINDOW_TOKENS: z.coerce.number().default(256_000),
-    API_TIMEOUT_MS: z.coerce.number().default(120_000),
+    // 28-H-config-timeout-positive: previous shape accepted 0 or
+    // any negative number. zai-client.ts calls
+    // `AbortSignal.timeout(perAttemptTimeoutMs)` which throws
+    // `TypeError: AbortSignal.timeout: argument 1 must be a
+    // positive integer` — every LLM request crashes with a stack
+    // trace and no call succeeds. Clamp to positive integers.
+    API_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
     BODY_LIMIT_MB: z.coerce.number().default(5),
     WORKFLOW_TTL_MS: z.coerce.number().default(24 * 60 * 60 * 1000),
     ASSET_WATCHER_LIMIT: z.coerce.number().default(32),

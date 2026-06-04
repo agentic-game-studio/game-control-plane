@@ -1208,7 +1208,10 @@ If the failure is an infinite loop or hang (timeout), suggest a workaround.`,
       qaEvidence = qaResult.evidence;
 
       const fullProjectPath = resolveProjectWorkspace(projectContext.workspacePath);
-      saveTestEvidenceArtifact(fullProjectPath, activeTicket.id, qaResult.evidence);
+      // 28-H-qa-gate-async-version-helpers: saveTestEvidenceArtifact
+      // is now async — await it so the evidence file is fully
+      // written before the surrounding state mutation reads it back.
+      await saveTestEvidenceArtifact(fullProjectPath, activeTicket.id, qaResult.evidence);
 
       await updateTicketsBoard(state.projectId, (board) => {
         for (const col of board.columns) {

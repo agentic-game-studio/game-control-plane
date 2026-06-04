@@ -5,7 +5,7 @@
 import { readTicketsBoard } from "./ticket-board.js";
 import { readProjectVersion } from "./qa-gate-service.js";
 import { resolveProjectWorkspace } from "../utils/workspace.js";
-import { existsSync, mkdirSync, writeFileSync } from "fs";
+import { mkdir, writeFile } from "fs/promises";
 import { join } from "path";
 
 // 27-L-changelog-cap-const: hoist the completed-tickets slice cap
@@ -18,7 +18,11 @@ const MAX_CHANGELOG_COMPLETED = 30;
 export async function generateProjectChangelog(projectId: string, workspacePath: string): Promise<string> {
   const board = await readTicketsBoard(projectId);
   const completed = board.columns.find((c) => c.id === "completed")?.tickets ?? [];
-  const version = readProjectVersion(resolveProjectWorkspace(workspacePath));
+  // 28-H-changelog-async-io: readProjectVersion is now async (28-H-qa-gate-async-version-helpers)
+  // and mkdir/writeFile were converted from sync. The whole function
+  // is now event-loop clean.
+  const projectPath = resolveProjectWorkspace(workspacePath);
+  const version = await readProjectVersion(projectPath);
   const date = new Date().toISOString().slice(0, 10);
 
   const lines = [
@@ -32,10 +36,10 @@ export async function generateProjectChangelog(projectId: string, workspacePath:
   ];
 
   const changelog = lines.join("\n");
-  const projectPath = resolveProjectWorkspace(workspacePath);
   const outDir = join(projectPath, "production");
-  if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true });
-  writeFileSync(join(outDir, "CHANGELOG.md"), changelog, "utf-8");
+  // mkdir with recursive: true is a no-op if the dir already exists.
+  await mkdir(outDir, { recursive: true });
+  await writeFile(join(outDir, "CHANGELOG.md"), changelog, "utf-8");
 
   return changelog;
 }

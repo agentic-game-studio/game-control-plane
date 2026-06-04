@@ -116,7 +116,11 @@ export async function executeGodotExport(
   const buildsDir = join(projectPath, "builds");
   if (!existsSync(buildsDir)) mkdirSync(buildsDir, { recursive: true });
 
-  const version = bumpVersion ? bumpProjectVersion(projectPath) : readProjectVersion(projectPath);
+  // 28-H-qa-gate-async-version-helpers: bumpProjectVersion and
+  // readProjectVersion are now async; await the conditional branch.
+  const version = bumpVersion
+    ? await bumpProjectVersion(projectPath)
+    : await readProjectVersion(projectPath);
   const artifactName = `${projectId}-${platform}-v${version}-${Date.now()}.pck`;
   const artifactAbs = join(buildsDir, artifactName);
 

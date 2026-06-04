@@ -220,7 +220,20 @@ export function useAutonomousLoop() {
       method: "POST",
       body: JSON.stringify({ sessionId, projectId }),
     });
-    if (!mountedRef.current) return result.sessionId;
+    // 28-H-autonomous-start-unmount: previous shape returned
+    // `result.sessionId` even on unmount, causing the caller
+    // (`AutonomousControlBar.handleStart` → `onLoopStarted?.(id)`
+    // → `selectSession(id)`) to think the start succeeded and
+    // run side effects (tab switch, history refresh) on an
+    // unmounted chat page. The fix: throw a clear cancellation
+    // sentinel so the caller can early-return without selecting
+    // a session. The `if (!mountedRef.current) return result.sessionId`
+    // was placed after the `await` so the unmount case was
+    // already established — the bug is that returning a value
+    // was indistinguishable from a real success.
+    if (!mountedRef.current) {
+      throw new Error("Autonomous start cancelled: component unmounted");
+    }
     const loopSessionId = result.sessionId;
     // Immediately poll to sync UI state with freshly started loop
     await pollStatus(loopSessionId);
