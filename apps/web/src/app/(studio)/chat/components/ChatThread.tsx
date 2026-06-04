@@ -580,16 +580,6 @@ const AgentMessage = memo(function AgentMessage({
             {!isProgress && (toolCalls?.length || msg.logs?.length) && (
               <ActivityLog toolCalls={toolCalls ?? []} logs={msg.logs} />
             )}
-
-            <div className="absolute -right-3 -top-3 opacity-0 group-hover:opacity-100 transition-opacity">
-              <button
-                className="w-8 h-8 border-2 border-black bg-black text-white hover:bg-[#0055FF] flex justify-center items-center retro-press"
-                title="Trace Thought Process"
-                aria-label="Trace thought process"
-              >
-                <span className="material-symbols-outlined text-sm" aria-hidden="true">search</span>
-              </button>
-            </div>
           </div>
         </div>
 

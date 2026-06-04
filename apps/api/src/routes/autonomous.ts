@@ -1020,13 +1020,27 @@ async function runIteration(state: LoopState, board: TicketsBoard, projectContex
       agentAbort.signal,
     );
 
-    const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(() => {
+    // 26-H-timeout-leak: previously the setTimeout that backs
+    // timeoutPromise was never cleared when agentPromise won
+    // the race. The timer kept the event loop alive for up to
+    // AGENT_TIMEOUT_MS (30s default) after a successful
+    // completion — invisible in production (other things keep
+    // the loop alive) but a 30-second tail on every fast
+    // agent completion during tests / graceful shutdown. Also
+    // harmless-but-noisy: the agentAbort.abort() inside the
+    // timer callback ran on an already-settled controller
+    // after a successful race. Wrap the timer in a handle and
+    // clear it on both the agent-wins and the timeout-wins
+    // paths. The 11th pass fixed the same pattern elsewhere;
+    // this is the second instance.
+    let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutHandle = setTimeout(() => {
         // Cancel the LLM call so it doesn't keep running in the background.
         agentAbort.abort();
         reject(new Error(`Agent timed out after ${AGENT_TIMEOUT_MS / 1000}s — godot-specialist likely hanging on a Godot MCP tool. The MCP per-tool timeout is 30s; if a tool hangs past that the MCP service kills it. Check that Godot editor is running with godot_mcp plugin and MCP port 6005 is reachable.`));
-      }, AGENT_TIMEOUT_MS)
-    );
+      }, AGENT_TIMEOUT_MS);
+    });
 
     agentRejected = false;
     try {
@@ -1034,6 +1048,13 @@ async function runIteration(state: LoopState, board: TicketsBoard, projectContex
     } catch (err: unknown) {
       agentRejected = true;
       agentError = err instanceof Error ? err.message : String(err);
+    } finally {
+      // Clear whichever side won. setTimeout's handle is
+      // always non-null after the timeoutPromise constructor
+      // returned; the null-check is defensive in case the
+      // race resolved synchronously before the timer was
+      // registered.
+      if (timeoutHandle !== null) clearTimeout(timeoutHandle);
     }
 
     if (!agentRejected) {
