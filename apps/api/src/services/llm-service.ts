@@ -9,11 +9,23 @@
 
 import fs from "node:fs/promises";
 import { realpathSync as realpathSyncCb, readFileSync as readFileSyncCb } from "node:fs";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { loadConfig, resolvePipelinePython, SUBPROCESS_MAX_BUFFER } from "../config.js";
+
+// 26-M-dynamic-imports: hoist `execFile` and `promisify` to module
+// scope. They are built-ins, so the static import has zero bundle
+// cost; the previous 6 `await import("node:child_process")` /
+// `await import("node:util")` sites paid a hot-path Promise
+// allocation on every tool call (Read, Bash, GenerateAsset) without
+// any benefit. Same fix landed in 25-M-dynamic-import-cleanup for
+// llm-service.ts:118 — that was a relative module, the built-ins
+// here are the more obvious case.
+const execFileAsync = promisify(execFile);
 
 // 10-C6: __dirname is undefined in ESM. The GodotCLI default-bin path
 // (below) used `path.resolve(__dirname, ...)` and threw ReferenceError
@@ -505,11 +517,6 @@ async function executeTool(
     ? resolveProjectWorkspace(projectContext.workspacePath)
     : loadConfig().WORKSPACE_DIR;
 
-  // Shared subprocess utility for all tool cases
-  const { execFile: execFileTool } = await import("node:child_process");
-  const { promisify: promisifyTool } = await import("node:util");
-  const execFileAsyncTool = promisifyTool(execFileTool);
-
   try {
     switch (name) {
       case "Read": {
@@ -703,10 +710,6 @@ async function executeTool(
         if (!/^[A-Za-z0-9._+-]+$/.test(argv[0])) {
           return `Error: command name contains invalid characters: ${argv[0]}`;
         }
-
-        const { execFile } = await import("node:child_process");
-        const { promisify: promisifyCb } = await import("node:util");
-        const execFileAsync = promisifyCb(execFile);
 
         try {
           const { stdout, stderr } = await execFileAsync(argv[0], argv.slice(1), {
@@ -919,10 +922,6 @@ async function executeTool(
 
         broadcastLogEntry(sessionId, "info", `[${agentRole}] Generating asset: ${assetName}`, agentRole);
 
-        const { execFile: execFileTool } = await import("node:child_process");
-        const { promisify: promisifyTool } = await import("node:util");
-        const execFileAsyncTool = promisifyTool(execFileTool);
-
         // Resolve Python binary with pipeline dependencies (Pillow, rembg, etc.)
         const PYTHON_BIN = resolvePipelinePython();
 
@@ -968,7 +967,7 @@ async function executeTool(
         }
 
         try {
-          const { stdout, stderr } = await execFileAsyncTool(PYTHON_BIN, genArgs, {
+          const { stdout, stderr } = await execFileAsync(PYTHON_BIN, genArgs, {
             cwd: scriptDir,
             timeout: 600_000,
             maxBuffer: SUBPROCESS_MAX_BUFFER,
@@ -1091,7 +1090,7 @@ async function executeTool(
         if (_namePrefix !== "tile") args.push("--name-prefix", _namePrefix);
 
         try {
-          const { stdout, stderr } = await execFileAsyncTool(pythonBin, args, {
+          const { stdout, stderr } = await execFileAsync(pythonBin, args, {
             cwd: scriptDir,
             timeout: 120_000,
             maxBuffer: SUBPROCESS_MAX_BUFFER,
@@ -1133,7 +1132,7 @@ async function executeTool(
         if (_pad) args.push("--pad", String(_pad));
 
         try {
-          const { stdout, stderr } = await execFileAsyncTool(pythonBin, args, {
+          const { stdout, stderr } = await execFileAsync(pythonBin, args, {
             cwd: scriptDir,
             timeout: 120_000,
             maxBuffer: SUBPROCESS_MAX_BUFFER,
@@ -1201,7 +1200,7 @@ async function executeTool(
         if (_duration !== undefined) args.push("--duration", String(_duration));
 
         try {
-          const { stdout, stderr } = await execFileAsyncTool(pythonBin, args, {
+          const { stdout, stderr } = await execFileAsync(pythonBin, args, {
             cwd: scriptDir,
             timeout: 60_000,
             maxBuffer: SUBPROCESS_MAX_BUFFER,
@@ -1460,7 +1459,7 @@ loop_offset=0
         if (validatedGodotBin) args.push("--godot-bin", validatedGodotBin);
 
         try {
-          const { stdout, stderr } = await execFileAsyncTool(pythonBin, args, {
+          const { stdout, stderr } = await execFileAsync(pythonBin, args, {
             cwd: scriptDir,
             timeout: 360_000, // 6 min for export
             maxBuffer: SUBPROCESS_MAX_BUFFER,
@@ -1582,7 +1581,7 @@ loop_offset=0
         args.push("--json");
 
         try {
-          const { stdout, stderr } = await execFileAsyncTool("node", [shipthisBin, ...args], {
+          const { stdout, stderr } = await execFileAsync("node", [shipthisBin, ...args], {
             cwd,
             timeout: 600_000,
             maxBuffer: SUBPROCESS_MAX_BUFFER,

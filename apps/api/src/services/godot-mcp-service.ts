@@ -242,6 +242,14 @@ export function getGodotMCPToolDefinitions(): LLMTool[] {
 // The shape is: projectId -> { tools, fetchedAt }. Stale entries
 // (older than TOOLS_CACHE_TTL_MS) are dropped on read.
 const TOOLS_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+// 26-M-tools-cache-cap: hard cap on cache size. TTL pruning runs
+// only on read, so a server that creates many projects over its
+// lifetime (e.g. a multi-tenant test rig that spins up 10k projects
+// in a few hours, each calling setCachedToolsForProject once) can
+// grow the map without bound between reads. Cap at 200 — well above
+// any realistic single-tenant project count, and low enough that the
+// map stays well under V8's Map performance cliff.
+const MAX_TOOLS_CACHE_ENTRIES = 200;
 const toolsCache = new Map<string, { tools: LLMTool[]; fetchedAt: number }>();
 
 export function getCachedToolsForProject(projectId: string): LLMTool[] | null {
@@ -256,6 +264,19 @@ export function getCachedToolsForProject(projectId: string): LLMTool[] | null {
 
 export function setCachedToolsForProject(projectId: string, tools: LLMTool[]): void {
   toolsCache.set(projectId, { tools, fetchedAt: Date.now() });
+  // Cap enforcement: drop oldest entries (Map preserves insertion
+  // order) until we're under the limit. Avoids an O(n) pass on
+  // every call by checking the size once and short-circuiting on
+  // the common case where the cap isn't hit.
+  if (toolsCache.size > MAX_TOOLS_CACHE_ENTRIES) {
+    const toDrop = toolsCache.size - MAX_TOOLS_CACHE_ENTRIES;
+    let dropped = 0;
+    for (const key of toolsCache.keys()) {
+      if (dropped >= toDrop) break;
+      toolsCache.delete(key);
+      dropped++;
+    }
+  }
 }
 
 export function clearCachedToolsForProject(projectId: string): void {

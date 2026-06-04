@@ -10,7 +10,14 @@ export const codeReviewerAgents: Partial<Record<AgentRole, AgentDefinition>> = {
     description: "Reviews code changes and provides critical feedback for improvement.",
     tier: 3,
     model: "sonnet",
-    tools: ["Read", "Write", "Glob", "Grep"],
+    // 26-M-code-reviewer-write: drop "Write" from the tool list.
+    // CLAUDE.md describes the code-reviewer as "read-only context,
+    // no direct changes" — the previous list was a contradiction
+    // that let the reviewer overwrite files it was supposed to be
+    // reviewing. Code-reviewer returns a textual critique that the
+    // calling agent (gameplay-programmer, engine-programmer, etc.)
+    // applies; the reviewer itself never edits.
+    tools: ["Read", "Glob", "Grep"],
     maxTurns: 15,
     skills: [],
     memory: "session",

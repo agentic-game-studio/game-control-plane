@@ -11,12 +11,31 @@ export const gatesRouter: Router = Router();
 // accumulate forever for sessions that finish all their gates and never
 // come back. A verdict older than the TTL is considered stale.
 const GATE_VERDICT_TTL_MS = 24 * 60 * 60 * 1000; // 24h
+// 26-M-gate-verdicts-cap: hard cap on map size. The TTL prune runs
+// only at verdict-write time, so a long-running API with N active
+// sessions and 18 gates each can grow the map to N*18 entries
+// (e.g. 10k sessions = 180k entries) before the next prune. With
+// Map iteration order = insertion order, the cap drops the oldest
+// entries first, which is the same intent as the TTL sweep.
+const MAX_GATE_VERDICTS = 5000;
 const gateVerdicts: Map<string, { verdict: string; details: string; timestamp: string }> = new Map();
 
 function pruneGateVerdicts(): void {
   const cutoff = Date.now() - GATE_VERDICT_TTL_MS;
   for (const [key, v] of gateVerdicts) {
     if (Date.parse(v.timestamp) < cutoff) gateVerdicts.delete(key);
+  }
+  // Cap enforcement: drop oldest entries (Map preserves insertion
+  // order) until we're under the limit. Runs after the TTL sweep so
+  // we don't evict fresh entries to make room for even fresher ones.
+  if (gateVerdicts.size > MAX_GATE_VERDICTS) {
+    const toDrop = gateVerdicts.size - MAX_GATE_VERDICTS;
+    let dropped = 0;
+    for (const key of gateVerdicts.keys()) {
+      if (dropped >= toDrop) break;
+      gateVerdicts.delete(key);
+      dropped++;
+    }
   }
 }
 

@@ -228,7 +228,13 @@ export default function CommandInput({ onSend, isLoading, queueCount = 0, status
         {pendingImages.length > 0 && (
           <div className="flex gap-2 flex-wrap">
             {pendingImages.map((img, i) => (
-              <div key={i} className="relative group border-2 border-black shadow-[2px_2px_0_0_rgba(0,0,0,1)]">
+              // 26-M-pending-image-keys: key off the previewUrl
+              // instead of the array index. Removing a non-first
+              // image reuses the prior element's DOM, which holds a
+              // reference to the now-revoked ObjectURL and renders
+              // a stale thumbnail. Same pattern fix as ImageGallery
+              // in ChatThread.tsx.
+              <div key={img.previewUrl} className="relative group border-2 border-black shadow-[2px_2px_0_0_rgba(0,0,0,1)]">
                 <img src={img.previewUrl} alt={`Pasted ${i + 1}`} className="h-16 w-auto object-cover" />
                 <button
                   onClick={() => removeImage(i)}

@@ -20,6 +20,7 @@ import { readData } from "./data-store.js";
 import { DEFAULT_TICKETS_BOARD, readTicketsBoard, resolveProjectIdForSession, updateTicketsBoard } from "./ticket-board.js";
 import { logger } from "../utils/logger.js";
 import { loadConfig } from "../config.js";
+import { newId } from "../utils/ids.js";
 import type { TicketsBoard, Ticket, TicketStatus, AgentRole, WSEvent, WorkflowStage, DashboardData } from "@game-studio/types";
 import { ingestProducerSummaryFromSession, safeIngestProducerSummaryFact } from "./producer-summary.js";
 import { triggerVerification } from "./verification-service.js";
@@ -111,15 +112,13 @@ export function startWorkflow(sessionId: string): string {
     return existing.workflowId;
   }
 
-  // 10-L2: include 6 random hex chars on the workflow id. Two
-  // concurrent startWorkflow calls in the same millisecond (parallel
-  // `/api/teams` requests, a race after the previous workflow's
-  // session was deleted and recreated) previously produced identical
-  // `wf-1700000000000` ids, which then collided on the activeWorkflows
-  // map's set+get path and on any frontend state keyed by workflowId.
-  // Date.now() is still useful for chronological sort; the random
-  // suffix is the collision resistance.
-  const workflowId = `wf-${Date.now()}-${randomBytes(3).toString("hex")}`;
+  // 26-M-workflow-id-newid: route through newId() for 128 bits of
+  // UUID entropy. The previous ad-hoc `wf-${Date.now()}-${randomBytes(3)}`
+  // had 24 bits of randomness on top of ms-resolution Date.now() — a
+  // parallel /api/teams burst or a session-recreated-after-delete
+  // race still hit collisions. Also lets us drop the now-unused
+  // `randomBytes` import.
+  const workflowId = newId("wf");
   const startedAt = Date.now();
   activeWorkflows.set(sessionId, {
     workflowId,

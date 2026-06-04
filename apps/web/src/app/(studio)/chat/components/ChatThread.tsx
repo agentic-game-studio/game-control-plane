@@ -246,7 +246,15 @@ const ImageGallery = memo(function ImageGallery({ images }: { images?: string[] 
   return (
       <div className="flex flex-col gap-2 mt-3 max-w-full min-w-0">
         {safe.map((src, i) => (
-          <div key={i} className="border-2 border-black shadow-[2px_2px_0_0_rgba(0,0,0,1)] overflow-hidden max-w-full">
+          // 26-M-image-gallery-keys: key off the image src (truncated
+          // so React's reconciler doesn't carry megabytes of base64
+          // into every key) instead of the array index. With index
+          // keys, removing the first image reuses the second image's
+          // DOM (wrong src on a cached element) and React's
+          // `loading="lazy"` would short-circuit the load. The src
+          // is stable across re-renders unless the image itself
+          // changes, which is exactly the property a key needs.
+          <div key={src.slice(-64)} className="border-2 border-black shadow-[2px_2px_0_0_rgba(0,0,0,1)] overflow-hidden max-w-full">
           <img src={src} alt={`Attachment ${i + 1}`} className="max-w-full max-h-64 object-contain" loading="lazy" />
         </div>
       ))}
