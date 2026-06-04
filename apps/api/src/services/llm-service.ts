@@ -8,7 +8,7 @@
  */
 
 import fs from "node:fs/promises";
-import { realpathSync as realpathSyncCb, readFileSync as readFileSyncCb } from "node:fs";
+import { readFileSync as readFileSyncCb } from "node:fs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
@@ -386,7 +386,7 @@ function getHomePrefixRegex(): RegExp | null {
 const pendingConsultations = new Set<string>();
 
 /** Validate that a resolved path stays within the workspace boundary */
-function safePath(inputPath: string, baseDir: string): string {
+async function safePath(inputPath: string, baseDir: string): Promise<string> {
   const workspaceDir = loadConfig().WORKSPACE_DIR;
   const resolvedWorkspaceDir = path.resolve(workspaceDir);
   const base = path.resolve(baseDir);
@@ -441,13 +441,23 @@ function safePath(inputPath: string, baseDir: string): string {
   const normalizedResolved = path.resolve(workingPath);
 
   // Resolve symlinks to prevent symlink-based path traversal
+  // 32-H-safePath-async: was realpathSyncCb (sync realpath) inside
+  // an async function. Every LLM tool call (Read, Write, Edit,
+  // Glob, Grep, RunGodotHeadless) hits safePath, so a sync
+  // realpath on each invocation blocked the event loop on a
+  // cold cache (typically 50-200µs on macOS for a single stat,
+  // can spike to 5-15ms on path-cache-miss during a burst of
+  // parallel LLM agent spawns). The async variant yields back
+  // to the loop and lets concurrent WS broadcasts and HTTP
+  // requests make progress. Both the primary realpath and the
+  // parent-dir fallback need to be awaited independently.
   let finalResolved: string;
   try {
-    finalResolved = realpathSyncCb(normalizedResolved);
+    finalResolved = await fs.realpath(normalizedResolved);
   } catch {
     // File doesn't exist yet (Write tool) — check parent dir instead
     try {
-      const parentReal = realpathSyncCb(path.dirname(normalizedResolved));
+      const parentReal = await fs.realpath(path.dirname(normalizedResolved));
       finalResolved = path.join(parentReal, path.basename(normalizedResolved));
     } catch {
       // Parent doesn't exist either — fall back to non-resolved path
@@ -530,7 +540,7 @@ async function executeTool(
       case "Read": {
         const rawPath = input.file_path as string;
         if (!rawPath) return "Error: file_path is required";
-        const filePath = safePath(rawPath, workspaceDir);
+        const filePath = await safePath(rawPath, workspaceDir);
         // Q5: Reject files larger than 1MB. The cap is matched by
         // the LLM's context budget (a single tool result > 1MB is
         // almost always a binary or log file the LLM can't reason
@@ -556,7 +566,7 @@ async function executeTool(
         const rawPath = input.file_path as string;
         const content = input.content as string;
         if (!rawPath || content === undefined) return "Error: file_path and content are required";
-        const filePath = safePath(rawPath, workspaceDir);
+        const filePath = await safePath(rawPath, workspaceDir);
         // 12-H19: mark this as a self-write before fs.writeFile so
         // the document-store watcher's debounced callback can skip
         // re-broadcasting a change we just made. Without this, every
@@ -584,7 +594,7 @@ async function executeTool(
         if (!rawPath || !oldString || newString === undefined) {
           return "Error: file_path, old_string, and new_string are required";
         }
-        const filePath = safePath(rawPath, workspaceDir);
+        const filePath = await safePath(rawPath, workspaceDir);
         const fileContent = await fs.readFile(filePath, "utf-8");
         if (!fileContent.includes(oldString)) {
           return `Error: old_string not found in file. File content preview:\n${fileContent.slice(0, 500)}`;
@@ -604,7 +614,7 @@ async function executeTool(
       case "Glob": {
         const pattern = input.pattern as string;
         const rawSearchPath = (input.path as string) ?? workspaceDir;
-        const searchPath = safePath(rawSearchPath, workspaceDir);
+        const searchPath = await safePath(rawSearchPath, workspaceDir);
         if (!pattern) return "Error: pattern is required";
         // Block path traversal via glob pattern segments
         if (pattern.split("/").some((seg) => seg === "..")) {
@@ -623,7 +633,7 @@ async function executeTool(
       case "Grep": {
         const pattern = input.pattern as string;
         const rawSearchPath = (input.path as string) ?? workspaceDir;
-        const searchPath = safePath(rawSearchPath, workspaceDir);
+        const searchPath = await safePath(rawSearchPath, workspaceDir);
         const globFilter = input.glob as string | undefined;
         const context = (input.context as number) ?? 0;
         if (!pattern) return "Error: pattern is required";
@@ -1423,7 +1433,7 @@ loop_offset=0
         }
 
         // Resolve project path through safePath to validate and normalize
-        const project = safePath(rawProject, workspaceDir);
+        const project = await safePath(rawProject, workspaceDir);
 
         // Validate optional paths through safePath. The script argument
         // is additionally constrained to a `.gd` extension and a `scripts/`
@@ -1434,7 +1444,7 @@ loop_offset=0
         // is a separate, cheap belt to that suspenders.
         let validatedScript: string | undefined;
         if (script) {
-          const resolved = safePath(script, workspaceDir);
+          const resolved = await safePath(script, workspaceDir);
           if (!resolved.toLowerCase().endsWith(".gd")) {
             return `Error: script must have a .gd extension (got: ${resolved})`;
           }
@@ -1446,7 +1456,7 @@ loop_offset=0
           }
           validatedScript = resolved;
         }
-        const validatedOutput = output ? safePath(output, workspaceDir) : undefined;
+        const validatedOutput = output ? await safePath(output, workspaceDir) : undefined;
 
         // Validate godotBin against known safe paths. The static list
         // is hoisted to module scope (10-M5) — only the env-supplied
