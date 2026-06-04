@@ -1,5 +1,5 @@
 "use client";
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import type {
   DocumentEntry,
   DocumentDetail,
@@ -22,6 +22,23 @@ interface UseDocumentsReturn {
   error: string | null;
 }
 
+// 27-L-useDocuments-err-msg: centralized error-message extractor.
+// The previous shape was `setError(String(err))` at 3 sites; a
+// rejected Promise of a plain object (`throw {foo: 1}`) would land
+// in `setError` as the string "[object Object]". Extract the same
+// `err instanceof Error ? err.message : String(err)` pattern used
+// in useDashboard.ts:37 and useTickets.ts:45 — keep it in one
+// place so the convention is the same across all hooks.
+function extractErrorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "string") return err;
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
+  }
+}
+
 export function useDocuments(projectId?: string): UseDocumentsReturn {
   const [documents, setDocuments] = useState<DocumentEntry[]>([]);
   const [categories, setCategories] = useState<CategoryMeta[]>([]);
@@ -41,7 +58,7 @@ export function useDocuments(projectId?: string): UseDocumentsReturn {
       setError(null);
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
-      setError(String(err));
+      setError(extractErrorMessage(err));
     }
   }, [qs]);
 
@@ -87,13 +104,24 @@ export function useDocuments(projectId?: string): UseDocumentsReturn {
       setSelectedDocument(data.document);
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
-      setError(String(err));
+      setError(extractErrorMessage(err));
     }
   }, [qs]);
 
   // Force refresh
+  // 27-L-useDocuments-refresh-abort: hold the in-flight controller
+  // in a ref so a subsequent refresh call aborts the previous one.
+  // The previous shape created a fresh `new AbortController()` per
+  // call and never aborted the previous — a user spamming the
+  // "Force refresh" button could have N parallel in-flight requests
+  // racing to setDocuments / setGraphData. Last-write-wins, so
+  // visible state was usually correct, but the network and CPU
+  // waste on the losers is real, and a slow earlier response could
+  // overwrite a faster later one with stale data.
+  const refreshAbortRef = useAbortableRefresh();
   const refresh = useCallback(async () => {
     const controller = new AbortController();
+    refreshAbortRef.beginRefresh(controller);
     try {
       await apiFetch<void>(`/api/documents/refresh${qs}`, { method: "POST", signal: controller.signal });
       await Promise.all([fetchDocuments(controller.signal), fetchGraph(controller.signal)]);
@@ -103,9 +131,9 @@ export function useDocuments(projectId?: string): UseDocumentsReturn {
       }
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
-      setError(String(err));
+      setError(extractErrorMessage(err));
     }
-  }, [fetchDocuments, fetchGraph, selectedId, qs]);
+  }, [fetchDocuments, fetchGraph, selectedId, qs, refreshAbortRef]);
 
   return {
     documents,
@@ -117,5 +145,22 @@ export function useDocuments(projectId?: string): UseDocumentsReturn {
     refresh,
     loading,
     error,
+  };
+}
+
+// 27-L-useDocuments-refresh-abort: ref-based abort for the
+// refresh() function. A useRef-only variant is too small to deserve
+// its own hook file, so it's inlined here. beginRefresh() aborts
+// the previous controller (if any) and stores the new one. The
+// effect's cleanup on unmount also aborts the in-flight one, so
+// leaving the page mid-refresh doesn't leave a fetch in flight.
+function useAbortableRefresh() {
+  const ref = useRef<AbortController | null>(null);
+  useEffect(() => () => ref.current?.abort(), []);
+  return {
+    beginRefresh(next: AbortController) {
+      ref.current?.abort();
+      ref.current = next;
+    },
   };
 }

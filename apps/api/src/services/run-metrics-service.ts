@@ -7,6 +7,14 @@ import type { AutonomousRunMetrics, RunMetricsData, WSEvent } from "@game-studio
 
 const DEFAULT: RunMetricsData = { runs: [] };
 
+// 27-L-run-metrics-cap-const: hoist the runs slice cap to a named
+// constant. The pattern was applied to gateVerdicts, toolsCache,
+// lastGatedByProject, ticketProjectCache, usageLog, and
+// changelog in earlier passes. A magic 100 inline would force any
+// future bump to be done in two places if the cap is used in both
+// write and read paths.
+const MAX_RUN_METRICS_ENTRIES = 100;
+
 async function readMetricsData(): Promise<RunMetricsData> {
   try {
     return await readData<RunMetricsData>("run-metrics.json");
@@ -77,7 +85,7 @@ export async function upsertRunMetrics(partial: Partial<AutonomousRunMetrics> & 
       existing.estimatedTokens = (existing.estimatedTokens ?? 0) + addTokens;
     }
     Object.assign(existing, assignable, { lastUpdatedAt: now });
-    data.runs = data.runs.slice(0, 100);
+    data.runs = data.runs.slice(0, MAX_RUN_METRICS_ENTRIES);
     return data;
   });
   const updated: AutonomousRunMetrics =

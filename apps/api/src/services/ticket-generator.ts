@@ -891,9 +891,20 @@ function ticketExistsByTitle(board: TicketsBoard, title: string): boolean {
 }
 
 function ticketExistsById(board: TicketsBoard, id: string): boolean {
+  // 27-L-ticket-gen-typed-template-id: the previous shape did
+  // `(t as unknown as Record<string, unknown>).templateId` because
+  // templateId is an extension field (the return type of
+  // generateTickets is `Ticket & { templateId?: string }`).
+  // Iterating the raw `Ticket[]` type strips the extension, so the
+  // cast was a way to get back to the field. The narrower fix:
+  // type the iteration variable as the intersection, which is
+  // safe (Ticket & { templateId?: string } is a supertype of
+  // Ticket) and removes the double-cast. A ticket without a
+  // templateId — i.e. one created outside the generator — just
+  // reads undefined and falls through.
   for (const col of board.columns) {
-    for (const t of col.tickets) {
-      if ((t as unknown as Record<string, unknown>).templateId === id) return true;
+    for (const t of col.tickets as Array<Ticket & { templateId?: string }>) {
+      if (t.templateId === id) return true;
     }
   }
   return false;

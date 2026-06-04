@@ -128,7 +128,29 @@ function runRegressionCheckUnlocked(
 
   let baseline: RegressionBaseline;
   try {
-    baseline = JSON.parse(readFileSync(path, "utf-8")) as RegressionBaseline;
+    const raw = JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>;
+    // 27-L-regression-baseline-validate: the previous `as RegressionBaseline`
+    // cast trusted JSON.parse to return a fully-shaped object. A
+    // hand-edited or partially-written baseline (truncated write,
+    // version-skew) would silently propagate undefined fields,
+    // and the fingerprint comparison at L137 would still match
+    // because the field would be the string "undefined" or just
+    // fall through. Validate the four load-bearing fields exist
+    // and have the right type; if not, treat the file as corrupt
+    // and re-seed it. The fingerprint field is what gates the
+    // pass/fail return value, so a non-string there is the
+    // critical one to check.
+    if (
+      typeof raw.projectId !== "string" ||
+      typeof raw.fingerprint !== "string" ||
+      typeof raw.bootOk !== "boolean" ||
+      typeof raw.gutSummary !== "string" ||
+      typeof raw.smokeSummary !== "string"
+    ) {
+      writeFileSync(path, JSON.stringify(current, null, 2), "utf-8");
+      return { passed: true, isBaseline: true, baseline: current };
+    }
+    baseline = raw as unknown as RegressionBaseline;
   } catch {
     writeFileSync(path, JSON.stringify(current, null, 2), "utf-8");
     return { passed: true, isBaseline: true, baseline: current };

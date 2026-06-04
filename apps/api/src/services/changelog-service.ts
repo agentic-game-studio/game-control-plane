@@ -8,6 +8,13 @@ import { resolveProjectWorkspace } from "../utils/workspace.js";
 import { existsSync, mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
 
+// 27-L-changelog-cap-const: hoist the completed-tickets slice cap
+// to a named constant. The same pattern was applied to gateVerdicts,
+// toolsCache, lastGatedByProject, ticketProjectCache, and usageLog
+// in earlier passes — a magic 30 inline forced any future bump to
+// happen in two places. Exposed for tests to assert the cap.
+const MAX_CHANGELOG_COMPLETED = 30;
+
 export async function generateProjectChangelog(projectId: string, workspacePath: string): Promise<string> {
   const board = await readTicketsBoard(projectId);
   const completed = board.columns.find((c) => c.id === "completed")?.tickets ?? [];
@@ -20,7 +27,7 @@ export async function generateProjectChangelog(projectId: string, workspacePath:
     `## v${version} (${date})`,
     ``,
     `### Completed`,
-    ...completed.slice(-30).map((t) => `- ${t.title} (${t.area})`),
+    ...completed.slice(-MAX_CHANGELOG_COMPLETED).map((t) => `- ${t.title} (${t.area})`),
     ``,
   ];
 
