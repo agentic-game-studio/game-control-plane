@@ -6,6 +6,7 @@
 import { createHash } from "node:crypto";
 import type { ProducerSummaryFact, ProducerSummarySnapshot } from "@game-studio/types";
 import { logger } from "../utils/logger.js";
+import { newId } from "../utils/ids.js";
 
 export const MAX_RECENT_FACTS = 30;
 export const EMIT_COOLDOWN_MS = 45_000;
@@ -274,7 +275,12 @@ async function flushEmitProducerUpdate(projectId: string): Promise<void> {
   // landing in the same millisecond would produce identical ids, and
   // the frontend dedupes on `msg.id` so the second emit would be
   // silently dropped.
-  const { newId } = await import("../utils/ids.js");
+  // 25-M-dynamic-import-cleanup: `newId` is now statically imported
+  // at the top of this file. The previous dynamic import was a
+  // leftover — ids.js is a leaf utility with no circular-dep
+  // concern, and the dynamic import was being paid on every
+  // emit (~once per cooldown interval during long producer
+  // sessions).
   await mod.appendMessage(session.id, {
     id: newId("msg"),
     type: "producer_update",

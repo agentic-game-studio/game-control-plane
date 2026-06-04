@@ -13,7 +13,7 @@ import type {
 } from "@game-studio/types";
 import type { WSEvent } from "@game-studio/types";
 import { orphanProjectSessions, cancelSessionsForProject } from "./chat.js";
-import { removeGodotMCPService, installGodotMCPPlugin, isGodotMCPPluginInstalled, isGodotMCPPluginEnabled, launchGodotEditor } from "../services/godot-mcp-service.js";
+import { removeGodotMCPService, installGodotMCPPlugin, isGodotMCPPluginInstalled, isGodotMCPPluginEnabled, launchGodotEditor, findServerDir, isServerBuilt, isDependenciesInstalled, setupGodotMCPServer, getGodotMCPService } from "../services/godot-mcp-service.js";
 import { dropProjectStore } from "./documents.js";
 import { unwatchProjectAssets } from "./assets.js";
 import { detectEngineFromWorkspace } from "../services/llm-service.js";
@@ -852,7 +852,12 @@ dashboardRouter.get("/projects/:id/plugin-status", async (req: Request, res: Res
 // GET /api/dashboard/server-status - Check Godot MCP server status
 dashboardRouter.get("/server-status", async (_req: Request, res: Response) => {
   try {
-    const { findServerDir, isServerBuilt, isDependenciesInstalled } = await import("../services/godot-mcp-service.js");
+    // 25-M-dynamic-import-cleanup: all three symbols are now
+    // statically imported at the top of this file. The previous
+    // dynamic import was paid on every /server-status hit
+    // (UI polls this every 10s on the dashboard). The module
+    // is already loaded for the rest of the route, so the
+    // dynamic path was pure overhead.
     const serverDir = findServerDir();
     if (!serverDir) {
       res.json({
@@ -888,7 +893,8 @@ dashboardRouter.get("/server-status", async (_req: Request, res: Response) => {
 // POST /api/dashboard/setup-server - Setup Godot MCP server (install + build)
 dashboardRouter.post("/setup-server", async (_req: Request, res: Response) => {
   try {
-    const { setupGodotMCPServer } = await import("../services/godot-mcp-service.js");
+    // 25-M-dynamic-import-cleanup: setupGodotMCPServer is now
+    // statically imported at the top of this file.
     const result = setupGodotMCPServer();
 
     if (result.success) {
@@ -929,7 +935,8 @@ dashboardRouter.get("/projects/:id/mcp-health", async (req: Request, res: Respon
       return;
     }
 
-    const { getGodotMCPService } = await import("../services/godot-mcp-service.js");
+    // 25-M-dynamic-import-cleanup: getGodotMCPService is now
+    // statically imported at the top of this file.
     const godotService = getGodotMCPService(String(id));
 
     if (!godotService?.running()) {

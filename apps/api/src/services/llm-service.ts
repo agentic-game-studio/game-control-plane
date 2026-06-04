@@ -115,7 +115,10 @@ export interface ProjectContext {
 
 /** Detect engine from workspace files */
 export async function detectEngineFromWorkspace(workspacePath: string): Promise<string | null> {
-  const { resolveProjectWorkspace } = await import("../utils/workspace.js");
+  // 25-M-dynamic-import-cleanup: `resolveProjectWorkspace` is
+  // already statically imported at the top of this file (line
+  // 69). The previous dynamic import was a leftover that paid a
+  // module-load round-trip on every call. Use the static binding.
   const fullPath = resolveProjectWorkspace(workspacePath);
 
   // Check for Godot (project.godot file)

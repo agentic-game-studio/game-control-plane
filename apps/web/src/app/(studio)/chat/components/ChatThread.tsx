@@ -102,6 +102,16 @@ type LogEntry =
 const ActivityLog = memo(function ActivityLog({ toolCalls, logs, defaultExpanded = false }: ActivityLogProps) {
   const [expanded, setExpanded] = useState(defaultExpanded);
 
+  // 25-M-key-stability: previously the entries were keyed by
+  // array index alone. When a new tool call was prepended (the
+  // common case — newest first) and a log was trimmed from the
+  // tail, every surviving entry's index shifted, so React reused
+  // the old DOM node for a new content slot and the text inside
+  // flickered / showed the wrong state during the in-place
+  // reconcile. Pair the index with a content-derived suffix so
+  // each entry has a stable id across reorders; React now mounts
+  // a new node for genuinely new entries and reuses the old
+  // node only when the content is the same.
   const entries: LogEntry[] = useMemo(() => {
     const combined: LogEntry[] = [
       ...toolCalls.map((tc) => ({ kind: "tool" as const, ...tc })),
@@ -109,6 +119,11 @@ const ActivityLog = memo(function ActivityLog({ toolCalls, logs, defaultExpanded
     ];
     return combined.reverse();
   }, [toolCalls, logs]);
+
+  const entryKey = (entry: LogEntry, i: number): string =>
+    entry.kind === "tool"
+      ? `tool-${i}-${entry.name}-${entry.status}`
+      : `log-${i}-${entry.text.slice(0, 32)}`;
 
   const totalCount = toolCalls.length + (logs?.length ?? 0);
   const previewEntries = entries.slice(0, 3);
@@ -141,7 +156,7 @@ const ActivityLog = memo(function ActivityLog({ toolCalls, logs, defaultExpanded
       {!expanded && previewEntries.length > 0 && (
         <div id="activity-log-panel" className="divide-y divide-[#e1e1ef]">
           {previewEntries.map((entry, i) => (
-            <div key={i} className="flex items-center gap-2 px-3 py-1.5 min-w-0">
+            <div key={entryKey(entry, i)} className="flex items-center gap-2 px-3 py-1.5 min-w-0">
               {entry.kind === "tool" ? (
                 <>
                   <span
@@ -175,7 +190,7 @@ const ActivityLog = memo(function ActivityLog({ toolCalls, logs, defaultExpanded
         <div id="activity-log-panel" className="divide-y divide-[#e1e1ef]">
           {entries.map((entry, i) =>
             entry.kind === "tool" ? (
-              <div key={i} className="flex items-center gap-2 px-3 py-1.5 min-w-0">
+              <div key={entryKey(entry, i)} className="flex items-center gap-2 px-3 py-1.5 min-w-0">
                 <span
                   className="material-symbols-outlined text-sm shrink-0"
                   style={{ color: getToolColor(entry.name) }}
@@ -193,7 +208,7 @@ const ActivityLog = memo(function ActivityLog({ toolCalls, logs, defaultExpanded
                 </span>
               </div>
             ) : (
-              <div key={i} className="flex items-center gap-2 px-3 py-1.5 min-w-0">
+              <div key={entryKey(entry, i)} className="flex items-center gap-2 px-3 py-1.5 min-w-0">
                 <span className="material-symbols-outlined text-sm shrink-0 text-[#a0a0b0]">notes</span>
                 <span className="font-[var(--font-terminal)] text-xs text-[#737688] flex-1 min-w-0 truncate">
                   {entry.text}
