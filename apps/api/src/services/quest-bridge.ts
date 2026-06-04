@@ -467,6 +467,19 @@ export async function createFixTicket(
 // (legacy board + every per-project board), so caching the result for
 // a few seconds collapses the read storm on the hot moveQuestTicket path.
 const TICKET_PROJECT_CACHE_TTL_MS = 30_000;
+// 27-H-ticket-project-cache-cap: hard cap on the cache size. The
+// TTL reaps entries lazily on read, so a long-running API that
+// creates many tickets (one entry per ticketId) grows the map to
+// N=tickets-lifetime even after individual entries expire — the
+// entries are reaped only when a later call *for the same
+// ticketId* sees the expired entry. With the autonomous loop
+// creating dozens of tickets per sprint and the typical project
+// running 10+ sprints, the cache can hold tens of thousands of
+// entries between "touched" events. Cap at 5000 — well above any
+// realistic working set (recent tickets on hot moveQuestTicket
+// calls) and low enough that the map stays well under V8's Map
+// performance cliff.
+const MAX_TICKET_PROJECT_CACHE = 5000;
 const ticketProjectCache = new Map<string, { value: string | null; expiresAt: number }>();
 
 /**
@@ -497,6 +510,7 @@ async function resolveProjectIdForTicket(ticketId: string): Promise<string | nul
   if (legacyFound) {
     const value = legacyFound.ticket.projectId ?? null;
     ticketProjectCache.set(ticketId, { value, expiresAt: now + TICKET_PROJECT_CACHE_TTL_MS });
+    capTicketProjectCache();
     return value;
   }
 
@@ -504,6 +518,7 @@ async function resolveProjectIdForTicket(ticketId: string): Promise<string | nul
     const dashboard = await readData<DashboardData>("dashboard.json");
     if (!dashboard.projects.length) {
       ticketProjectCache.set(ticketId, { value: null, expiresAt: now + TICKET_PROJECT_CACHE_TTL_MS });
+      capTicketProjectCache();
       return null;
     }
     // C8: scan all per-project boards in parallel instead of one-at-a-time
@@ -514,6 +529,7 @@ async function resolveProjectIdForTicket(ticketId: string): Promise<string | nul
     for (const { projectId, board } of boards) {
       if (findTicketInBoard(board, ticketId)) {
         ticketProjectCache.set(ticketId, { value: projectId, expiresAt: now + TICKET_PROJECT_CACHE_TTL_MS });
+        capTicketProjectCache();
         return projectId;
       }
     }
@@ -522,5 +538,22 @@ async function resolveProjectIdForTicket(ticketId: string): Promise<string | nul
   }
 
   ticketProjectCache.set(ticketId, { value: null, expiresAt: now + TICKET_PROJECT_CACHE_TTL_MS });
+  capTicketProjectCache();
   return null;
+}
+
+// 27-H-ticket-project-cache-cap: drop oldest entries
+// (insertion-order) whenever the cache exceeds the cap. Map
+// preserves insertion order, so the first key is the least
+// recently inserted. Called after every set so a burst of new
+// ticketIds can't exceed the cap.
+function capTicketProjectCache(): void {
+  if (ticketProjectCache.size <= MAX_TICKET_PROJECT_CACHE) return;
+  const toDrop = ticketProjectCache.size - MAX_TICKET_PROJECT_CACHE;
+  let dropped = 0;
+  for (const key of ticketProjectCache.keys()) {
+    if (dropped >= toDrop) break;
+    ticketProjectCache.delete(key);
+    dropped++;
+  }
 }

@@ -3,6 +3,7 @@
  */
 
 import { existsSync, mkdirSync } from "fs";
+import fsPromises from "fs/promises";
 import { join } from "path";
 import { execFile } from "child_process";
 import { promisify } from "util";
@@ -180,10 +181,60 @@ export async function runPostExportSmokeTest(buildId: string, workspacePath: str
 
   const projectPath = resolveProjectWorkspace(workspacePath);
   const artifactAbs = build.artifactPath ? join(projectPath, build.artifactPath) : null;
-  build.smokeTestPassed = build.status === "success" && !!artifactAbs && existsSync(artifactAbs);
+  // 27-H-smoke-test-real-check: previous shape returned
+  // `smokeTestPassed: true` purely on `existsSync(artifactAbs)`.
+  // That's not a smoke test — a 0-byte file, a half-written file
+  // (Godot crashes mid-export, leaving a partial .pck), or even a
+  // stale .pck from a prior build with the same name would all
+  // "pass". Replaced with a real artifact-shape check: must exist,
+  // must be ≥ 1 KB (Godot's smallest valid .pck is ~16 KB but a
+  // 1 KB lower bound catches the obvious "export failed silently"
+  // cases without false-negatives on slim exports), and for the
+  // .pck format the first 4 bytes must be the Godot pack magic
+  // `GDPC`. Returns the existing GameBuild so the route handler
+  // can serialize it without an extra read.
+  build.smokeTestPassed = false;
+  if (build.status === "success" && artifactAbs) {
+    build.smokeTestPassed = await verifyBuildArtifact(artifactAbs);
+  }
   build.updatedAt = new Date().toISOString();
   await updateBuild(build);
   return build;
+}
+
+// 27-H-smoke-test-real-check: real artifact validation. Exists +
+// non-trivial size + (for .pck) magic header. The async read is
+// bounded — 4 bytes is a fixed read, not a streaming read — so the
+// cost is one fs.open + one fs.read + one fs.close on the happy
+// path. Reads the size via statSync first so we don't read 4 bytes
+// of a 0-byte file and accidentally validate it.
+async function verifyBuildArtifact(artifactAbs: string): Promise<boolean> {
+  try {
+    const stat = await fsPromises.stat(artifactAbs);
+    if (stat.size < 1024) return false;
+    if (artifactAbs.endsWith(".pck") || artifactAbs.endsWith(".zip") || artifactAbs.endsWith(".apk") || artifactAbs.endsWith(".ipa")) {
+      const fd = await fsPromises.open(artifactAbs, "r");
+      try {
+        const buf = Buffer.alloc(4);
+        await fd.read(buf, 0, 4, 0);
+        // Godot pack format magic = "GDPC" (little-endian ASCII).
+        // APK / ZIP / IPA use "PK\x03\x04" (zip local-file-header
+        // magic). Reject any other 4-byte header so a truncated
+        // export that wrote a 1KB prefix of zeroes fails this
+        // check.
+        const isPck = buf[0] === 0x47 && buf[1] === 0x44 && buf[2] === 0x50 && buf[3] === 0x43; // "GDPC"
+        const isZip = buf[0] === 0x50 && buf[1] === 0x4B && buf[2] === 0x03 && buf[3] === 0x04; // "PK\x03\x04"
+        return isPck || isZip;
+      } finally {
+        await fd.close();
+      }
+    }
+    // .exe, .app, .x86_64, .html5 — no magic header to validate,
+    // fall back to "exists and non-trivial size".
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export { bumpProjectVersion, readProjectVersion };

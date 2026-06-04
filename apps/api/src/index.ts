@@ -314,6 +314,18 @@ app.use("/api/chat", chatRouter);
 app.use("/api/tickets", ticketsRouter);
 app.use("/api/autonomous", autonomousRouter);
 app.use("/api/gdd", gddRouter);
+// 27-H-builds-rate-limit: rate-limit the long-running build
+// endpoints (POST /api/builds/*). A leaked API key could otherwise
+// fire many parallel Godot exports (4 min each) and exhaust process
+// resources. The global rateLimiter still applies via the per-IP
+// bucket, but mounting it here ensures any build route is throttled
+// even if a future route is added under this prefix and the
+// per-endpoint list at lines 280-310 isn't updated. The rate
+// limiter was already applied to /api/chat/sessions/:id/messages,
+// /api/autonomous/start, /api/teams/run, /api/skills/:id/invoke,
+// and /api/gates/:gateId/run (lines 280-298) — the build routes
+// were missed.
+app.use("/api/builds", rateLimiter);
 app.use("/api/builds", buildsRouter);
 app.use("/api/assets", assetsRouter);
 app.use("/api/settings", settingsRouter);

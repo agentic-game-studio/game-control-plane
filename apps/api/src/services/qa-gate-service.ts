@@ -260,7 +260,7 @@ export async function runQAGateChain(workspacePath: string, projectId?: string):
   }
 
   if (projectId) {
-    const regression = runRegressionCheck(workspacePath, projectId, evidence);
+    const regression = await runRegressionCheck(workspacePath, projectId, evidence);
     evidence.regression = {
       passed: regression.passed,
       isBaseline: regression.isBaseline,

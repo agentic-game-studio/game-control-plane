@@ -19,11 +19,31 @@ const AGENT_CREDIT_COST: Partial<Record<AgentRole, number>> = {
 
 const DEFAULT_COST = 20;
 
+// 27-H-credit-default-warn: log a warning the first time each
+// unmapped agent falls back to DEFAULT_COST. The previous behavior
+// silently charged 20 credits for 46 of 53 agents — fine for
+// current usage (most calls go through producer / godot-specialist
+// / code-reviewer), but a misconfigured new agent would silently
+// charge 20 credits instead of the expected cost, and a removed
+// agent's "decommission" would be invisible. Track the warned
+// set so a single agent doesn't spam the log once per call.
+const warnedAgents = new Set<AgentRole>();
+
 export async function consumeCreditsForAgent(
   agentRole: AgentRole,
   taskLabel: string,
 ): Promise<boolean> {
-  const creditsUsed = AGENT_CREDIT_COST[agentRole] ?? DEFAULT_COST;
+  let creditsUsed = AGENT_CREDIT_COST[agentRole];
+  if (creditsUsed === undefined) {
+    if (!warnedAgents.has(agentRole)) {
+      warnedAgents.add(agentRole);
+      logger.warn(
+        { agentRole, defaultCost: DEFAULT_COST, event: "agent_credit_cost_unmapped" },
+        `No credit cost configured for agent "${agentRole}" — falling back to default ${DEFAULT_COST}. Add an entry to AGENT_CREDIT_COST in credit-service.ts to silence this warning.`,
+      );
+    }
+    creditsUsed = DEFAULT_COST;
+  }
 
   try {
     const updated = await updateData<SettingsConfig>("settings.json", (data) => {

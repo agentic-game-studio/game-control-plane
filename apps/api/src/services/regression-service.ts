@@ -27,6 +27,34 @@ function baselinePath(projectPath: string): string {
   return join(projectPath, "production", "regression-baseline.json");
 }
 
+// 27-H-regression-mutex: per-project FIFO mutex for the
+// regression-baseline.json file. The previous shape did raw
+// existsSync → readFileSync → JSON.parse → writeFileSync with no
+// synchronization; two parallel QA gate runs on the same project
+// (the autonomous loop can fire two verify calls in close
+// succession, especially during the post-QA retry path) would
+// read the same baseline, both compute the same fingerprint match,
+// and the second writeFileSync would race the first — losing one
+// update. Same pattern as data-store.ts updateData and the
+// sessionLocks in session-store.ts.
+const regressionLocks = new Map<string, Promise<void>>();
+
+async function withRegressionLock<T>(projectPath: string, fn: () => Promise<T>): Promise<T> {
+  const prev = regressionLocks.get(projectPath) ?? Promise.resolve();
+  let release: () => void;
+  const lock = new Promise<void>((r) => { release = r; });
+  regressionLocks.set(projectPath, lock);
+  try {
+    await prev;
+    return await fn();
+  } finally {
+    release!();
+    if (regressionLocks.get(projectPath) === lock) {
+      regressionLocks.delete(projectPath);
+    }
+  }
+}
+
 function fingerprint(evidence: TicketTestEvidence): string {
   const parts = [
     evidence.bootCheck?.passed ? "boot:ok" : "boot:fail",
@@ -38,7 +66,16 @@ function fingerprint(evidence: TicketTestEvidence): string {
   return parts.join("|");
 }
 
-export function runRegressionCheck(
+export async function runRegressionCheck(
+  workspacePath: string,
+  projectId: string,
+  evidence: TicketTestEvidence,
+): Promise<RegressionResult> {
+  const projectPath = resolveProjectWorkspace(workspacePath);
+  return withRegressionLock(projectPath, () => Promise.resolve(runRegressionCheckUnlocked(workspacePath, projectId, evidence)));
+}
+
+function runRegressionCheckUnlocked(
   workspacePath: string,
   projectId: string,
   evidence: TicketTestEvidence,
