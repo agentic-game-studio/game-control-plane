@@ -982,6 +982,19 @@ export function useCommandRoom() {
   subagentsRef.current = subagents;
 
   // Flush cache immediately on page unload to avoid losing recent messages
+  // 25-H-beforeunload-rebind: previously this effect listed
+  // `sessions, currentSession, threadId, threadTitle` in its deps
+  // array. Every WS event updates `sessions`, so the effect
+  // re-bound the beforeunload handler on every event — and the
+  // handler captured `currentSession, threadId, threadTitle`
+  // from closure rather than from refs. On a fast page leave
+  // (e.g. tab close during a heavy chat burst), the closure
+  // could be stale relative to the latest state, and the
+  // add/removeEventListener churn on every event was wasted
+  // work. Drop those deps and read all volatile state from
+  // the parallel refs set in the render body — same pattern
+  // as the unmount-flush effect below. The handler is now
+  // bound exactly once per project change.
   useEffect(() => {
     if (!currentProjectId) return;
     const handler = () => {
@@ -990,9 +1003,9 @@ export function useCommandRoom() {
         version: CACHE_VERSION,
         sessions: serializeForCache(sess),
         subagents: subagentsForProjectParents(latestSubagentsRef.current, new Set(sess.keys())),
-        currentSession,
-        threadId,
-        threadTitle,
+        currentSession: currentSessionRef.current,
+        threadId: threadIdRef.current,
+        threadTitle: threadTitleRef.current,
         isLoading: isLoadingRef.current,
         messageQueue: messageQueueRef.current,
         cachedAt: new Date().toISOString(),
@@ -1000,7 +1013,7 @@ export function useCommandRoom() {
     };
     window.addEventListener("beforeunload", handler);
     return () => window.removeEventListener("beforeunload", handler);
-  }, [currentProjectId, sessions, currentSession, threadId, threadTitle]);
+  }, [currentProjectId]);
 
   // Fetch all sessions and ensure the producer session for the current
   // project exists (lazy-create via the dedicated endpoint).
@@ -1638,7 +1651,20 @@ export function useCommandRoom() {
     // arrives over the WebSocket. We do NOT add it locally here, so it
     // survives page navigation.
 
-    if (threadTitle === DEFAULT_THREAD_TITLE) {
+    // 25-H-stale-thread-title: read from the ref so a
+    // re-creation of spawnAgent between the user's first
+    // spawn (which set the title) and a second spawn
+    // (which checks the default-title guard) still sees
+    // the updated title. Without this, a user who spawns
+    // "creative-director" then "game-designer" would have
+    // the second spawn overwrite the first session's
+    // custom title back to a generic "Session: game-designer"
+    // because the closure-captured threadTitle at
+    // spawnAgent's last re-creation was still
+    // DEFAULT_THREAD_TITLE. The executeCommand deps don't
+    // include threadTitle (same reason as the projectId
+    // ref above), so the closure is necessarily stale.
+    if (threadTitleRef.current === DEFAULT_THREAD_TITLE) {
       setThreadTitle(`Session: ${r.replace(/-/g, " ")}`);
     }
 
@@ -2085,7 +2111,17 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
           return;
         }
         case "autonomous": {
-          const pid = currentProjectId;
+          // 25-H-stale-project-ref: read currentProjectId from the
+          // ref so a project switch that lands between render and
+          // command execution uses the new id, not the one captured
+          // at the time executeCommand was last recreated. The
+          // surrounding executeCommand callback's deps don't include
+          // currentProjectId (it shouldn't — that would rebuild the
+          // callback on every project switch and break the WS
+          // handler bindings); the ref pattern is the canonical
+          // workaround already used in this file at lines 1884 and
+          // 1999.
+          const pid = currentProjectIdRef.current;
           if (!pid) {
             addSessionMessage(producerSessionIdRef.current, { type: "system", sender: "SYSTEM", content: "No project selected." });
             return;
@@ -2159,7 +2195,11 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
         }
         case "mcp": {
           addSessionMessage(producerSessionIdRef.current, { type: "user", sender: "DIRECTOR", content: trimmed });
-          const pid = currentProjectId;
+          // 25-H-stale-project-ref: see the /autonomous case above —
+          // the same stale-closure pattern. Use the ref so a
+          // mid-flight project switch routes the /mcp health check
+          // to the new project.
+          const pid = currentProjectIdRef.current;
           if (!pid) {
             addSessionMessage(producerSessionIdRef.current, { type: "system", sender: "SYSTEM", content: "No project selected." });
             return;
