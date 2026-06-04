@@ -70,6 +70,13 @@ export function Modal({
       document.removeEventListener("keydown", handleKeyDown);
       // Restore focus on unmount/close.
       previouslyFocusedRef.current?.focus?.();
+      // 29-L-modal-prev-focus-reset: clear the ref after restoring.
+      // If the previously-focused element is later detached (e.g. it
+      // was a button inside a list item that just got removed), the
+      // next modal open would still try to refocus the detached node
+      // — a silent no-op. Reset to null so the next capture starts
+      // fresh from document.activeElement.
+      previouslyFocusedRef.current = null;
     };
   }, [isOpen, onClose]);
 

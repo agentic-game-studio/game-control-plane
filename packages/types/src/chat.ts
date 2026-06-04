@@ -63,7 +63,14 @@ export interface ProducerSummarySnapshot {
 // "completed" (chat.ts:1352, 1675); the frontend still has 4 sites that
 // compare against "done". Those are updated to "completed" in the same PR
 // to keep the type accurate.
-export type ChatSessionStatus = "active" | "completed" | "compacted";
+// 29-L-chat-session-status-failed: add "failed" so a session that
+// errored out (LLM 4xx/5xx mid-conversation, the user closed the
+// browser mid-tool-call, a quest-bridge error during spawn) has
+// somewhere to land in the type. The "compacted" branch is the
+// happy-path for long sessions; "failed" is the unhappy path
+// that the producer-summary service, the chat-restore endpoint,
+// and the UI's session list all need to distinguish.
+export type ChatSessionStatus = "active" | "completed" | "compacted" | "failed";
 
 export interface QuestionOption {
   id: string;

@@ -116,12 +116,25 @@ async function runGodotHeadlessCommand(
   }
 }
 
+// 29-L-qa-gate-fatal-patterns-const: hoist the fatal-error regex
+// set to module scope. The previous shape rebuilt the array on
+// every call to extractFatalErrors; the regexes are stateless and
+// don't need a per-call allocation. With a 50KB Godot stderr
+// being scanned per boot, this saves a few hundred microseconds
+// per gate run and gives the patterns a name grep can find.
+const FATAL_PATTERNS: RegExp[] = [
+  /SCRIPT ERROR:/,
+  /Parse Error/,
+  /Parser Error/,
+  /Invalid set index/,
+  /Function not found/,
+];
+
 function extractFatalErrors(output: string): string[] {
   if (!output) return [];
-  const fatalPatterns = [/SCRIPT ERROR:/, /Parse Error/, /Parser Error/, /Invalid set index/, /Function not found/];
   const errors: string[] = [];
   for (const line of output.split("\n")) {
-    if (fatalPatterns.some((p) => p.test(line))) errors.push(line.trim());
+    if (FATAL_PATTERNS.some((p) => p.test(line))) errors.push(line.trim());
   }
   return Array.from(new Set(errors)).slice(0, 20);
 }

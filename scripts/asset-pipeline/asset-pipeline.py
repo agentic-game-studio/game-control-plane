@@ -135,9 +135,16 @@ def generate_mflux(preset: AssetPreset, output_dir: Path, dry_run: bool = False,
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=gen_timeout)
     except subprocess.TimeoutExpired as exc:
         elapsed = time.time() - t0
+        # 29-L-asset-pipeline-full-cmd-on-fail: previous shape
+        # printed `cmd[:3]` + "..." which truncated away the
+        # distinguishing args (the seed, the negative-prompt, the
+        # output path). Two failed runs with the same model and
+        # first 3 args were indistinguishable. The full command
+        # contains no secrets (just prompt text + paths) and is
+        # what an operator needs to reproduce the failure.
         raise RuntimeError(
             f"mflux timed out after {exc.timeout}s (elapsed {elapsed:.1f}s) — "
-            f"command: {' '.join(cmd[:3])}..."
+            f"command: {' '.join(cmd)}"
         ) from exc
     elapsed = time.time() - t0
 
@@ -542,7 +549,13 @@ def build_manifest_entry(
         "type": preset.type,
         "category": preset.category,
         "sizeBytes": stat.st_size if stat else 0,
-        "tags": preset.tags + [preset.type, preset.category],
+        # 29-L-asset-pipeline-manifest-tag-dup: previous shape
+        # appended `preset.type` and `preset.category` to the
+        # user-defined tags. Both are already first-class fields on
+        # the manifest entry above — adding them to `tags` was
+        # duplicated data that the inventory API then had to dedup
+        # when filtering. Drop the duplicates.
+        "tags": list(preset.tags),
         "generatedWith": {
             "tool": "mflux-generate-flux2",
             "model": preset.model,

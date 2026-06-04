@@ -49,7 +49,16 @@ def find_godot_binary() -> str | None:
             path = result.stdout.strip()
             if path and os.path.isfile(path):
                 return path
-    except Exception:
+    # 29-L-godot-which-exception-scope: previous shape caught every
+    # `Exception` (including KeyboardInterrupt and SystemExit, since
+    # those inherit from BaseException not Exception — but a future
+    # Python 3.12+ change or a re-raise inside a `with` block could
+    # still surface an exception we don't want to swallow). Narrow
+    # to the actual subprocess failures (subprocess.SubprocessError,
+    # OSError for ENOENT/EBUSY, TimeoutExpired). SystemExit and
+    # KeyboardInterrupt propagate to the caller so a SIGINT during
+    # the lookup still cancels the surrounding tool call.
+    except (subprocess.SubprocessError, OSError):
         pass
 
     return None

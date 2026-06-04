@@ -15,8 +15,15 @@ import { useWebSocket } from "@/hooks/useWebSocket";
 import { WS_REFETCH_DEBOUNCE_MS } from "@/lib/timing";
 const logger = createLogger("ProjectContext");
 
+// 29-L-project-context-versioned-cache: bump the suffix on the
+// `projects-cache` key to v1. The previous unversioned key would
+// silently serve stale serialized project arrays across a
+// deploy that changed the Project interface (an added/renamed
+// field), and localStorage entries never expire. Versioned keys
+// mean a breaking change to the cached shape automatically
+// purges the previous value on the first read of the new key.
 const STORAGE_KEY = "studio:current-project-id";
-const CACHE_KEY = "studio:projects-cache";
+const CACHE_KEY = "studio:projects-cache-v1";
 
 interface ProjectContextValue {
   projects: Project[];
