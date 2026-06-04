@@ -371,7 +371,19 @@ export async function bumpProjectVersion(projectPath: string, bump: "patch" | "m
 
   const match = content.match(/config\/version="([^"]+)"/);
   const current = match?.[1] ?? "0.1.0";
-  const parts = current.split(".").map((n) => parseInt(n, 10) || 0);
+  // 30-M-qa-version-validation: the previous shape accepted any
+  // value captured between the quotes (including control chars,
+  // embedded newlines, and stray "config/version=..." tokens from
+  // a corrupted file) and wrote it straight back via JSON.stringify-
+  // less fs.writeFile. A half-rewritten project.godot would survive
+  // and produce a project.godot the Godot editor refuses to open.
+  // Validate against a strict numeric version pattern before
+  // splitting. If the value is malformed, fall back to the default
+  // so the bump can still proceed (operator can fix the file
+  // separately and re-run the bump).
+  const VERSION_RE = /^\d+(\.\d+){0,2}$/;
+  const safeCurrent = VERSION_RE.test(current) ? current : "0.1.0";
+  const parts = safeCurrent.split(".").map((n) => parseInt(n, 10) || 0);
   while (parts.length < 3) parts.push(0);
   if (bump === "major") { parts[0]++; parts[1] = 0; parts[2] = 0; }
   else if (bump === "minor") { parts[1]++; parts[2] = 0; }

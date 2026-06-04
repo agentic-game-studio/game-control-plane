@@ -91,46 +91,96 @@ export function useDashboard() {
     };
   }, []);
 
+  // 30-M-use-dashboard-crud-abort: thread an AbortController through
+  // the create/delete/update CRUD paths so an unmount mid-flight
+  // cancels the in-progress mutation request (not just the trailing
+  // refetch). The previous shape fired each mutation with no signal;
+  // if the user navigated away during a slow project create, the
+  // POST would still complete on the server and the response would
+  // setState on the unmounted component (React 18 dev mode warns;
+  // StrictMode doubles the warning). A ref-tracked controller lets
+  // the unmount cleanup abort the latest in-flight call. The
+  // trailing fetchDashboard is already cancellable via fetchDashboard's
+  // optional signal param.
+  const crudAbortRef = useRef<AbortController | null>(null);
+  useEffect(() => {
+    return () => {
+      crudAbortRef.current?.abort();
+    };
+  }, []);
+
   const createProject = useCallback(
     async (request: CreateProjectRequest) => {
-      const newProject = await apiFetch<Project>("/api/dashboard/projects", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(request),
-      });
-      await fetchDashboard();
-      return newProject;
+      crudAbortRef.current?.abort();
+      const controller = new AbortController();
+      crudAbortRef.current = controller;
+      try {
+        const newProject = await apiFetch<Project>("/api/dashboard/projects", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(request),
+          signal: controller.signal,
+        });
+        await fetchDashboard();
+        return newProject;
+      } finally {
+        if (crudAbortRef.current === controller) crudAbortRef.current = null;
+      }
     },
     [fetchDashboard]
   );
 
   const createDemoProject = useCallback(async () => {
-    const demoProject = await apiFetch<Project>("/api/dashboard/demo-project", {
-      method: "POST",
-    });
-    await fetchDashboard();
-    return demoProject;
+    crudAbortRef.current?.abort();
+    const controller = new AbortController();
+    crudAbortRef.current = controller;
+    try {
+      const demoProject = await apiFetch<Project>("/api/dashboard/demo-project", {
+        method: "POST",
+        signal: controller.signal,
+      });
+      await fetchDashboard();
+      return demoProject;
+    } finally {
+      if (crudAbortRef.current === controller) crudAbortRef.current = null;
+    }
   }, [fetchDashboard]);
 
   const deleteProject = useCallback(
     async (id: string) => {
-      await apiFetch(`/api/dashboard/projects/${id}`, {
-        method: "DELETE",
-      });
-      await fetchDashboard();
+      crudAbortRef.current?.abort();
+      const controller = new AbortController();
+      crudAbortRef.current = controller;
+      try {
+        await apiFetch(`/api/dashboard/projects/${id}`, {
+          method: "DELETE",
+          signal: controller.signal,
+        });
+        await fetchDashboard();
+      } finally {
+        if (crudAbortRef.current === controller) crudAbortRef.current = null;
+      }
     },
     [fetchDashboard]
   );
 
   const updateProject = useCallback(
     async (id: string, updates: UpdateProjectRequest) => {
-      const updated = await apiFetch<Project>(`/api/dashboard/projects/${id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(updates),
-      });
-      await fetchDashboard();
-      return updated;
+      crudAbortRef.current?.abort();
+      const controller = new AbortController();
+      crudAbortRef.current = controller;
+      try {
+        const updated = await apiFetch<Project>(`/api/dashboard/projects/${id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(updates),
+          signal: controller.signal,
+        });
+        await fetchDashboard();
+        return updated;
+      } finally {
+        if (crudAbortRef.current === controller) crudAbortRef.current = null;
+      }
     },
     [fetchDashboard]
   );

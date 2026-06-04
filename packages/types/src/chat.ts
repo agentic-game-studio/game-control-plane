@@ -58,6 +58,15 @@ export interface ProducerSummarySnapshot {
   lastEmittedContentHash: string | null;
   /** Short line for autonomous activity */
   autonomousHint?: string | null;
+  // 30-M-producer-summary-truncation: monotonic count of facts
+  // dropped from `recentFacts` because the in-memory cap
+  // (MAX_RECENT_FACTS) was hit. `recentFacts` is a ring; without
+  // this counter a consumer that surfaces the full history has no
+  // way to know it's been truncated — it sees a snapshot with 30
+  // facts regardless of session age. The field is additive: a
+  // snapshot loaded from a pre-30th-pass save file will not have
+  // it, and consumers must treat `undefined` as 0.
+  droppedFactCount?: number;
 }
 // "done" was an alias for "completed" — removed. The backend only ever sets
 // "completed" (chat.ts:1352, 1675); the frontend still has 4 sites that

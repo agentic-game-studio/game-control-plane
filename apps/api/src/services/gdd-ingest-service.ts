@@ -211,8 +211,31 @@ export function findGDDPath(projectSlug: string): string | null {
   let projectRoot: string;
   try {
     projectRoot = resolveProjectWorkspace(projectSlug);
-  } catch {
-    return null;
+  } catch (err) {
+    // 30-M-gdd-traversal-catch-all: the previous catch returned
+    // null for *any* error from resolveProjectWorkspace, including
+    // programming errors unrelated to the containment check (a
+    // future refactor that adds config validation, throws a
+    // different error class, or hits an EACCES reading the
+    // workspace dir would all be silently downgraded to "no
+    // GDD found"). resolveProjectWorkspace's escape errors are
+    // plain Error instances with the words "Path traversal not
+    // allowed" or "NUL byte" in the message; treat only those
+    // (plus a generic "Path escapes" / "outside workspace"
+    // sibling if the message drifts in a future patch) as a
+    // legitimate "no GDD found" — let everything else propagate
+    // so the route layer returns 500 and the operator can see
+    // the real failure in the logs.
+    const msg = err instanceof Error ? err.message : String(err);
+    if (
+      msg.includes("Path traversal not allowed") ||
+      msg.includes("NUL byte") ||
+      msg.includes("Path escapes") ||
+      msg.includes("outside workspace")
+    ) {
+      return null;
+    }
+    throw err;
   }
   const config = loadConfig();
   const altPaths = [
@@ -249,6 +272,11 @@ export interface GDDIngestResult {
   errors: string[];
   createdTitles: string[];
   skippedTitles: string[];
+  // 30-M-gdd-error-truncation: separate the count from the
+  // truncated `errors` array so callers can surface "180/200
+  // tickets failed" without having to attach the full error
+  // strings to the WS broadcast or the GDD ingest response.
+  errorCount: number;
 }
 
 export async function ingestGDD(
@@ -258,7 +286,7 @@ export async function ingestGDD(
 ): Promise<GDDIngestResult> {
   const gddPath = findGDDPath(projectId);
   if (!gddPath) {
-    return { sectionsFound: 0, totalItems: 0, created: 0, skipped: 0, errors: [], createdTitles: [], skippedTitles: [] };
+    return { sectionsFound: 0, totalItems: 0, created: 0, skipped: 0, errors: [], createdTitles: [], skippedTitles: [], errorCount: 0 };
   }
 
   // 27-M-gdd-stat-async: was statSync on the /api/gdd/ingest hot
@@ -279,6 +307,7 @@ export async function ingestGDD(
       errors: [`GDD file too large (${Math.round(stat.size / 1024)}KB)`],
       createdTitles: [],
       skippedTitles: [],
+      errorCount: 1,
     };
   }
 
@@ -301,11 +330,12 @@ export async function ingestGDD(
       errors: [`GDD contains ${totalParsed} items — maximum is ${MAX_ITEMS}`],
       createdTitles: [],
       skippedTitles: [],
+      errorCount: 1,
     };
   }
 
   if (sections.size === 0) {
-    return { gddPath, sectionsFound: 0, totalItems: 0, created: 0, skipped: 0, errors: ["No sections parsed"], createdTitles: [], skippedTitles: [] };
+    return { gddPath, sectionsFound: 0, totalItems: 0, created: 0, skipped: 0, errors: ["No sections parsed"], createdTitles: [], skippedTitles: [], errorCount: 1 };
   }
 
   let board: TicketsBoard;
@@ -335,7 +365,16 @@ export async function ingestGDD(
     errors: [],
     createdTitles: [],
     skippedTitles: [],
+    errorCount: 0,
   };
+  // 30-M-gdd-error-truncation: cap the in-memory errors array.
+  // A 200-item GDD with a broken createQuestTicket (e.g. quota
+  // hit) would otherwise produce a 200-line errors array that the
+  // route handler would serialise verbatim. errorCount holds the
+  // full tally and the activity log uses that; the truncated
+  // array stays small enough to ship over WS and embed in the
+  // gdd:ingested payload.
+  const MAX_GDD_ERRORS = 10;
 
   for (const [section, items] of Array.from(sections.entries())) {
     for (const item of items) {
@@ -362,7 +401,10 @@ export async function ingestGDD(
         existingTitles.add(item.title.toLowerCase());
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err);
-        result.errors.push(`${item.title}: ${errMsg}`);
+        result.errorCount++;
+        if (result.errors.length < MAX_GDD_ERRORS) {
+          result.errors.push(`${item.title}: ${errMsg}`);
+        }
         logger.error({ error: errMsg, item: item.title, section, event: "gdd_ticket_create_failed" }, "Failed to create ticket from GDD");
       }
     }
@@ -376,7 +418,10 @@ export async function ingestGDD(
       total: result.totalItems,
       created: result.created,
       skipped: result.skipped,
-      errors: result.errors.length,
+      // 30-M-gdd-error-truncation: broadcast the full error count
+      // rather than the truncated array length so the UI can show
+      // "200/180 failed" without rounding.
+      errors: result.errorCount,
     } as WSEvent);
   }
 

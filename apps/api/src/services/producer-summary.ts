@@ -54,6 +54,7 @@ export function emptyProducerSummarySnapshot(): ProducerSummarySnapshot {
     lastEmittedAt: null,
     lastEmittedContentHash: null,
     autonomousHint: null,
+    droppedFactCount: 0,
   };
 }
 
@@ -61,7 +62,16 @@ export function pushProducerSummaryFact(
   snap: ProducerSummarySnapshot,
   fact: ProducerSummaryFact,
 ): ProducerSummarySnapshot {
-  const recentFacts = [...snap.recentFacts, fact].slice(-MAX_RECENT_FACTS);
+  // 30-M-producer-summary-truncation: the previous shape silently
+  // truncated the in-memory facts ring with no signal to the
+  // consumer. Capture the drop count on the snapshot so any future
+  // API consumer that surfaces `recentFacts` knows how much
+  // history has been lost. The dropped count is monotonic and
+  // persisted with the snapshot, so a session that rehydrates
+  // keeps its tally.
+  const next = [...snap.recentFacts, fact];
+  const overflow = Math.max(0, next.length - MAX_RECENT_FACTS);
+  const recentFacts = next.slice(-MAX_RECENT_FACTS);
   // 29-M-producer-summary-merge: previous shape had two `if`
   // branches both calling formatAutonomousOneLiner with
   // overlapping conditions — the first excluded the loop-completed/
@@ -71,7 +81,12 @@ export function pushProducerSummaryFact(
   const autonomousHint = fact.kind.startsWith("autonomous_")
     ? formatAutonomousOneLiner(fact)
     : snap.autonomousHint;
-  return { ...snap, recentFacts, autonomousHint };
+  return {
+    ...snap,
+    recentFacts,
+    autonomousHint,
+    droppedFactCount: (snap.droppedFactCount ?? 0) + overflow,
+  };
 }
 
 function formatAutonomousOneLiner(fact: ProducerSummaryFact): string | null {
@@ -240,6 +255,17 @@ export function clearProjectProducerSummary(projectId: string): void {
 }
 
 async function flushEmitProducerUpdate(projectId: string): Promise<void> {
+  // 30-M-producer-summary-dynamic-import: dynamic import is
+  // intentional. producer-summary.ts is imported by both
+  // verification-service.ts and quest-bridge.ts at server boot,
+  // and chat.ts imports verification-service.ts — so a static
+  // `import { chatStoreReady } from "../routes/chat.js"` would
+  // close a circular ESM graph and break module evaluation. The
+  // 25-M pass removed a similar dynamic import for ids.js (no
+  // circular dep there) but kept this one for chat.js because
+  // the cycle is real. The await is cheap (Node caches the
+  // resolved module after the first call) and the cost is paid
+  // only on the emit path, not the ingest path.
   const mod = await import("../routes/chat.js");
   await mod.chatStoreReady;
   // 17-M-prod-sum-compacted: walk the compaction chain so a producer_update

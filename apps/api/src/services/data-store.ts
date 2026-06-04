@@ -90,7 +90,16 @@ export async function readData<T>(filename: string): Promise<T> {
       // string sniff. A future translation, message rewording, or
       // unrelated error carrying the word "not" in its message would
       // confuse the substring check; the error code never moves.
-      const wrapped = new Error(`Data file not found: ${filename} (expected at ${filePath})`) as NodeJS.ErrnoException;
+      //
+      // 30-M-data-store-enoent-path-leak: the previous message
+      // included the absolute `filePath` (which on a production
+      // deploy reveals the data directory layout — e.g.
+      // `/var/lib/game-studio/data/run-metrics.json`). Log the path
+      // server-side and surface a generic message + the code to
+      // the caller. The code is the only contract getOrCreateData
+      // cares about; the message is for human debugging.
+      logger.warn({ filename, filePath, event: "data_file_missing" }, `Data file not found: ${filename}`);
+      const wrapped = new Error(`Data file ${filename} not found`) as NodeJS.ErrnoException;
       wrapped.code = "ENOENT";
       throw wrapped;
     }
@@ -99,7 +108,21 @@ export async function readData<T>(filename: string): Promise<T> {
   try {
     return JSON.parse(content) as T;
   } catch (parseErr) {
-    throw new Error(`Corrupted JSON in ${filename}: ${parseErr instanceof Error ? parseErr.message : parseErr}`);
+    // 30-M-data-store-parse-error-leak: the previous shape
+    // embedded `parseErr.message` and the filename in the thrown
+    // error, which a generic Express error handler would forward
+    // to the client as a 500. The V8 parser message can include
+    // the offending position, and the filename reveals which data
+    // file exists (e.g. `run-metrics.json` — confirming the
+    // feature is used). Log the full detail server-side and
+    // surface a generic message to the caller; the route layer
+    // can map it to a 503 ("data temporarily unavailable") rather
+    // than a 500 that leaks internal state.
+    logger.error(
+      { filename, parseErr: parseErr instanceof Error ? parseErr.message : String(parseErr), event: "data_parse_failed" },
+      `Corrupted JSON in ${filename}`,
+    );
+    throw new Error(`Data file ${filename} is temporarily unavailable. Retry in a moment.`);
   }
 }
 
