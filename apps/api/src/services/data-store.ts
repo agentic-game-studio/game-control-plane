@@ -75,10 +75,20 @@ export async function readData<T>(filename: string): Promise<T> {
     // the read path noticeably slower. 14-CR: previous 5ms was
     // marginal on heavily-loaded CI runners where page-cache
     // flush + Docker volume propagation can take 10-30ms.
+    //
+    // 30-L-data-store-retry-on-parse-fail: previous shape only
+    // retried on empty content; a file that landed *partially*
+    // (size > 0 but truncated JSON mid-write) would pass the
+    // empty-string check and reach JSON.parse as corrupted
+    // content. Track the retry across both phases (empty read
+    // AND parse failure) so a slow writer doesn't surface a
+    // momentary truncation as a hard "data file temporarily
+    // unavailable" error.
     let attempts = 0;
     while (true) {
       content = await fs.readFile(filePath, "utf-8");
-      if (content.length > 0 || attempts >= 2) break;
+      if (content.length > 0) break;
+      if (attempts >= 2) break;
       attempts++;
       await new Promise((r) => setTimeout(r, 25));
     }
@@ -105,25 +115,59 @@ export async function readData<T>(filename: string): Promise<T> {
     }
     throw err;
   }
-  try {
-    return JSON.parse(content) as T;
-  } catch (parseErr) {
-    // 30-M-data-store-parse-error-leak: the previous shape
-    // embedded `parseErr.message` and the filename in the thrown
-    // error, which a generic Express error handler would forward
-    // to the client as a 500. The V8 parser message can include
-    // the offending position, and the filename reveals which data
-    // file exists (e.g. `run-metrics.json` — confirming the
-    // feature is used). Log the full detail server-side and
-    // surface a generic message to the caller; the route layer
-    // can map it to a 503 ("data temporarily unavailable") rather
-    // than a 500 that leaks internal state.
-    logger.error(
-      { filename, parseErr: parseErr instanceof Error ? parseErr.message : String(parseErr), event: "data_parse_failed" },
-      `Corrupted JSON in ${filename}`,
-    );
+  if (!content) {
+    // 30-M-data-store-parse-error-leak: the file was readable but
+    // empty after the retry window. The previous shape passed
+    // this through to JSON.parse, which threw an opaque "Unexpected
+    // end of JSON input" — that error was caught by the outer
+    // try/catch (the one above for ENOENT) and re-thrown with
+    // its raw message, which leaked the parser internals. Log
+    // server-side and surface a generic message.
+    logger.error({ filename, event: "data_empty_after_retry" },
+      `Data file ${filename} is empty after retry`);
     throw new Error(`Data file ${filename} is temporarily unavailable. Retry in a moment.`);
   }
+  // 30-L-data-store-retry-on-parse-fail: previous shape only
+  // retried on empty content. A file that landed *partially*
+  // (size > 0 but truncated JSON mid-write) would pass the
+  // empty-string check and reach JSON.parse as corrupted
+  // content. Track the retry across both phases (empty read
+  // AND parse failure) so a slow writer doesn't surface a
+  // momentary truncation as a hard "data file temporarily
+  // unavailable" error. The retry sleeps the same 25ms as the
+  // read loop to absorb page-cache flush delays.
+  let attempts = 0;
+  let lastParseErr: unknown = null;
+  while (true) {
+    try {
+      return JSON.parse(content) as T;
+    } catch (parseErr) {
+      lastParseErr = parseErr;
+      if (attempts >= 2) break;
+      attempts++;
+      await new Promise((r) => setTimeout(r, 25));
+      try {
+        content = await fs.readFile(filePath, "utf-8");
+      } catch {
+        break;
+      }
+    }
+  }
+  // 30-M-data-store-parse-error-leak: the previous shape
+  // embedded `parseErr.message` and the filename in the thrown
+  // error, which a generic Express error handler would forward
+  // to the client as a 500. The V8 parser message can include
+  // the offending position, and the filename reveals which data
+  // file exists (e.g. `run-metrics.json` — confirming the
+  // feature is used). Log the full detail server-side and
+  // surface a generic message to the caller; the route layer
+  // can map it to a 503 ("data temporarily unavailable") rather
+  // than a 500 that leaks internal state.
+  logger.error(
+    { filename, parseErr: lastParseErr instanceof Error ? lastParseErr.message : String(lastParseErr), event: "data_parse_failed" },
+    `Corrupted JSON in ${filename}`,
+  );
+  throw new Error(`Data file ${filename} is temporarily unavailable. Retry in a moment.`);
 }
 
 export async function writeData<T>(filename: string, data: T): Promise<void> {

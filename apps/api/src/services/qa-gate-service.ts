@@ -153,7 +153,19 @@ export async function runBootCheckGate(projectPath: string): Promise<QAGateStepR
 
 export async function runGUTGate(projectPath: string): Promise<QAGateStepResult> {
   const testsDir = join(projectPath, "tests");
-  const hasGut = existsSync(join(projectPath, "addons", "gut")) || existsSync(testsDir);
+  // 30-L-qa-gut-exists-sync: the previous shape used `existsSync` on
+  // the QA-gate hot path. The 27th pass converted the subprocess
+  // calls to async, but the GUT-presence probe still blocks the
+  // event loop. `existsSync` on a workspace project root is
+  // usually < 1ms, but the GUT chain runs after the boot check
+  // (which already stat'd the same dirs) and the smoke playtest
+  // (which awaits the .gd script). Use `fs.access` in parallel so
+  // both probes are O(1) and non-blocking.
+  const [hasGutAddon, hasTestsDir] = await Promise.all([
+    fs.access(join(projectPath, "addons", "gut")).then(() => true, () => false),
+    fs.access(testsDir).then(() => true, () => false),
+  ]);
+  const hasGut = hasGutAddon || hasTestsDir;
   if (!hasGut) {
     // 23-H-gut-skip-fail-open: the previous return set
     // `passed: true` for a GUT-less project, so the chain at
@@ -177,7 +189,11 @@ export async function runGUTGate(projectPath: string): Promise<QAGateStepResult>
 
 export async function runSmokePlaytestGate(projectPath: string): Promise<QAGateStepResult> {
   const smokeScript = join(projectPath, "tests", "smoke_playtest.gd");
-  if (!existsSync(smokeScript)) {
+  // 30-L-qa-smoke-exists-sync: same conversion as runGUTGate above.
+  // The smoke playtest gate is on the same hot path; the `existsSync`
+  // would block the event loop and is the only sync call left in
+  // the chain.
+  if (!(await fs.access(smokeScript).then(() => true, () => false))) {
     await ensureSmokePlaytestScript(projectPath);
   }
   // 27-C-qa-script-arg-quoting: was a single argv element with
