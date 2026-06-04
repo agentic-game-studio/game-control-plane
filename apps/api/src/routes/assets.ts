@@ -5,7 +5,7 @@ import { promisify } from "node:util";
 import path from "node:path";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
-import { watch } from "node:fs";
+import { createReadStream, watch } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { readData, writeData, updateData, broadcastEvent } from "../services/data-store.js";
 import { logger } from "../utils/logger.js";
@@ -579,7 +579,15 @@ assetsRouter.get("/:id/thumbnail", async (req: Request, res: Response) => {
 
     res.setHeader("Content-Type", "image/png");
     res.setHeader("Cache-Control", "public, max-age=3600");
-    const stream = (await import("node:fs")).createReadStream(thumbAbsPath);
+    // 31-H-assets-thumbnail-static-import: previous shape did
+    // `(await import("node:fs")).createReadStream(thumbAbsPath)`
+    // on the thumbnail hot path. The dynamic import is a
+    // microtask on a warm cache, but a cold cache (process
+    // restart, esbuild rebuild, dev-mode HMR) pays a real
+    // module-graph walk per request — and a studio page can
+    // render 50+ thumbnails in a single render cycle. Move to
+    // a static import at the top of the file.
+    const stream = createReadStream(thumbAbsPath);
     // Without this handler, a stream that errors mid-read (file deleted
     // between stat and pipe, EIO on a flaky disk, etc.) would silently drop
     // the connection. The client would see a truncated image with a 200 OK

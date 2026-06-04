@@ -41,6 +41,18 @@ import { newId } from "../utils/ids.js";
 import { generateProjectChangelog } from "../services/changelog-service.js";
 
 import { execFile, execFileSync } from "node:child_process";
+// 31-H-autonomous-async-orphankill: the orphan-subprocess walker
+// (`killOrphanedSubprocesses`) uses `execFileSync` to run `tasklist`
+// / `wmic` / `pgrep` / `taskkill` on process death — the previous
+// shape mixed sync and async in the same function (some calls
+// already used `execFileAsyncLocal`). Sync `execFileSync` blocks
+// the event loop for up to 15s in the worst case (5s tasklist +
+// 10s PowerShell CIM). A sync call here means the entire API
+// freezes for that interval while orphans are cleaned up — every
+// WS broadcast, every HTTP request, every SSE log stream waits.
+// Convert to `execFileAsyncLocal` (already promisified at L47) and
+// pass an `AbortSignal` so the kill itself can be cancelled. The
+// `unref` and `signal` options both need to be threaded through.
 import { promisify } from "node:util";
 import { readFile as readFileAsync, writeFile as writeFileAsync, rename as renameAsync } from "node:fs/promises";
 
@@ -149,7 +161,7 @@ function debugLog(msg: string): void {
  * Cross-platform: uses `pgrep` + `pkill` on POSIX, `tasklist` + `taskkill` on
  * Windows.
  */
-function killOrphanedSubprocesses(): void {
+async function killOrphanedSubprocesses(): Promise<void> {
   const platform = process.platform;
 
   try {
@@ -163,9 +175,20 @@ function killOrphanedSubprocesses(): void {
       // We then kill the child + the python parent, mirroring the
       // POSIX `pgrep -P` walk below.
       type WinProc = { pid: number; parentPid: number; name: string };
-      const listOut = execFileSync("tasklist", ["/FO", "CSV", "/NH"], { timeout: 5000, stdio: ["ignore", "pipe", "ignore"] })
-        .toString()
-        .trim();
+      // 31-H-autonomous-async-orphankill: convert every execFileSync
+      // in this walker to execFileAsyncLocal. The walker fires on
+      // the autonomous loop's failure path, which can be called from
+      // a tight burst (e.g. 3 failed agents in a row). With sync
+      // execFileSync, each call froze the event loop for up to 15s
+      // (5s tasklist + 10s PowerShell CIM) — a sustained agent
+      // failure storm would surface as 45-90s of "API unresponsive"
+      // to the operator.
+      const { stdout: tasklistStdout } = await execFileAsyncLocal(
+        "tasklist",
+        ["/FO", "CSV", "/NH"],
+        { timeout: 5000, maxBuffer: SUBPROCESS_MAX_BUFFER },
+      );
+      const listOut = tasklistStdout.toString().trim();
       const all: WinProc[] = [];
       for (const line of listOut.split(/\r?\n/)) {
         // Format: "Image Name","PID","Session Name","Session#","Mem Usage"
@@ -178,10 +201,12 @@ function killOrphanedSubprocesses(): void {
       // use PowerShell because it's preinstalled on all supported
       // Windows versions and doesn't need admin to read process info.
       const psScript = `Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId | ConvertTo-Csv -NoTypeInformation`;
-      const psOut = execFileSync("powershell", ["-NoProfile", "-Command", psScript], {
-        timeout: 10000,
-        stdio: ["ignore", "pipe", "ignore"],
-      }).toString();
+      const { stdout: psStdout } = await execFileAsyncLocal(
+        "powershell",
+        ["-NoProfile", "-Command", psScript],
+        { timeout: 10000, maxBuffer: SUBPROCESS_MAX_BUFFER },
+      );
+      const psOut = psStdout.toString();
       const parentByChild = new Map<number, number>();
       for (const line of psOut.split(/\r?\n/).slice(1)) {
         const m = /^"(\d+)","(\d+)"/.exec(line);
@@ -210,7 +235,7 @@ function killOrphanedSubprocesses(): void {
       const killedChildPids: number[] = [];
       for (const child of godotChildren) {
         try {
-          execFileSync("taskkill", ["/F", "/PID", String(child.pid)], { timeout: 5000, stdio: "ignore" });
+          await execFileAsyncLocal("taskkill", ["/F", "/PID", String(child.pid)], { timeout: 5000 });
           killedChildPids.push(child.pid);
         } catch {
           // child may have already exited; keep going
@@ -222,7 +247,7 @@ function killOrphanedSubprocesses(): void {
       const killedParentPids: number[] = [];
       for (const parentPid of parentPids) {
         try {
-          execFileSync("taskkill", ["/F", "/PID", String(parentPid)], { timeout: 5000, stdio: "ignore" });
+          await execFileAsyncLocal("taskkill", ["/F", "/PID", String(parentPid)], { timeout: 5000 });
           killedParentPids.push(parentPid);
         } catch {
           // parent may have already exited
@@ -242,7 +267,13 @@ function killOrphanedSubprocesses(): void {
     // process with "run_godot_headless" anywhere in its command line
     // (e.g. an editor with that file open) doesn't get killed.
     const myPid = process.pid;
-    const pids = execFileSync("pgrep", ["-f", "[r]un_godot_headless\\.py"], { timeout: 5000 })
+    // 31-H-autonomous-async-orphankill: async pgrep walk.
+    const { stdout: pgrepStdout } = await execFileAsyncLocal(
+      "pgrep",
+      ["-f", "[r]un_godot_headless\\.py"],
+      { timeout: 5000, maxBuffer: SUBPROCESS_MAX_BUFFER },
+    );
+    const pids = pgrepStdout
       .toString()
       .trim()
       .split("\n")
@@ -264,7 +295,13 @@ function killOrphanedSubprocesses(): void {
       // isn't (we spawn it from the API process group). Walking the
       // tree with `pgrep -P` is portable and doesn't depend on
       // setpgid/posix_spawn semantics.
-      const childPids = execFileSync("pgrep", ["-P", String(pid)], { timeout: 5000 })
+      // 31-H-autonomous-async-orphankill: async pgrep -P.
+      const { stdout: pgrepChildStdout } = await execFileAsyncLocal(
+        "pgrep",
+        ["-P", String(pid)],
+        { timeout: 5000, maxBuffer: SUBPROCESS_MAX_BUFFER },
+      );
+      const childPids = pgrepChildStdout
         .toString()
         .trim()
         .split("\n")
@@ -1103,8 +1140,12 @@ async function runIteration(state: LoopState, board: TicketsBoard, projectContex
   agentRejected = agentError.length > 0 && !agentResult;
 
   if (agentRejected) {
-    // Kill any orphaned godot/python subprocesses left behind by timed-out agents
-    killOrphanedSubprocesses();
+    // Kill any orphaned godot/python subprocesses left behind by timed-out agents.
+    // 31-H-autonomous-async-orphankill: await the now-async kill
+    // walker so the orphan cleanup completes before the iteration
+    // moves on. The function swallows its own errors, so this
+    // await never throws.
+    await killOrphanedSubprocesses();
 
     // Even on crash/timeout, run boot check — a crashed agent may have left
     // the project in a broken state (parse errors, half-written files).

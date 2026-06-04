@@ -150,6 +150,18 @@ async function runRegressionCheckUnlocked(
     // and re-seed it. The fingerprint field is what gates the
     // pass/fail return value, so a non-string there is the
     // critical one to check.
+    //
+    // 31-H-regression-corruption-fail-open: the previous shape
+    // re-seeded AND returned `passed: true` on a corrupt
+    // baseline, which silently re-established a new baseline
+    // without ever reporting the corruption to the operator.
+    // A hand-edited baseline that "passes" the gate (because
+    // its invalid shape would compare trivially) could pin
+    // a regression in production for months. Re-seed
+    // (so the next run has a known-good reference) but
+    // return `passed: false` with a diff explaining the
+    // corruption — the operator sees a one-time failure and
+    // can investigate before the next run.
     if (
       typeof raw.projectId !== "string" ||
       typeof raw.fingerprint !== "string" ||
@@ -157,13 +169,48 @@ async function runRegressionCheckUnlocked(
       typeof raw.gutSummary !== "string" ||
       typeof raw.smokeSummary !== "string"
     ) {
-      await writeFile(path, JSON.stringify(current, null, 2), "utf-8");
-      return { passed: true, isBaseline: true, baseline: current };
+      // 23-H-regression-first-run parity: only re-seed when the
+      // current run is healthy. Mirrors the first-run check
+      // above — a failed run must NOT seed a "baseline of
+      // failures" that pins the regression check open.
+      const currentAllPass = Boolean(
+        evidence.bootCheck?.passed &&
+        evidence.gut?.passed !== false &&
+        evidence.smokePlaytest?.passed !== false,
+      );
+      if (currentAllPass) {
+        await writeFile(path, JSON.stringify(current, null, 2), "utf-8");
+        return { passed: true, isBaseline: true, baseline: current };
+      }
+      return {
+        passed: false,
+        isBaseline: true,
+        baseline: current,
+        diff: "corrupt baseline AND current run has gate failures — refusing to seed failures as baseline",
+      };
     }
     baseline = raw as unknown as RegressionBaseline;
   } catch {
-    await writeFile(path, JSON.stringify(current, null, 2), "utf-8");
-    return { passed: true, isBaseline: true, baseline: current };
+    // 31-H-regression-corruption-fail-open: same fix shape as
+    // the type-validate branch above — a JSON parse failure
+    // on the baseline indicates on-disk corruption. Re-seed
+    // (if the current run is healthy) and fail-open with a
+    // diff so the operator sees the corruption signal.
+    const currentAllPass = Boolean(
+      evidence.bootCheck?.passed &&
+      evidence.gut?.passed !== false &&
+      evidence.smokePlaytest?.passed !== false,
+    );
+    if (currentAllPass) {
+      await writeFile(path, JSON.stringify(current, null, 2), "utf-8");
+      return { passed: true, isBaseline: true, baseline: current };
+    }
+    return {
+      passed: false,
+      isBaseline: true,
+      baseline: current,
+      diff: "unparseable baseline AND current run has gate failures — refusing to seed failures as baseline",
+    };
   }
 
   if (baseline.fingerprint === fp) {

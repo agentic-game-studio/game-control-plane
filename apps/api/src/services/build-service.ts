@@ -2,7 +2,6 @@
  * Build registry — track Godot exports and post-export smoke tests.
  */
 
-import { existsSync, mkdirSync } from "fs";
 import fsPromises from "fs/promises";
 import { join } from "path";
 import { execFile } from "child_process";
@@ -114,7 +113,12 @@ export async function executeGodotExport(
   const projectPath = resolveProjectWorkspace(workspacePath);
   const exportPreset = preset ?? defaultPresetForPlatform(platform);
   const buildsDir = join(projectPath, "builds");
-  if (!existsSync(buildsDir)) mkdirSync(buildsDir, { recursive: true });
+  // 31-H-build-async-mkdir: async mkdir with recursive:true is a
+  // no-op if the dir exists, so the previous `existsSync` + sync
+  // `mkdirSync` pair was paying for one sync I/O round-trip
+  // unnecessarily. mkdir with recursive:true swallows EEXIST and
+  // is the canonical "ensure directory" idiom in modern Node.
+  await fsPromises.mkdir(buildsDir, { recursive: true });
 
   // 28-H-qa-gate-async-version-helpers: bumpProjectVersion and
   // readProjectVersion are now async; await the conditional branch.

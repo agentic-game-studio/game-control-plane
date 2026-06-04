@@ -63,106 +63,98 @@ export async function withFileLock<T>(filename: string, body: () => Promise<T>):
 
 export async function readData<T>(filename: string): Promise<T> {
   const filePath = path.join(DATA_DIR, filename);
-  let content: string;
-  try {
-    // 12-H16: read with a small retry on partial reads. fs.readFile
-    // is supposed to be atomic, but a `writeData` happening on the
-    // same file via tmp+rename can race on platforms with a slow
-    // page cache flush. The window is tiny (microseconds) but
-    // reproducible under concurrent load — a reader can see the
-    // main file mid-rename and get an empty string. Retry up to
-    // twice with a 25ms delay to absorb the race without making
-    // the read path noticeably slower. 14-CR: previous 5ms was
-    // marginal on heavily-loaded CI runners where page-cache
-    // flush + Docker volume propagation can take 10-30ms.
-    //
-    // 30-L-data-store-retry-on-parse-fail: previous shape only
-    // retried on empty content; a file that landed *partially*
-    // (size > 0 but truncated JSON mid-write) would pass the
-    // empty-string check and reach JSON.parse as corrupted
-    // content. Track the retry across both phases (empty read
-    // AND parse failure) so a slow writer doesn't surface a
-    // momentary truncation as a hard "data file temporarily
-    // unavailable" error.
-    let attempts = 0;
-    while (true) {
+  // 31-H-data-store-single-read-amplification: previous shape did
+  // up to 3 reads for the empty-content path (1 initial + 2 retries)
+  // and the 30-L parse-fail retry added up to 3 more reads inside
+  // the same `readData` call — up to 6 fs.readFile syscalls on a
+  // single bad-luck read. The retries were paying for distinct
+  // transient states (empty read, partial content) that can both
+  // happen on the SAME read, not separate reads. Hoist the loop
+  // so one fs.readFile call's outcome is checked for both "is it
+  // empty?" and "does it parse?" before deciding whether to retry
+  // — a partial-write read that fails both checks retries once,
+  // not once per check. Bound is still 2 retries (3 reads total)
+  // to match the prior budget, but the worst case drops from
+  // ~6 reads to 3.
+  const MAX_RETRIES = 2;
+  const RETRY_DELAY_MS = 25;
+  let content: string | null = null;
+  let lastEmpty = false;
+  let lastParseErr: unknown = null;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
       content = await fs.readFile(filePath, "utf-8");
-      if (content.length > 0) break;
-      if (attempts >= 2) break;
-      attempts++;
-      await new Promise((r) => setTimeout(r, 25));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        // 16-M-enoent-error-code: preserve the ENOENT code on the
+        // rewrapped error so callers (getOrCreateData) can match on
+        // `err.code === "ENOENT"` instead of the brittle
+        // `msg.includes("not found")` string sniff. A future
+        // translation, message rewording, or unrelated error
+        // carrying the word "not" in its message would confuse
+        // the substring check; the error code never moves.
+        //
+        // 30-M-data-store-enoent-path-leak: the previous message
+        // included the absolute `filePath` (which on a production
+        // deploy reveals the data directory layout — e.g.
+        // `/var/lib/game-studio/data/run-metrics.json`). Log the
+        // path server-side and surface a generic message + the
+        // code to the caller. The code is the only contract
+        // getOrCreateData cares about; the message is for human
+        // debugging.
+        logger.warn({ filename, filePath, event: "data_file_missing" }, `Data file not found: ${filename}`);
+        const wrapped = new Error(`Data file ${filename} not found`) as NodeJS.ErrnoException;
+        wrapped.code = "ENOENT";
+        throw wrapped;
+      }
+      throw err;
     }
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-      // 16-M-enoent-error-code: preserve the ENOENT code on the rewrapped
-      // error so callers (getOrCreateData) can match on `err.code ===
-      // "ENOENT"` instead of the brittle `msg.includes("not found")`
-      // string sniff. A future translation, message rewording, or
-      // unrelated error carrying the word "not" in its message would
-      // confuse the substring check; the error code never moves.
-      //
-      // 30-M-data-store-enoent-path-leak: the previous message
-      // included the absolute `filePath` (which on a production
-      // deploy reveals the data directory layout — e.g.
-      // `/var/lib/game-studio/data/run-metrics.json`). Log the path
-      // server-side and surface a generic message + the code to
-      // the caller. The code is the only contract getOrCreateData
-      // cares about; the message is for human debugging.
-      logger.warn({ filename, filePath, event: "data_file_missing" }, `Data file not found: ${filename}`);
-      const wrapped = new Error(`Data file ${filename} not found`) as NodeJS.ErrnoException;
-      wrapped.code = "ENOENT";
-      throw wrapped;
+    if (content.length === 0) {
+      // 12-H16: empty read races a tmp+rename on slow page-cache
+      // flush. Retry with a small delay to absorb the race.
+      // 14-CR: 5ms was marginal on heavily-loaded CI runners where
+      // the flush + Docker volume propagation can take 10-30ms.
+      lastEmpty = true;
+      if (attempt < MAX_RETRIES) {
+        await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+        continue;
+      }
+      break;
     }
-    throw err;
+    try {
+      return JSON.parse(content) as T;
+    } catch (parseErr) {
+      // 30-L-data-store-retry-on-parse-fail: a file that landed
+      // *partially* (size > 0 but truncated JSON mid-write) passes
+      // the empty-string check and reaches JSON.parse as corrupted
+      // content. Retry the read once more so a slow writer's
+      // mid-rename doesn't surface as a hard "temporarily
+      // unavailable" error.
+      lastParseErr = parseErr;
+      lastEmpty = false;
+      if (attempt < MAX_RETRIES) {
+        await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+        continue;
+      }
+      break;
+    }
   }
-  if (!content) {
+  if (lastEmpty) {
     // 30-M-data-store-parse-error-leak: the file was readable but
-    // empty after the retry window. The previous shape passed
-    // this through to JSON.parse, which threw an opaque "Unexpected
-    // end of JSON input" — that error was caught by the outer
-    // try/catch (the one above for ENOENT) and re-thrown with
-    // its raw message, which leaked the parser internals. Log
-    // server-side and surface a generic message.
+    // empty after the retry window. Log server-side and surface a
+    // generic message.
     logger.error({ filename, event: "data_empty_after_retry" },
       `Data file ${filename} is empty after retry`);
     throw new Error(`Data file ${filename} is temporarily unavailable. Retry in a moment.`);
   }
-  // 30-L-data-store-retry-on-parse-fail: previous shape only
-  // retried on empty content. A file that landed *partially*
-  // (size > 0 but truncated JSON mid-write) would pass the
-  // empty-string check and reach JSON.parse as corrupted
-  // content. Track the retry across both phases (empty read
-  // AND parse failure) so a slow writer doesn't surface a
-  // momentary truncation as a hard "data file temporarily
-  // unavailable" error. The retry sleeps the same 25ms as the
-  // read loop to absorb page-cache flush delays.
-  let attempts = 0;
-  let lastParseErr: unknown = null;
-  while (true) {
-    try {
-      return JSON.parse(content) as T;
-    } catch (parseErr) {
-      lastParseErr = parseErr;
-      if (attempts >= 2) break;
-      attempts++;
-      await new Promise((r) => setTimeout(r, 25));
-      try {
-        content = await fs.readFile(filePath, "utf-8");
-      } catch {
-        break;
-      }
-    }
-  }
-  // 30-M-data-store-parse-error-leak: the previous shape
-  // embedded `parseErr.message` and the filename in the thrown
-  // error, which a generic Express error handler would forward
-  // to the client as a 500. The V8 parser message can include
-  // the offending position, and the filename reveals which data
-  // file exists (e.g. `run-metrics.json` — confirming the
-  // feature is used). Log the full detail server-side and
-  // surface a generic message to the caller; the route layer
-  // can map it to a 503 ("data temporarily unavailable") rather
-  // than a 500 that leaks internal state.
+  // 30-M-data-store-parse-error-leak: the previous shape embedded
+  // `parseErr.message` and the filename in the thrown error, which
+  // a generic Express error handler would forward to the client as
+  // a 500. The V8 parser message can include the offending position,
+  // and the filename reveals which data file exists. Log the full
+  // detail server-side and surface a generic message to the caller;
+  // the route layer can map it to a 503 ("data temporarily
+  // unavailable") rather than a 500 that leaks internal state.
   logger.error(
     { filename, parseErr: lastParseErr instanceof Error ? lastParseErr.message : String(lastParseErr), event: "data_parse_failed" },
     `Corrupted JSON in ${filename}`,

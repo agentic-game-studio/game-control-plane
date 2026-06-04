@@ -166,8 +166,15 @@ settingsRouter.patch("/", async (req: Request, res: Response) => {
         ...data,
         ...updates,
         credits: mergedCredits,
-        topUpHistory: updates.topUpHistory ?? data.topUpHistory,
-        usageLog: updates.usageLog ?? data.usageLog,
+        // 31-H-settings-dead-fallback: topUpHistory and usageLog are
+        // not in SETTINGS_PATCH_KEYS, so the whitelist filter above
+        // has already stripped any client-supplied value for them —
+        // `updates.topUpHistory` and `updates.usageLog` are always
+        // undefined here. The `...data` spread two lines above
+        // already carries them through unchanged, so the
+        // `?? data.topUpHistory` fallthrough is a no-op. Drop the
+        // dead lines so a future reader doesn't conclude PATCH can
+        // mutate these append-only arrays.
       };
     });
 
