@@ -1,6 +1,7 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
 import { loadAgentPrompts, getAgentSystemPrompt } from "../prompts/agent-prompt-loader.js";
+import { isAgentRole } from "@game-studio/types";
 import { logger } from "../utils/logger.js";
 
 export const promptsRouter: Router = Router();
@@ -31,12 +32,23 @@ promptsRouter.get("/agents", async (_req: Request, res: Response) => {
 
 // GET /prompts/agents/:role — get system prompt for specific agent
 promptsRouter.get("/agents/:role", async (req: Request, res: Response) => {
+  const role = req.params.role;
+  // 27-M-prompts-validate-role: was `role as string` passed straight
+  // to getAgentSystemPrompt, which threw on unknown roles and surfaced
+  // as a 500. The 25th pass established isAgentRole as the source of
+  // truth and applied it in chat.ts:892 (POST /sessions). This route
+  // was missed. Unknown roles now return 404 with a clear message
+  // rather than a stack-traced 500.
+  if (!isAgentRole(role)) {
+    res.status(404).json({ success: false, error: `Unknown agent role: ${role}` });
+    return;
+  }
   try {
-    const prompt = await getAgentSystemPrompt(req.params.role as string);
-    res.json({ success: true, data: { role: req.params.role, systemPrompt: prompt } });
+    const prompt = await getAgentSystemPrompt(role);
+    res.json({ success: true, data: { role, systemPrompt: prompt } });
   } catch (err) {
     logger.error(
-      { err: err instanceof Error ? err.message : String(err), role: req.params.role, event: "prompts_get_failed" },
+      { err: err instanceof Error ? err.message : String(err), role, event: "prompts_get_failed" },
       "Failed to fetch agent prompt",
     );
     res.status(500).json({ success: false, error: "Failed to fetch agent prompt" });

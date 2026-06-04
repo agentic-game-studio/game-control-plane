@@ -4,6 +4,7 @@
  */
 
 import { existsSync, readFileSync, statSync } from "fs";
+import { stat as statAsync } from "fs/promises";
 import { readFile } from "node:fs/promises";
 import { join } from "path";
 import { loadConfig } from "../config.js";
@@ -220,7 +221,13 @@ export async function ingestGDD(
     return { sectionsFound: 0, totalItems: 0, created: 0, skipped: 0, errors: [], createdTitles: [], skippedTitles: [] };
   }
 
-  const stat = statSync(gddPath);
+  // 27-M-gdd-stat-async: was statSync on the /api/gdd/ingest hot
+  // path. The previous Q26-6th pass already moved the readFile to
+  // async; statSync on a 2MB file is ~5ms of blocked event loop
+  // (small but non-zero) on the same code path. The readFile is
+  // fs.promises.readFile now, so doing an await on a stat is
+  // trivial — it just costs one Promise tick.
+  const stat = await statAsync(gddPath);
   const MAX_GDD_SIZE = 2 * 1024 * 1024;
   if (stat.size > MAX_GDD_SIZE) {
     return {

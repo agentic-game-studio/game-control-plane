@@ -19,6 +19,15 @@ const AGENT_CREDIT_COST: Partial<Record<AgentRole, number>> = {
 
 const DEFAULT_COST = 20;
 
+// 27-M-usage-log-cap-const: hoist the usageLog slice cap to a
+// named constant. The 26th pass established the pattern in
+// gateVerdicts / toolsCache (MAX_GATE_VERDICTS, MAX_TOOLS_CACHE_ENTRIES);
+// credit-service had a magic 499 inline. The +1 in
+// `slice(-499).concat([new])` = 500 total, but the literal was
+// uncommented, so a future bump (e.g. to 1000) would need to
+// touch the same line twice. Exposed for tests to assert the cap.
+const MAX_USAGE_LOG_ENTRIES = 500;
+
 // 27-H-credit-default-warn: log a warning the first time each
 // unmapped agent falls back to DEFAULT_COST. The previous behavior
 // silently charged 20 credits for 46 of 53 agents — fine for
@@ -72,7 +81,7 @@ export async function consumeCreditsForAgent(
           onTop: { ...data.credits.onTop, current: onTopCurrent },
         },
         usageLog: [
-          ...data.usageLog.slice(-499),
+          ...data.usageLog.slice(-(MAX_USAGE_LOG_ENTRIES - 1)),
           {
             // 23-H-predictable-use-id: use newId("use") (128 bits of
             // crypto.randomUUID() entropy, prefixed) instead of
