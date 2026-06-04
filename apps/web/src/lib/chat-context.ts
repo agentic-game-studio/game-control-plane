@@ -1,11 +1,5 @@
 import type { ContextUsage } from "@game-studio/types";
 
-/**
- * Producer LLM history budget — keep aligned with MAX_CONTEXT_CHARS in
- * apps/api/src/routes/chat.ts (pruneConversationHistory).
- */
-export const PRODUCER_CONTEXT_WINDOW_CHARS = 500_000;
-
 /** Default producer model class (glm-5.1) — UI bar compares estimated usage to this. */
 export const PRODUCER_MODEL_CONTEXT_TOKENS = 200_000;
 

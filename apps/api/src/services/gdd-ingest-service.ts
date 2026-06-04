@@ -3,7 +3,15 @@
  * Shared by /api/gdd/ingest and autonomous loop startup.
  */
 
-import { existsSync, readFileSync, statSync } from "fs";
+// 31-L-gdd-ingest-unused-sync-imports: the 27-M and Q26-6th
+// passes migrated the hot path to async (`statAsync` and
+// `readFile` from `fs/promises` are now imported below). The
+// legacy `readFileSync` / `statSync` names from the `"fs"`
+// import were never dropped; both names are now only mentioned
+// in audit-reference comments. The TypeScript compiler strips
+// unused imports, so this is purely a grep-noise / hygiene fix
+// — no runtime cost.
+import { existsSync } from "fs";
 import { stat as statAsync } from "fs/promises";
 import { readFile } from "node:fs/promises";
 import { join } from "path";

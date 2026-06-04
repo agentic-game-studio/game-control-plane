@@ -12,9 +12,18 @@ import { invokeAgent } from "./llm-service.js";
 import { logger } from "../utils/logger.js";
 import type { AgentRole } from "@game-studio/types";
 
+// 31-L-gate-verdict-duplicate: the previous union had a duplicate
+// "READY" literal and a `| string` fallback that collapsed the
+// union to `string` (so TypeScript never caught verdict typos).
+// Keep "NOT_SUPPORTED" / "ERROR" as local extensions — the canonical
+// `GateVerdict` union in @game-studio/types is missing those two
+// sentinels that this file returns for "gate not yet implemented"
+// and "LLM call threw". Lifting them into the canonical type is a
+// broader refactor for a future pass; the dedupe + string-collapse
+// removal here is the bounded LOW cleanup.
 export interface GateResult {
   gateId: string;
-  verdict: "APPROVE" | "READY" | "CONCERNS" | "REJECT" | "NOT_READY" | "READY" | string;
+  verdict: "APPROVE" | "READY" | "CONCERNS" | "REJECT" | "NOT_READY" | "NOT_SUPPORTED" | "ERROR";
   details: string;
   agent: string;
   timestamp: string;
@@ -240,7 +249,7 @@ No specific context provided. If you can perform a general review based on avail
 
     return {
       gateId,
-      verdict: verdict.parsed,
+      verdict: verdict.parsed as GateResult["verdict"],
       details: result.content,
       agent: gateConfig.agent,
       timestamp: new Date().toISOString(),
