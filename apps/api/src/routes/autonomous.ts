@@ -1202,7 +1202,7 @@ If the failure is an infinite loop or hang (timeout), suggest a workaround.`,
       qaPassed = false;
       qaSummary = `Project workspacePath not configured (projectId=${state.projectId})`;
     } else {
-      const qaResult = runQAGateChain(projectContext.workspacePath, state.projectId);
+      const qaResult = await runQAGateChain(projectContext.workspacePath, state.projectId);
       qaPassed = qaResult.passed;
       qaSummary = qaResult.summary;
       qaEvidence = qaResult.evidence;

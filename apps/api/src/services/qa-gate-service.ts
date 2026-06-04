@@ -3,8 +3,10 @@
  * boot check → GUT → smoke playtest
  */
 
-import { execFileSync } from "child_process";
+import { execFile } from "child_process";
+import { promisify } from "util";
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from "fs";
+import fs from "fs/promises";
 import { join } from "path";
 import { loadConfig, resolvePipelinePython } from "../config.js";
 import { resolveProjectWorkspace } from "../utils/workspace.js";
@@ -12,6 +14,8 @@ import { resolveHomeDir } from "../utils/paths.js";
 import { logger } from "../utils/logger.js";
 import { runRegressionCheck } from "./regression-service.js";
 import type { TicketTestEvidence } from "@game-studio/types";
+
+const execFileAsync = promisify(execFile);
 
 export interface QAGateStepResult {
   name: keyof TicketTestEvidence;
@@ -34,12 +38,12 @@ export interface QAGateResult {
   summary: string;
 }
 
-function runGodotHeadlessCommand(
+async function runGodotHeadlessCommand(
   projectPath: string,
   command: string,
   extraArgs: string[] = [],
   timeoutSec = 90,
-): { success: boolean; stdout: string; stderr: string; returnCode: number } {
+): Promise<{ success: boolean; stdout: string; stderr: string; returnCode: number }> {
   const config = loadConfig();
   const scriptDir = join(config.WORKSPACE_DIR, "scripts", "godot");
   const pythonBin = resolvePipelinePython();
@@ -52,10 +56,19 @@ function runGodotHeadlessCommand(
   // empty-string boundary.
   const godotBin = config.GODOT_BIN || (home ? join(home, ".local/bin/godot_bin/Godot") : "");
 
-  // Use execFileSync (no shell) to avoid command injection via projectPath
+  // Use execFileAsync (no shell) to avoid command injection via projectPath
   // or any of the other string inputs. A malicious projectPath like
   // `foo"; rm -rf /; "bar` would have been split into a shell pipeline;
   // now it's a single argv element that Python receives literally.
+  //
+  // 27-C-qa-gate-event-loop: was sync `execFileSync` from
+  // node:child_process. runQAGateChain runs three of these back-to-back
+  // (boot 45s + GUT 120s + smoke 60s = up to 225s), and Node is
+  // single-threaded, so the entire process — every WS broadcast, every
+  // HTTP request, every SSE log stream — froze for the duration.
+  // Converted to the async variant from the same module; the caller
+  // chain (runBootCheckGate → runQAGateChain → autonomous loop) is
+  // already structured for await.
   const args = [
     join(scriptDir, "run_godot_headless.py"),
     `--project`, projectPath,
@@ -66,8 +79,8 @@ function runGodotHeadlessCommand(
   ];
 
   try {
-    const result = execFileSync(pythonBin, args, { timeout: (timeoutSec + 30) * 1000 });
-    const stdout = result?.toString() ?? "";
+    const { stdout: rawStdout, stderr } = await execFileAsync(pythonBin, args, { timeout: (timeoutSec + 30) * 1000 });
+    const stdout = rawStdout ?? "";
     try {
       const parsed = JSON.parse(stdout.trim()) as { success: boolean; returnCode: number; stdout?: string; stderr?: string };
       return {
@@ -113,8 +126,8 @@ function extractFatalErrors(output: string): string[] {
   return Array.from(new Set(errors)).slice(0, 20);
 }
 
-export function runBootCheckGate(projectPath: string): QAGateStepResult {
-  const result = runGodotHeadlessCommand(projectPath, "boot", [], 45);
+export async function runBootCheckGate(projectPath: string): Promise<QAGateStepResult> {
+  const result = await runGodotHeadlessCommand(projectPath, "boot", [], 45);
   const errors = extractFatalErrors(result.stderr + result.stdout);
   const passed = result.success && errors.length === 0;
   return {
@@ -125,7 +138,7 @@ export function runBootCheckGate(projectPath: string): QAGateStepResult {
   };
 }
 
-export function runGUTGate(projectPath: string): QAGateStepResult {
+export async function runGUTGate(projectPath: string): Promise<QAGateStepResult> {
   const testsDir = join(projectPath, "tests");
   const hasGut = existsSync(join(projectPath, "addons", "gut")) || existsSync(testsDir);
   if (!hasGut) {
@@ -138,7 +151,7 @@ export function runGUTGate(projectPath: string): QAGateStepResult {
     // the user explicitly opted into "AI only, no enforcement").
     return { name: "gut", passed: false, skipped: true, output: "GUT not installed — skipped" };
   }
-  const result = runGodotHeadlessCommand(projectPath, "gut", [], 120);
+  const result = await runGodotHeadlessCommand(projectPath, "gut", [], 120);
   const errors = extractFatalErrors(result.stderr);
   const passed = result.success && !/FAILED|failures/i.test(result.stdout + result.stderr);
   return {
@@ -149,12 +162,25 @@ export function runGUTGate(projectPath: string): QAGateStepResult {
   };
 }
 
-export function runSmokePlaytestGate(projectPath: string): QAGateStepResult {
+export async function runSmokePlaytestGate(projectPath: string): Promise<QAGateStepResult> {
   const smokeScript = join(projectPath, "tests", "smoke_playtest.gd");
   if (!existsSync(smokeScript)) {
-    ensureSmokePlaytestScript(projectPath);
+    await ensureSmokePlaytestScript(projectPath);
   }
-  const result = runGodotHeadlessCommand(projectPath, "script", [`--script "res://tests/smoke_playtest.gd"`], 60);
+  // 27-C-qa-script-arg-quoting: was a single argv element with
+  // embedded quotes (`["--script \"res://tests/smoke_playtest.gd\""]`).
+  // argparse would have received `--script="res://tests/smoke_playtest.gd"`
+  // as a literal string with quotes in it, and the Python gate
+  // script's `--script` argument would have failed to find a file at
+  // that path. The smoke playtest has therefore never run the real
+  // `.gd` file. Split into two argv elements so argparse gets
+  // `--script` and the path as separate tokens.
+  const result = await runGodotHeadlessCommand(
+    projectPath,
+    "script",
+    ["--script", "res://tests/smoke_playtest.gd"],
+    60,
+  );
   const passed = result.success && result.returnCode === 0;
   return {
     name: "smokePlaytest",
@@ -164,13 +190,13 @@ export function runSmokePlaytestGate(projectPath: string): QAGateStepResult {
   };
 }
 
-function ensureSmokePlaytestScript(projectPath: string): void {
+async function ensureSmokePlaytestScript(projectPath: string): Promise<void> {
   const testsDir = join(projectPath, "tests");
   if (!existsSync(testsDir)) mkdirSync(testsDir, { recursive: true });
   const scriptPath = join(testsDir, "smoke_playtest.gd");
   if (existsSync(scriptPath)) return;
 
-  writeFileSync(
+  await fs.writeFile(
     scriptPath,
     `extends SceneTree
 
@@ -183,12 +209,12 @@ func _initialize() -> void:
   logger.info({ projectPath, event: "smoke_playtest_scaffold" }, "Created smoke_playtest.gd scaffold");
 }
 
-export function runQAGateChain(workspacePath: string, projectId?: string): QAGateResult {
+export async function runQAGateChain(workspacePath: string, projectId?: string): Promise<QAGateResult> {
   const projectPath = resolveProjectWorkspace(workspacePath);
   const now = new Date().toISOString();
   const evidence: TicketTestEvidence = {};
 
-  const boot = runBootCheckGate(projectPath);
+  const boot = await runBootCheckGate(projectPath);
   evidence.bootCheck = { passed: boot.passed, errors: boot.errors, at: now };
   if (!boot.passed) {
     return {
@@ -199,7 +225,7 @@ export function runQAGateChain(workspacePath: string, projectId?: string): QAGat
     };
   }
 
-  const gut = runGUTGate(projectPath);
+  const gut = await runGUTGate(projectPath);
   evidence.gut = { passed: gut.passed, output: gut.output, at: now };
   if (!gut.passed) {
     // 23-H-gut-skip-fail-open: a GUT-less project returns
@@ -222,7 +248,7 @@ export function runQAGateChain(workspacePath: string, projectId?: string): QAGat
     }
   }
 
-  const smoke = runSmokePlaytestGate(projectPath);
+  const smoke = await runSmokePlaytestGate(projectPath);
   evidence.smokePlaytest = { passed: smoke.passed, output: smoke.output, at: now };
   if (!smoke.passed) {
     return {
