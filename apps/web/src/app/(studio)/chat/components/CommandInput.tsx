@@ -54,14 +54,24 @@ export default function CommandInput({ onSend, isLoading, queueCount = 0, status
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const hintsRef = useRef<HTMLDivElement>(null);
 
-  // Revoke any object URLs we still hold when the component unmounts so the
-  // browser can release the underlying blob memory.
+  // 25-C-object-url-leak: track the current pending images in a ref so
+  // the unmount cleanup can revoke every blob URL the component is
+  // still holding. The previous implementation captured
+  // `pendingImages` from the initial render in a useEffect with `[]`
+  // deps — that closure always saw the initial empty array, so if
+  // the user pasted an image and then navigated away, the blob URL
+  // was never revoked. With the ref, the cleanup sees the live list
+  // regardless of when the unmount happens. The setter form on
+  // handleSend (line ~91) already does the right thing for the
+  // "send" path; this fixes the "navigate away with unsent image"
+  // path.
+  const pendingImagesRef = useRef<PendingImage[]>([]);
+  pendingImagesRef.current = pendingImages;
+
   useEffect(() => {
     return () => {
-      pendingImages.forEach((img) => URL.revokeObjectURL(img.previewUrl));
+      pendingImagesRef.current.forEach((img) => URL.revokeObjectURL(img.previewUrl));
     };
-    // We intentionally only run this on unmount.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {

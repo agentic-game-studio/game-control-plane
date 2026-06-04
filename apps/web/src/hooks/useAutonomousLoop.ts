@@ -115,6 +115,17 @@ export function useAutonomousLoop() {
         setMilestone(event.milestone);
         break;
 
+      // 25-C-stale-milestone: clear the milestone string on every
+      // terminal transition so the UI doesn't show "Phase 1 complete"
+      // forever after the loop ends. The `autonomous:milestone` case
+      // above sets the state on every milestone event; without an
+      // explicit clear in the terminal cases (completed / stopped /
+      // error), the last milestone string persists across
+      // re-renders and into a subsequent loop's "idle" state. The
+      // user sees a stale milestone caption until the next
+      // `autonomous:milestone` event lands, which may never happen
+      // for a loop that exits cleanly.
+
       case "autonomous:metrics":
         setMetrics(event.metrics);
         break;
@@ -159,6 +170,7 @@ export function useAutonomousLoop() {
           running: false,
           lastError: event.error,
         }));
+        setMilestone(null);
         break;
 
       case "autonomous:completed":
@@ -171,6 +183,7 @@ export function useAutonomousLoop() {
           currentTicketId: null,
           currentAgentRole: null,
         }));
+        setMilestone(null);
         break;
 
       case "autonomous:stopped":
@@ -182,6 +195,7 @@ export function useAutonomousLoop() {
           currentTicketId: null,
           currentAgentRole: null,
         }));
+        setMilestone(null);
         break;
     }
   }, []);
