@@ -16,6 +16,51 @@ async function ensureDataDir() {
 /** Per-file mutex to serialize read-modify-write cycles and prevent lost updates */
 const fileLocks = new Map<string, Promise<void>>();
 
+/** Acquire a per-file mutex for the duration of `body`. Used by writeData,
+ * updateData, and getOrCreateData so all three of them serialize on the
+ * same key — two callers holding different functions for the same
+ * filename cannot both see the absent entry and install a lock. Mirrors
+ * the same V8-single-thread pattern: get → set without an await between
+ * them.
+ *
+ * Lock-safety contract: `resolveLock` is installed into the lockPromise
+ * before `fileLocks.set` publishes the lock, and is invoked
+ * unconditionally in the `finally` block. The only paths that bypass the
+ * `try` block are the pre-`await prev` synchronous steps, but those are
+ * pure map lookups + a `new Promise` constructor — none of them can
+ * throw in practice. If any future change makes those steps throw-able,
+ * wrap the `fileLocks.set` call in a `try/finally` that calls
+ * `resolveLock` defensively so the lock is never stranded. */
+export async function withFileLock<T>(filename: string, body: () => Promise<T>): Promise<T> {
+  const prev = fileLocks.get(filename) ?? Promise.resolve();
+  // Initialise resolveLock to a noop so the defensive catch below can
+  // call it before the Promise constructor has had a chance to assign
+  // the real resolver. Without this, an error between the
+  // `new Promise(...)` call and `fileLocks.set(...)` would publish a
+  // lockPromise with no resolver, permanently deadlocking every future
+  // caller that awaits `prev` (which is now this orphan promise).
+  let resolveLock: () => void = () => {};
+  const lockPromise = new Promise<void>((r) => { resolveLock = r; });
+  try {
+    fileLocks.set(filename, lockPromise);
+  } catch (err) {
+    // fileLocks.set can only throw if the Map itself is broken (e.g.,
+    // someone passed a frozen Map or ran out of memory). Release the
+    // orphan lockPromise so any waiter doesn't deadlock, then rethrow.
+    resolveLock();
+    throw err;
+  }
+  try {
+    await prev;
+    return await body();
+  } finally {
+    resolveLock!();
+    if (fileLocks.get(filename) === lockPromise) {
+      fileLocks.delete(filename);
+    }
+  }
+}
+
 export async function readData<T>(filename: string): Promise<T> {
   const filePath = path.join(DATA_DIR, filename);
   let content: string;
@@ -103,74 +148,37 @@ export async function writeData<T>(filename: string, data: T): Promise<void> {
 
 /** Acquire a per-file mutex for the duration of `body`. Used by writeData
  * so concurrent writes to the same file (across both writeData and
- * updateData) are serialized. Mirrors the same V8-single-thread pattern
- * updateData uses: get → set without an await between them. */
-async function withFileLock<T>(filename: string, body: () => Promise<T>): Promise<T> {
-  const prev = fileLocks.get(filename) ?? Promise.resolve();
-  let resolveLock!: () => void;
-  const lockPromise = new Promise<void>((r) => { resolveLock = r; });
-  try {
-    fileLocks.set(filename, lockPromise);
-  } catch {
-    resolveLock();
-    throw new Error("fileLocks.set failed");
-  }
-  try {
-    await prev;
-    return await body();
-  } finally {
-    resolveLock();
-    if (fileLocks.get(filename) === lockPromise) {
-      fileLocks.delete(filename);
-    }
-  }
+ * updateData) are serialized. */
+async function withFileLockInternal<T>(filename: string, body: () => Promise<T>): Promise<T> {
+  // 29-M-data-store-single-lock-primitive: previous shape had three
+  // near-identical lock helpers — `withFileLock` (used by writeData
+  // only), and the inline copy inside updateData + getOrCreateData.
+  // All three did the same `prev = fileLocks.get(...) ?? resolve;
+  // resolveLock=noop; new Promise; fileLocks.set; await prev; ...;
+  // finally resolveLock() + cleanup` dance. The duplication is
+  // dangerous: a future fix in one would have to be mirrored in
+  // the other two, and the resolveLock initial-value + set() try/catch
+  // shape is non-trivial. Consolidate to the exported
+  // `withFileLock` helper. The thin wrapper here stays as
+  // `withFileLockInternal` only because it was historically scoped
+  // to writeData; a follow-up pass could drop it entirely.
+  return withFileLock(filename, body);
 }
 
 /**
  * Serialized read-modify-write — prevents lost updates when multiple callers
  * modify the same file concurrently (e.g., autonomous loop + quest bridge).
  *
- * Lock-safety contract: `resolveLock` is installed into the lockPromise before
- * `fileLocks.set` publishes the lock, and is invoked unconditionally in the
- * `finally` block. The only paths that bypass the `try` block are the
- * pre-`await prev` synchronous steps, but those are pure map lookups + a
- * `new Promise` constructor — none of them can throw in practice. If any
- * future change makes those steps throw-able, wrap the `fileLocks.set` call
- * in a `try/finally` that calls `resolveLock` defensively so the lock is
- * never stranded.
- *
  * V8 single-thread guarantee: the `fileLocks.get(filename) ?? new Promise()`
  * + `fileLocks.set` pair runs in one synchronous microtask — no `await`
  * between them — so two callers cannot both observe the absent entry and
- * both install a lock. If a future refactor adds an `await` between the get
- * and set, this guarantee breaks.
+ * both install a lock. The `withFileLock` helper enforces this.
  */
 export async function updateData<T>(
   filename: string,
   updater: (data: T) => T | Promise<T>
 ): Promise<T> {
-  // Wait for any in-flight update to this file to complete
-  const prev = fileLocks.get(filename) ?? Promise.resolve();
-  // 12-C14: initialise resolveLock to a noop so the defensive catch
-  // below can call it before the Promise constructor has had a chance
-  // to assign the real resolver. Without this, an error between the
-  // `new Promise(...)` call and `fileLocks.set(...)` would publish a
-  // lockPromise with no resolver, permanently deadlocking every future
-  // caller that awaits `prev` (which is now this orphan promise).
-  let resolveLock: () => void = () => {};
-  const lockPromise = new Promise<void>((r) => { resolveLock = r; });
-  try {
-    fileLocks.set(filename, lockPromise);
-  } catch (err) {
-    // fileLocks.set can only throw if the Map itself is broken (e.g.,
-    // someone passed a frozen Map or ran out of memory). Release the
-    // orphan lockPromise so any waiter doesn't deadlock, then rethrow.
-    resolveLock();
-    throw err;
-  }
-
-  try {
-    await prev;
+  return withFileLock(filename, async () => {
     const data = await readData<T>(filename);
     // 11-M5: support async updaters. Some callers (writeDemoGodotProject)
     // need to do disk I/O inside the mutex so concurrent demo-project
@@ -178,16 +186,7 @@ export async function updateData<T>(
     const updated = await updater(data);
     await writeData(filename, updated);
     return updated;
-  } finally {
-    resolveLock!();
-    // Clean up the lock entry if we're the last holder. Comparison uses
-    // the same `lockPromise` reference that was set above; a later caller
-    // that has already installed a new lock will not have its entry
-    // removed because the comparison will not match.
-    if (fileLocks.get(filename) === lockPromise) {
-      fileLocks.delete(filename);
-    }
-  }
+  });
 }
 
 /**
@@ -228,21 +227,7 @@ export async function getOrCreateData<T>(
   filename: string,
   defaultValue: () => T
 ): Promise<T> {
-  const prev = fileLocks.get(filename) ?? Promise.resolve();
-  // 12-C14: see updateData. Initialise resolveLock to a noop so a throw
-  // between the Promise constructor and `fileLocks.set` cannot strand
-  // the published lockPromise.
-  let resolveLock: () => void = () => {};
-  const lockPromise = new Promise<void>((r) => { resolveLock = r; });
-  try {
-    fileLocks.set(filename, lockPromise);
-  } catch (err) {
-    resolveLock();
-    throw err;
-  }
-
-  try {
-    await prev;
+  return withFileLock(filename, async () => {
     try {
       return await readData<T>(filename);
     } catch (err) {
@@ -256,12 +241,7 @@ export async function getOrCreateData<T>(
       await writeData(filename, value);
       return value;
     }
-  } finally {
-    resolveLock!();
-    if (fileLocks.get(filename) === lockPromise) {
-      fileLocks.delete(filename);
-    }
-  }
+  });
 }
 
 export function broadcastEvent(event: WSEvent): void {

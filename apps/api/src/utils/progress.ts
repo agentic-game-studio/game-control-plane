@@ -12,14 +12,14 @@
  * tool result.
  */
 
-/** Base percentage for heartbeat-driven progress (matches the
+/** Base percentage for in-progress emitters (matches the
  *  starting fill on the bar). */
-const HEARTBEAT_BASE_PCT = 10;
+const PROGRESS_BASE_PCT = 10;
 
-/** Upper cap for heartbeat-driven progress. The LLM completion
- *  itself takes the bar to 100%; heartbeat is the "LLM is alive"
+/** Upper cap for in-progress emitters. The LLM completion
+ *  itself takes the bar to 100%; this is the "LLM is alive"
  *  indicator and should never claim completion. */
-const HEARTBEAT_CAP_PCT = 85;
+const PROGRESS_CAP_PCT = 85;
 
 /** Linear increment per heartbeat tick. Each chat.ts heartbeat
  *  fires every 2s, so this is ~1.5% per second — fast enough to
@@ -33,11 +33,11 @@ const HEARTBEAT_INCREMENT_PCT = 3;
 const TOOL_ITERATION_INCREMENT_PCT = 2;
 
 /** Compute the heartbeat-driven progress percentage. The bar
- *  starts at HEARTBEAT_BASE_PCT and climbs by
- *  HEARTBEAT_INCREMENT_PCT per tick, capped at HEARTBEAT_CAP_PCT.
+ *  starts at PROGRESS_BASE_PCT and climbs by
+ *  HEARTBEAT_INCREMENT_PCT per tick, capped at PROGRESS_CAP_PCT.
  *  Pass `count = 0` to read the base value alone. */
 export function heartbeatProgressPct(count: number): number {
-  return Math.min(HEARTBEAT_CAP_PCT, HEARTBEAT_BASE_PCT + count * HEARTBEAT_INCREMENT_PCT);
+  return Math.min(PROGRESS_CAP_PCT, PROGRESS_BASE_PCT + count * HEARTBEAT_INCREMENT_PCT);
 }
 
 /** Compute the per-iteration progress percentage within the LLM
@@ -45,5 +45,5 @@ export function heartbeatProgressPct(count: number): number {
  *  two emitters produce a continuous bar rather than stepping
  *  when the producer switches from LLM to chat routing. */
 export function toolIterationProgressPct(iteration: number): number {
-  return Math.min(HEARTBEAT_CAP_PCT, HEARTBEAT_BASE_PCT + iteration * TOOL_ITERATION_INCREMENT_PCT);
+  return Math.min(PROGRESS_CAP_PCT, PROGRESS_BASE_PCT + iteration * TOOL_ITERATION_INCREMENT_PCT);
 }

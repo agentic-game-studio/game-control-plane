@@ -134,7 +134,14 @@ export function parseGDDSections(content: string): Map<string, ParsedGDDItem[]> 
 
     if (trimmed.startsWith("[P0]") || trimmed.startsWith("[P1]") || trimmed.startsWith("[P2]")) {
       currentPriority = trimmed.slice(0, 3) as "P0" | "P1" | "P2";
-      const rest = trimmed.replace(/^\[[AP0-9]+\]\s*/, "").trim();
+      // 29-M-gdd-strict-priority: previous regex
+      // `/^\[[AP0-9]+\]\s*/` accepted any mix of A/P/0-9 inside the
+      // brackets, e.g. `[A99]` or `[P1A]`. The classification at
+      // L135 already requires an exact `[P0|P1|P2]` match, so a
+      // misclassified line never reaches here — but the strip
+      // regex still had to agree. Tighten it to the same exact
+      // alternation.
+      const rest = trimmed.replace(/^\[(P0|P1|P2)\]\s*/, "").trim();
       if (rest) {
         if (currentTitle) {
           currentItems.push({ title: currentTitle, description: currentDescription, section: currentSection, priority: currentPriority });
@@ -151,7 +158,8 @@ export function parseGDDSections(content: string): Map<string, ParsedGDDItem[]> 
       if (!text) continue;
       if (text.startsWith("[P0]") || text.startsWith("[P1]") || text.startsWith("[P2]")) {
         currentPriority = text.slice(0, 3) as "P0" | "P1" | "P2";
-        const rest = text.replace(/^\[[AP0-9]+\]\s*/, "").trim();
+        // 29-M-gdd-strict-priority: same fix as the heading branch.
+        const rest = text.replace(/^\[(P0|P1|P2)\]\s*/, "").trim();
         if (currentTitle) {
           currentItems.push({ title: currentTitle, description: currentDescription, section: currentSection, priority: currentPriority });
         }

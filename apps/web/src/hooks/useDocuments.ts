@@ -1,5 +1,5 @@
 "use client";
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import type {
   DocumentEntry,
   DocumentDetail,
@@ -151,17 +151,27 @@ export function useDocuments(projectId?: string): UseDocumentsReturn {
     }
   }, [fetchDocuments, fetchGraph, selectedId, qs, refreshAbortRef]);
 
-  return {
-    documents,
-    categories,
-    selectedDocument,
-    graphData,
-    selectedId,
-    selectDocument,
-    refresh,
-    loading,
-    error,
-  };
+  // 29-M-useDocuments-memo-return: wrap the returned object in
+  // useMemo so consumers' useEffect / useCallback dependency on the
+  // hook's return value (or on individual fields pulled out of it)
+  // don't reshuffle on every render. Without the memo, the object
+  // literal is fresh each render and any consumer that uses
+  // `{ selectDocument, refresh }` as a dep would see a new array
+  // every render — defeating React's identity-based memoization.
+  return useMemo(
+    () => ({
+      documents,
+      categories,
+      selectedDocument,
+      graphData,
+      selectedId,
+      selectDocument,
+      refresh,
+      loading,
+      error,
+    }),
+    [documents, categories, selectedDocument, graphData, selectedId, selectDocument, refresh, loading, error],
+  );
 }
 
 // 27-L-useDocuments-refresh-abort: ref-based abort for the

@@ -16,10 +16,11 @@
 // The `fs` import below is `node:fs/promises` (already present
 // at the top of the file) and is reused for the new access checks.
 import { readdir, readFile, access } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve, relative, sep, isAbsolute } from "node:path";
 import { newId } from "../utils/ids.js";
 import { readTicketsBoard, updateTicketsBoard } from "./ticket-board.js";
 import { loadConfig } from "../config.js";
+import { logger } from "../utils/logger.js";
 import type { TicketsBoard, Ticket } from "@game-studio/types";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -940,8 +941,25 @@ function ticketExistsById(board: TicketsBoard, id: string): boolean {
 export async function generateTickets(projectId: string, workspacePath?: string, projectDescription?: string): Promise<Array<Ticket & { phase?: number; templateId?: string }>> {
   const effectivePath = workspacePath ?? projectId;
   const projectPath = join(getWorkspaceDir(), effectivePath);
+  // 29-M-ticket-gen-path-containment: previous shape just joined
+  // the workspace dir with the supplied path and stat'd the
+  // result. `projectId` is a route param / body field and could
+  // carry `..` segments; the join would resolve to a directory
+  // outside WORKSPACE_DIR. Resolve and verify containment before
+  // the file scans below read the directory.
+  const workspaceRoot = resolve(getWorkspaceDir());
+  const resolvedProjectPath = resolve(projectPath);
+  const rel = relative(workspaceRoot, resolvedProjectPath);
+  const isContained = !rel.startsWith(".." + sep) && rel !== ".." && !isAbsolute(rel);
+  if (!isContained) {
+    logger.warn(
+      { projectId, workspacePath, resolvedProjectPath, event: "ticket_gen_path_escape" },
+      "generateTickets: projectPath escapes workspace — refusing",
+    );
+    return [];
+  }
   // 28-L-ticket-gen-async-exists: same fix as the others.
-  if (!workspacePath || !(await access(projectPath).then(() => true, () => false))) {
+  if (!workspacePath || !(await access(resolvedProjectPath).then(() => true, () => false))) {
     return [];
   }
 
@@ -974,12 +992,12 @@ export async function generateTickets(projectId: string, workspacePath?: string,
     }
 
     // Skip if the files this ticket would create already exist
-    if (template.skipIfFilesExist && (await anyFileExists(projectPath, template.skipIfFilesExist))) {
+    if (template.skipIfFilesExist && (await anyFileExists(resolvedProjectPath, template.skipIfFilesExist))) {
       continue;
     }
 
     // Skip if required dependency files don't exist yet (all stem groups must be satisfied)
-    if (template.requireFilesExist && !(await allRequiredFilesExist(projectPath, template.requireFilesExist))) {
+    if (template.requireFilesExist && !(await allRequiredFilesExist(resolvedProjectPath, template.requireFilesExist))) {
       continue;
     }
 

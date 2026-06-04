@@ -182,7 +182,16 @@ export default function SubagentDrawer({ subagent, onClose, onGotoParent, onRequ
             <div className="border-2 border-black bg-white divide-y divide-black">
               <div className="flex justify-between px-3 py-2">
                 <span className="font-[var(--font-terminal)] text-[10px] uppercase text-[#737688]">Ticket</span>
-                <span className="font-[var(--font-terminal)] text-[10px]">{subagent.ticketId.replace("ticket-", "#")}</span>
+                <span className="font-[var(--font-terminal)] text-[10px]">
+                  {/* 29-M-subagent-ticketid-guard: previous shape
+                      called `subagent.ticketId.replace(...)` without
+                      a nullish check. A subagent record that hasn't
+                      yet been linked to a ticket (e.g. mid-spawn
+                      before the quest-bridge createQuestTicket call
+                      lands) would render the literal string
+                      "undefined" in the UI. Defensive guard. */}
+                  {subagent.ticketId ? subagent.ticketId.replace("ticket-", "#") : "—"}
+                </span>
               </div>
               <div className="flex justify-between px-3 py-2">
                 <span className="font-[var(--font-terminal)] text-[10px] uppercase text-[#737688]">Parent Session</span>

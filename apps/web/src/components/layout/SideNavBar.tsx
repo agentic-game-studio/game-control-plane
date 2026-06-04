@@ -5,6 +5,7 @@ import type { Route } from "next";
 import { usePathname } from "next/navigation";
 import { useState, useEffect } from "react";
 import { apiFetch } from "@/lib/api";
+import { useAbortableEffect } from "@/hooks/useAbortableEffect";
 import type { DashboardData } from "@game-studio/types";
 
 /** Hidden from sidebar only; pages remain reachable by URL */
@@ -37,12 +38,20 @@ export default function SideNavBar() {
   const pathname = usePathname();
   const [credits, setCredits] = useState<{ current: number; max: number }>({ current: 100, max: 100 });
 
-  useEffect(() => {
-    apiFetch<DashboardData>("/api/dashboard")
-      .then((data) => setCredits(data.summary.credits))
-      .catch(() => {
-        // Keep default credits on error
-      });
+  // 29-M-sidenav-mount-fetch: previous shape had no AbortController
+  // on the mount-time /api/dashboard fetch. An unmount mid-flight
+  // (route change, app teardown) would log a React "setState on
+  // unmounted component" warning and could trigger a no-op state
+  // update. useAbortableEffect handles both the abort on unmount
+  // and the no-state-update-after-unmount guard via signal.aborted.
+  useAbortableEffect(async (signal) => {
+    try {
+      const data = await apiFetch<DashboardData>("/api/dashboard", { signal });
+      if (!signal.aborted) setCredits(data.summary.credits);
+    } catch {
+      // Keep default credits on error — the abort case is a
+      // benign no-op, all other errors keep the placeholder.
+    }
   }, []);
 
   return (

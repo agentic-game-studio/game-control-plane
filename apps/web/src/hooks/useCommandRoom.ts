@@ -21,6 +21,17 @@ export interface DiffBlock {
 // zone for any function that runs before the hook's body executes.
 const RECENT_API_TTL_MS = 2 * 60 * 1000; // 2 minutes
 
+// 29-M-useCommandRoom-constants: hoist the activity-feed and
+// toast-notification slice caps to named constants. The 24/4
+// literals were duplicated at 3 sites (addActivityItem L866,
+// the project-change reset L1227, and the spawnAgent path
+// L1337-1339). A future bump (e.g. activity=50, toasts=8) had
+// to touch every site and stay in sync. The constant also
+// documents the intent — these are UI-display caps, not
+// behavior thresholds.
+const ACTIVITY_FEED_LIMIT = 24;
+const TOAST_NOTIFICATION_LIMIT = 4;
+
 export interface ToolCall {
   name: string;
   args: Record<string, unknown>;
@@ -863,8 +874,8 @@ export function useCommandRoom() {
         detail,
         timestamp: timestamp(),
       };
-      setActivityFeed((prev) => [entry, ...prev].slice(0, 24));
-      setToastNotifications((prev) => [entry, ...prev].slice(0, 4));
+      setActivityFeed((prev) => [entry, ...prev].slice(0, ACTIVITY_FEED_LIMIT));
+      setToastNotifications((prev) => [entry, ...prev].slice(0, TOAST_NOTIFICATION_LIMIT));
     },
     [],
   );
@@ -1334,9 +1345,9 @@ export function useCommandRoom() {
         timestamp: timestamp(),
         ...item,
       };
-      setActivityFeed((prev) => [entry, ...prev].slice(0, 24));
+      setActivityFeed((prev) => [entry, ...prev].slice(0, ACTIVITY_FEED_LIMIT));
       if (toast) {
-        setToastNotifications((prev) => [entry, ...prev].slice(0, 4));
+        setToastNotifications((prev) => [entry, ...prev].slice(0, TOAST_NOTIFICATION_LIMIT));
       }
     };
 

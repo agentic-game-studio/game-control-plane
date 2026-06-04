@@ -62,17 +62,15 @@ export function pushProducerSummaryFact(
   fact: ProducerSummaryFact,
 ): ProducerSummarySnapshot {
   const recentFacts = [...snap.recentFacts, fact].slice(-MAX_RECENT_FACTS);
-  let autonomousHint = snap.autonomousHint;
-  if (
-    fact.kind.startsWith("autonomous_") &&
-    fact.kind !== "autonomous_loop_completed" &&
-    fact.kind !== "autonomous_loop_stopped"
-  ) {
-    autonomousHint = formatAutonomousOneLiner(fact);
-  }
-  if (fact.kind === "autonomous_loop_completed" || fact.kind === "autonomous_loop_stopped") {
-    autonomousHint = formatAutonomousOneLiner(fact);
-  }
+  // 29-M-producer-summary-merge: previous shape had two `if`
+  // branches both calling formatAutonomousOneLiner with
+  // overlapping conditions — the first excluded the loop-completed/
+  // stopped kinds, the second handled only those two. The union
+  // is simply "any autonomous_* fact gets a one-liner", so fold
+  // them into a single check.
+  const autonomousHint = fact.kind.startsWith("autonomous_")
+    ? formatAutonomousOneLiner(fact)
+    : snap.autonomousHint;
   return { ...snap, recentFacts, autonomousHint };
 }
 
