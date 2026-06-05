@@ -198,6 +198,11 @@ dashboardRouter.post("/demo-project", async (_req: Request, res: Response) => {
     const workspacePath = "demo-godot-platformer";
     const now = new Date().toISOString();
 
+    // Ensure the dashboard data file exists on the data-store volume
+    // before updateData reads it. On first deploy the volume is empty
+    // and readData inside updateData throws ENOENT.
+    await readDashboardOrDefault();
+
     // Use updateData so the read-then-check-then-create runs under the
     // dashboard.json mutex. Without this, two concurrent judges hitting
     // the endpoint in the same tick both see `existing === undefined`,
@@ -497,6 +502,10 @@ dashboardRouter.post("/projects", async (req: Request, res: Response) => {
   }
 
   try {
+    // Ensure the dashboard data file exists on the data-store volume
+    // before updateData reads it (same pattern as demo-project route).
+    await readDashboardOrDefault();
+
     // Validate workspacePath if provided. Validation is async and does not
     // need the locked dashboard.json contents, so it happens outside the
     // updateData callback.
