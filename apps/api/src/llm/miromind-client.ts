@@ -226,15 +226,9 @@ export function extractCitations(text: string): Citation[] {
  * and returns the raw content.
  */
 function extractReferencesSection(text: string): string | null {
-  const patterns = [
-    /^#{1,3}\s*(?:References|Citations|Sources|Works Cited)\s*$(.+?)(?=^#{1,3}\s|\Z)/ims,
-    /^#{1,3}\s*(?:References|Citations|Sources|Works Cited)\s*\n(.+?)(?=\n#{1,3}\s|\Z)/is,
-  ];
-  for (const regex of patterns) {
-    const m = text.match(regex);
-    if (m?.[1]) return m[1].trim();
-  }
-  return null;
+  const regex = /^#{1,3}\s*(?:References|Citations|Sources|Works Cited)\s*$\n?(.+?)(?=^#{1,3}\s|\Z)/ims;
+  const m = text.match(regex);
+  return m?.[1]?.trim() ?? null;
 }
 
 // ─── System prompts ──────────────────────────────────────────────────────────────
@@ -420,23 +414,31 @@ function detectResearchGaps(content: string, topic: string): string {
   const lower = content.toLowerCase();
   const gaps: string[] = [];
 
+  // Use word-boundary checks to avoid false positives (e.g., "casual" matching "ua")
+  function hasWord(word: string): boolean {
+    return new RegExp(`\\b${word}\\b`, "i").test(content);
+  }
+  function hasAny(words: string[]): boolean {
+    return words.some((w) => hasWord(w));
+  }
+
   // Check common missing angles
-  if (!lower.includes("mobile") && !lower.includes("ios") && !lower.includes("android")) {
+  if (!hasAny(["mobile", "ios", "android"])) {
     gaps.push("- Platform analysis: mobile (iOS/Android) vs PC vs console viability");
   }
-  if (!lower.includes("revenue") && !lower.includes("monet") && !lower.includes("price") && !lower.includes("iap") && !lower.includes("ads")) {
+  if (!hasAny(["revenue", "monetization", "monetisation", "pricing", "iap", "ads", "in-app"])) {
     gaps.push("- Revenue model: IAP, premium, ads, battle pass, subscription — which fits this genre?");
   }
-  if (!lower.includes("retention") && !lower.includes("churn") && !lower.includes("engagement")) {
+  if (!hasAny(["retention", "churn", "engagement", "dau", "mau"])) {
     gaps.push("- Player retention and engagement strategies specific to this genre");
   }
-  if (!lower.includes("marketing") && !lower.includes("ua") && !lower.includes("cpi") && !lower.includes("aso")) {
+  if (!hasAny(["cpi", "cpm", "aso", "user acquisition"])) {
     gaps.push("- User acquisition costs (CPI/CPM estimates) and marketing channels for this genre");
   }
-  if (!lower.includes("steam")) {
+  if (!hasAny(["steam"])) {
     gaps.push("- Steam-specific data: wishlist benchmarks, discoverability, regional pricing");
   }
-  if (!lower.includes("locali") && !lower.includes("translation") && !lower.includes("region")) {
+  if (!hasAny(["localization", "localisation", "translation", "regional"])) {
     gaps.push("- Global / regional market breakdown — which regions are strongest for this genre?");
   }
 

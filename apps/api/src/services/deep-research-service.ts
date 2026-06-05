@@ -135,7 +135,7 @@ export async function runDeepResearch(
   const workspaceDir = loadConfig().WORKSPACE_DIR;
   const projectPath = resolveProjectWorkspace(join(workspaceDir, "projects", projectId));
   const conceptSummary = buildConceptSummary(concept, options?.projectDescription);
-  const researchTurns = Math.min(parseInt(String(process.env.MIROMIND_RESEARCH_TURNS || "2"), 10) || 2, 3);
+  const researchTurns = config.MIROMIND_RESEARCH_TURNS;
 
   logger.info(
     { projectId, concept: concept.slice(0, 80), angles: RESEARCH_ANGLES.length, turns: researchTurns, event: "deep_research_start" },
