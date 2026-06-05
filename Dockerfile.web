@@ -25,9 +25,9 @@ ARG NEXT_PUBLIC_API_URL
 ARG NEXT_PUBLIC_WS_URL
 ARG NEXT_PUBLIC_API_KEY
 
-ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
-ENV NEXT_PUBLIC_WS_URL=$NEXT_PUBLIC_WS_URL
-ENV NEXT_PUBLIC_API_KEY=$NEXT_PUBLIC_API_KEY
+ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:3001}
+ENV NEXT_PUBLIC_WS_URL=${NEXT_PUBLIC_WS_URL:-ws://localhost:3001}
+ENV NEXT_PUBLIC_API_KEY=${NEXT_PUBLIC_API_KEY:-change_this_to_a_random_secret}
 
 # next build needs the source; pnpm build:web runs the Next.js build.
 # The /workspace volume (if mounted at runtime) is not used here.
@@ -41,7 +41,6 @@ FROM node:22.12.0-bookworm-slim AS runtime
 WORKDIR /app
 
 ENV NODE_ENV=production
-ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
 # Bring the built app + node_modules. We copy from the build stage's
 # pnpm store cache path implicitly by re-installing with --offline.
@@ -58,7 +57,11 @@ COPY --from=build --chown=node:node /app/packages ./packages
 COPY --from=build --chown=node:node /app/package.json /app/pnpm-lock.yaml /app/pnpm-workspace.yaml /app/turbo.json ./
 
 # Re-install in production mode (drops devDeps) using the cached store.
+# Also install wget for the HEALTHCHECK below (not present in slim image).
 RUN npm install -g pnpm@10.33.0 \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends wget ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
     && pnpm install --frozen-lockfile --prod \
     && chown -R node:node /app
 
@@ -83,8 +86,9 @@ USER node
 EXPOSE 3000
 
 # Healthcheck hits the Next.js root. If you add a /api/health route
-# later, switch HEALTHCHECK_PATH to "/api/health".
+# later, switch HEALTHCHECK_PATH to "/api/health". Use PORT (which
+# Railway injects at runtime) with a 3000 default for plain-Docker.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD wget -qO- http://localhost:3000/ >/dev/null 2>&1 || exit 1
+  CMD wget -qO- "http://localhost:${PORT:-3000}/" >/dev/null 2>&1 || exit 1
 
 CMD ["pnpm", "start:web"]
