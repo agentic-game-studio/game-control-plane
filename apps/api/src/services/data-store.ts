@@ -3,14 +3,21 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { broadcast } from "./websocket.js";
 import { logger } from "../utils/logger.js";
+import { loadConfig } from "../config.js";
 import type { WSEvent } from "@game-studio/types";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const DATA_DIR = path.join(__dirname, "../data");
+const FALLBACK_DATA_DIR = path.join(__dirname, "../data");
+
+function resolveDataDir(): string {
+  const configured = loadConfig().DATA_DIR?.trim();
+  if (configured) return path.resolve(configured);
+  return FALLBACK_DATA_DIR;
+}
 
 async function ensureDataDir() {
-  await fs.mkdir(DATA_DIR, { recursive: true });
+  await fs.mkdir(resolveDataDir(), { recursive: true });
 }
 
 /** Per-file mutex to serialize read-modify-write cycles and prevent lost updates */
@@ -62,7 +69,7 @@ export async function withFileLock<T>(filename: string, body: () => Promise<T>):
 }
 
 export async function readData<T>(filename: string): Promise<T> {
-  const filePath = path.join(DATA_DIR, filename);
+  const filePath = path.join(resolveDataDir(), filename);
   // 31-H-data-store-single-read-amplification: previous shape did
   // up to 3 reads for the empty-content path (1 initial + 2 retries)
   // and the 30-L parse-fail retry added up to 3 more reads inside
@@ -176,7 +183,7 @@ export async function readData<T>(filename: string): Promise<T> {
 // are themselves responsible for the surrounding mutex.
 async function writeDataUnlocked<T>(filename: string, data: T): Promise<void> {
   await ensureDataDir();
-  const filePath = path.join(DATA_DIR, filename);
+  const filePath = path.join(resolveDataDir(), filename);
   const tmpPath = filePath + ".tmp";
   try {
     await fs.writeFile(tmpPath, JSON.stringify(data, null, 2), "utf-8");
@@ -197,7 +204,7 @@ async function writeDataUnlocked<T>(filename: string, data: T): Promise<void> {
     if (writeErr instanceof Error && /EROFS/.test(writeErr.message)) {
       const err = new Error(
         `Cannot write ${filename}: data directory is on a read-only filesystem. ` +
-        `Check that ${DATA_DIR} is mounted with read-write permissions.`,
+        `Check that ${resolveDataDir()} is mounted with read-write permissions.`,
       );
       (err as Error & { code: string }).code = "DATA_DIR_READONLY";
       throw err;
@@ -318,7 +325,7 @@ export function broadcastEvent(event: WSEvent): void {
 
 /** Delete a data file. Returns true if file existed and was deleted. */
 export async function deleteData(filename: string): Promise<boolean> {
-  const filePath = path.join(DATA_DIR, filename);
+  const filePath = path.join(resolveDataDir(), filename);
   try {
     await fs.unlink(filePath);
     return true;
