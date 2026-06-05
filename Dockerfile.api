@@ -47,10 +47,13 @@ ENV NODE_ENV=production
 
 RUN npm install -g pnpm@10.33.0 \
     && apt-get update \
-    && apt-get install -y --no-install-recommends wget ca-certificates \
+    && apt-get install -y --no-install-recommends wget ca-certificates gosu \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 1001 nodejs 2>/dev/null || true \
     && useradd --system --uid 1001 --gid nodejs --create-home --shell /bin/bash node 2>/dev/null || true
+
+COPY docker-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 # Copy only what the runtime needs from the builder.
 COPY --from=builder --chown=node:nodejs /app/package.json /app/pnpm-lock.yaml /app/pnpm-workspace.yaml /app/turbo.json ./
@@ -69,20 +72,18 @@ COPY --from=builder --chown=node:nodejs /app/apps/api/node_modules ./apps/api/no
 COPY --from=builder --chown=node:nodejs /app/apps/api/src ./apps/api/src
 COPY --from=builder --chown=node:nodejs /app/apps/api/tsconfig.json ./apps/api/tsconfig.json
 
-# Prepare writable directories for the file-based state store and the
-# workspace. In Railway these are mounted as volumes, but in a plain Docker
-# run we want them to exist and be owned by the non-root user.
+# Prepare writable directories. /data is the Railway volume mount path
+# (chowned at container start by the entrypoint), /app/{data,workspace,logs}
+# are for local / Docker-only runs. The entrypoint handles both.
 RUN mkdir -p /app/data /app/workspace /app/logs \
     && chown -R node:nodejs /app
 
-USER node
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["pnpm", "start:api"]
 
 EXPOSE 3001
 
-# Healthcheck hits the API's /health endpoint. config.ts resolves
-# API_PORT ?? PORT, and Railway injects PORT at runtime. Use PORT with
-# a 3001 default for plain-Docker / local-dev runs where PORT isn't set.
+# Healthcheck hits /health. config.ts resolves API_PORT ?? PORT; Railway
+# injects PORT at runtime. Use PORT with a 3001 default for plain-Docker runs.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD wget -qO- "http://127.0.0.1:${PORT:-3001}/health" || exit 1
-
-CMD ["pnpm", "start:api"]
