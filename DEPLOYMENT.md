@@ -14,24 +14,24 @@ Cloudflare Pages is still a good fit for static Godot HTML exports.
 
 ## Railway Services
 
-Create one Railway project with two services from the same GitHub repo.
+Create one Railway project with two services from the same GitHub repo. Both services use Dockerfile-based builds (not the legacy `pnpm build:*` commands).
 
 ### API service
 
-Use these settings:
+Configure the service to build from `Dockerfile.api`:
 
 ```txt
-Build command: pnpm build:api
-Start command: pnpm start:api
+Builder:       Dockerfile
+Dockerfile:    Dockerfile.api
 ```
 
 Add a persistent volume mounted at:
 
 ```txt
-/data/workspace
+/data
 ```
 
-Environment variables:
+Environment variables (set as service variables, not build-time):
 
 ```txt
 API_SECRET=<same-random-secret-as-web>
@@ -53,18 +53,19 @@ API_TIMEOUT_MS=120000      # Per-LLM-call timeout (default 120s)
 ENABLE_TEST_ENDPOINTS=false # Disable /api/chat/sessions/consultation/test-create in prod
 ```
 
-Railway provides `PORT` automatically; the API also supports `API_PORT` for local/dev.
+Railway provides `PORT` automatically; the API reads `API_PORT ?? PORT` in
+`config.ts`, so Railway's `PORT` takes effect. Do NOT set `API_PORT` on Railway.
 
 ### Web service
 
-Use these settings:
+Configure the service to build from `Dockerfile.web`:
 
 ```txt
-Build command: pnpm build:web
-Start command: pnpm start:web
+Builder:       Dockerfile
+Dockerfile:    Dockerfile.web
 ```
 
-Environment variables:
+Environment variables (these are passed as Docker build args — a redeploy is required after changing them):
 
 ```txt
 NEXT_PUBLIC_API_URL=https://<api-service-domain>
