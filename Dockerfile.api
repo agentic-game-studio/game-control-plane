@@ -43,8 +43,7 @@ FROM node:22.12.0-bookworm-slim AS runtime
 
 WORKDIR /app
 
-ENV NODE_ENV=production \
-    API_PORT=3001
+ENV NODE_ENV=production
 
 RUN npm install -g pnpm@10.33.0 \
     && apt-get update \
@@ -80,13 +79,10 @@ USER node
 
 EXPOSE 3001
 
-# Healthcheck hits the API's /health endpoint. Wget is used (not curl) because
-# it's already a busybox default and is reliable in slim images. The port
-# is read from $API_PORT (defaulting to 3001) so a host that injects
-# PORT=8080 (Railway, Heroku, KEDA) doesn't get a stuck in-container
-# healthcheck that never goes green — config.ts resolves API_PORT ?? PORT
-# (apps/api/src/config.ts:72) but the Dockerfile previously hard-coded 3001.
+# Healthcheck hits the API's /health endpoint. config.ts resolves
+# API_PORT ?? PORT, and Railway injects PORT at runtime. Use PORT with
+# a 3001 default for plain-Docker / local-dev runs where PORT isn't set.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD wget -qO- "http://127.0.0.1:${API_PORT:-3001}/health" || exit 1
+  CMD wget -qO- "http://127.0.0.1:${PORT:-3001}/health" || exit 1
 
 CMD ["pnpm", "start:api"]
