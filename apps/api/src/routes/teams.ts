@@ -4,6 +4,7 @@ import { teamSkills } from "@game-studio/skills";
 import { invokeAgent } from "../services/llm-service.js";
 import { broadcast } from "../services/websocket.js";
 import { logger } from "../utils/logger.js";
+import { newId } from "../utils/ids.js";
 import type { WSEvent, AgentRole } from "@game-studio/types";
 import type { LLMMessage } from "../llm/zai-client.js";
 import type { SkillDefinition } from "@game-studio/types";
@@ -15,8 +16,20 @@ import type { DashboardData } from "@game-studio/types";
 
 export const teamsRouter: Router = Router();
 
-// In-memory session history for team workflows
+// In-memory session history for team workflows. Sweep on access to keep
+// entries bounded — long-running API processes running many team workflows
+// would otherwise accumulate entries for completed sessions forever.
+const TEAM_SESSION_TTL_MS = 60 * 60 * 1000; // 1 hour
 const teamSessions: Map<string, { messages: LLMMessage[]; startedAt: string }> = new Map();
+
+function pruneTeamSessions(): void {
+  const cutoff = Date.now() - TEAM_SESSION_TTL_MS;
+  for (const [id, session] of teamSessions) {
+    if (Date.parse(session.startedAt) < cutoff) {
+      teamSessions.delete(id);
+    }
+  }
+}
 
 /**
  * Get team skill by name
@@ -55,10 +68,48 @@ teamsRouter.post("/:team/run", async (req: Request, res: Response) => {
     projectId?: string;
   };
 
-  const effectiveSessionId = sessionId || `team-${Date.now()}`;
+  // 28-H-text-field-length-cap: clamp the free-form `input` so a
+  // 5MB body limit can't be used to flood the LLM with a single
+  // token-burning request. The team workflow concatenates `input`
+  // verbatim into the producer prompt and dispatches it to every
+  // team member — a 5MB input means a 5MB × N-members LLM call.
+  // The cap matches the chat /messages and tickets title/description
+  // caps (50_000 chars ≈ a long user prompt, well under context).
+  const MAX_INPUT = 50_000;
+  if (input !== undefined && (typeof input !== "string" || input.length > MAX_INPUT)) {
+    res.status(400).json({ success: false, error: `input must be a string up to ${MAX_INPUT} chars` });
+    return;
+  }
+
+  const effectiveSessionId = sessionId || newId("team");
   const teamMembers = team.teamMembers || [];
 
-  // Initialize team session
+  // Reject if a workflow is already in flight for this sessionId. Without this
+  // guard, two concurrent /run calls with the same sessionId (or two /run
+  // calls in the same millisecond with no sessionId) would both pass the
+  // check, both overwrite teamSessions, and both create duplicate quest
+  // tickets. We capture the timestamp before startWorkflow so we can tell
+  // whether the returned workflow is one we just created (createdAt ≥ t0)
+  // or a pre-existing one (createdAt < t0).
+  const requestStart = Date.now();
+  const workflowId = startWorkflow(effectiveSessionId);
+  const existing = getWorkflow(effectiveSessionId);
+  if (existing && existing.createdAt < requestStart) {
+    logger.warn(
+      { sessionId: effectiveSessionId, existingWorkflowId: existing.workflowId, event: "team_run_duplicate" },
+      "Refusing to start team workflow — one is already in flight for this session",
+    );
+    res.status(409).json({
+      success: false,
+      error: "A team workflow is already in flight for this sessionId",
+      sessionId: effectiveSessionId,
+    });
+    return;
+  }
+
+  // Initialize team session. Prune before write so the map doesn't grow
+  // unbounded across many run() calls.
+  pruneTeamSessions();
   const teamSession: { messages: LLMMessage[]; startedAt: string } = {
     messages: [],
     startedAt: new Date().toISOString(),
@@ -112,8 +163,17 @@ async function runTeamWorkflow(
 
   const teamMembers = team.teamMembers || [];
 
-  // Start workflow pipeline for this team
-  startWorkflow(sessionId);
+  // 10-H6: don't call startWorkflow again — the caller at /:team/run
+  // already created the workflow and verified there wasn't an existing
+  // one. A redundant call here would silently no-op (since startWorkflow
+  // refuses to clobber an existing workflow), but it muddies the audit
+  // trail by emitting a spurious "workflow_already_active" warning.
+  // Verify the workflow still exists before advancing — if it was
+  // cleaned up by the TTL sweep, recreate it so the team workflow
+  // can proceed.
+  if (!getWorkflow(sessionId)) {
+    startWorkflow(sessionId);
+  }
   advanceStage(sessionId, "decompose");
 
   // Create Quest tickets for each team member upfront
@@ -183,10 +243,21 @@ All Quest tickets have been created — agents just need to be spawned via Task 
       }
     }
 
-    // Move all tickets to completed
-    for (const [role, ticketId] of teamTickets) {
-      moveQuestTicket(ticketId, "completed", role);
-    }
+    // 24-H-teams-fire-forget: await the per-ticket moves before
+    // completing the workflow. The previous shape fired the moves
+    // without `await`, then synchronously ran `completeWorkflow` and
+    // `teamSessions.delete` while the ticket moves were still in
+    // flight. `moveQuestTicket` does its own per-file mutex acquire
+    // + write; a hung move (mutex contention, slow disk) can
+    // outlive the workflow being torn down, leaving the ticket in
+    // the old column and broadcasting a `workflow:complete` that
+    // disagrees with the kanban state. `Promise.all` waits for all
+    // moves to finish before completing the workflow.
+    await Promise.all(
+      [...teamTickets].map(([role, ticketId]) =>
+        moveQuestTicket(ticketId, "completed", role),
+      ),
+    );
 
     // Complete workflow
     completeWorkflow(sessionId, true);
@@ -220,10 +291,14 @@ All Quest tickets have been created — agents just need to be spawned via Task 
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : "Unknown error";
 
-    // Move tickets to qa (failed)
-    for (const [role, ticketId] of teamTickets) {
-      moveQuestTicket(ticketId, "qa", role);
-    }
+    // 24-H-teams-fire-forget: await the per-ticket moves before
+    // completing the workflow (qa branch — see success branch for
+    // the rationale).
+    await Promise.all(
+      [...teamTickets].map(([role, ticketId]) =>
+        moveQuestTicket(ticketId, "qa", role),
+      ),
+    );
 
     completeWorkflow(sessionId, false);
 

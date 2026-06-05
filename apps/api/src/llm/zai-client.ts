@@ -13,17 +13,31 @@ import { getAgentSystemPrompt, loadAgentPrompts } from "../prompts/agent-prompt-
 import { logger } from "../utils/logger.js";
 import { broadcast } from "../services/websocket.js";
 import { CHARS_PER_TOKEN_ESTIMATE, getModelForTier, getModelContextWindow } from "../config/model-mapping.js";
+import { createHash } from "node:crypto";
 
-/** Simple async semaphore for ZAI API concurrency control */
+/** Simple async semaphore for ZAI API concurrency control.
+ *
+ * `acquireCount` tracks the number of outstanding acquires so a stray
+ * `release()` (e.g. from a bug in the caller's error path) can never
+ * push `permits` above the configured limit and silently break
+ * concurrency control. Without this guard, a single double-release
+ * would let two callers in past the cap, then a third release would
+ * let three in, and so on. The previous implementation assumed every
+ * release had a matching acquire — a brittle invariant the type system
+ * couldn't enforce. */
 class Semaphore {
   private permits: number;
+  private readonly limit: number;
+  private acquireCount = 0;
   private waitQueue: Array<() => void> = [];
 
   constructor(permits: number) {
+    this.limit = permits;
     this.permits = permits;
   }
 
   async acquire(): Promise<void> {
+    this.acquireCount++;
     if (this.permits > 0) {
       this.permits--;
       return;
@@ -34,9 +48,22 @@ class Semaphore {
   }
 
   release(): void {
+    if (this.acquireCount === 0) {
+      // Stray release with no matching acquire. Log and ignore so a
+      // bug in caller code can't inflate the permit pool. Without this
+      // guard, permits could grow past `limit` and silently lift
+      // concurrency control.
+      logger.warn(
+        { event: "semaphore_stray_release", permits: this.permits, limit: this.limit },
+        "Semaphore.release() called without a matching acquire — ignoring",
+      );
+      return;
+    }
+    this.acquireCount--;
     if (this.waitQueue.length > 0) {
       const next = this.waitQueue.shift()!;
       next();
+      // The permit is transferred to the next waiter; do not increment.
     } else {
       this.permits++;
     }
@@ -61,15 +88,94 @@ const MODEL_CONCURRENCY_LIMITS: Record<string, number> = {
 
 const DEFAULT_CONCURRENCY_LIMIT = 2;
 
-/** Per-model semaphores — keyed by model name */
+// 28-M-zai-semaphore-fallback: shared fallback semaphore returned
+// when the per-model map is at cap and all entries have waiters.
+// Created once at module load (not per overflow) so overflow
+// callers share a single contention domain instead of getting
+// their own fresh semaphore that would let the map grow past the
+// cap. Uses DEFAULT_CONCURRENCY_LIMIT to match the original
+// cap-grow behavior's effective concurrency.
+const FALLBACK_MODEL_SEMAPHORE = new Semaphore(DEFAULT_CONCURRENCY_LIMIT);
+
+/** Per-model semaphores — keyed by model name.
+ *
+ * Capped at MAX_TRACKED_MODELS to prevent unbounded growth if a caller
+ * passes an arbitrary model string (e.g., from user-supplied config or
+ * a future feature that takes a model name from the wire). The cap is
+ * generous because the supported set is small (~6 models). When the
+ * cap is hit, the least-recently-used entry is evicted — eviction is
+ * safe because an in-flight semaphore has callers waiting on it, and
+ * once they all release the entries would be empty anyway. The risk
+ * would be evicting an entry with active waiters, so we check the
+ * waitQueue length before dropping. */
+const MAX_TRACKED_MODELS = 32;
+
+// 18-L-progress-ratios: name the two context-window ratios used
+// by the conversation-history pruner. The thresholds are tied to
+// the model-specific context window: when the in-flight history
+// exceeds `window * 0.5` we trigger summarization, and the pruner
+// keeps the tail of the history once it crosses
+// `window * 0.8`. Naming the ratios makes the relationship
+// between the two thresholds explicit (the summarize trigger
+// sits well below the prune headroom) and avoids the "what does
+// 0.8 mean here" question for future maintainers tuning the
+// numbers.
+const PRUNE_HEADROOM_RATIO = 0.8;
+const SUMMARIZE_TRIGGER_RATIO = 0.5;
+
 const modelSemaphores = new Map<string, Semaphore>();
 
+/** Dedicated semaphore for in-loop summarization calls. Separate from
+ * the per-model semaphores so a tier-3 (haiku) agent can summarize
+ * without deadlocking: the main call already holds the
+ * `glm-4.7-flash` permit (limit 1), and a summary call using the
+ * same key would wait on the main release — but the main call is
+ * awaiting the summary. A separate key avoids the self-reference.
+ * Generous limit (8) since summaries are cheap, short, and fire
+ * inline with the agent's main turn. */
+const SUMMARY_SEMAPHORE = new Semaphore(8);
+
 function getSemaphore(model: string): Semaphore {
-  const limit = MODEL_CONCURRENCY_LIMITS[model] ?? DEFAULT_CONCURRENCY_LIMIT;
-  if (!modelSemaphores.has(model)) {
-    modelSemaphores.set(model, new Semaphore(limit));
+  const existing = modelSemaphores.get(model);
+  if (existing) {
+    // Refresh LRU position by re-inserting (Map preserves insertion order).
+    modelSemaphores.delete(model);
+    modelSemaphores.set(model, existing);
+    return existing;
   }
-  return modelSemaphores.get(model)!;
+
+  if (modelSemaphores.size >= MAX_TRACKED_MODELS) {
+    // 28-M-zai-semaphore-fallback: previous shape fell through to
+    // `new Semaphore(limit)` and `modelSemaphores.set(model, sem)`
+    // even when no eviction was possible, so the cap was effectively
+    // advisory — a burst of 100+ distinct model strings (e.g. from
+    // a client passing arbitrary request.model) could grow the map
+    // forever. The eviction guard's stated purpose
+    // ("deadlock the waiter") is correct, but the fallback should
+    // at least return a SHARED semaphore so the cap holds. The
+    // shared semaphore uses DEFAULT_CONCURRENCY_LIMIT and is
+    // created once at module load.
+    let evicted = false;
+    for (const [key, sem] of modelSemaphores) {
+      if ((sem as unknown as { waitQueue: unknown[] }).waitQueue.length === 0) {
+        modelSemaphores.delete(key);
+        evicted = true;
+        break;
+      }
+    }
+    if (!evicted) {
+      logger.warn(
+        { event: "model_semaphore_overflow", model, tracked: modelSemaphores.size },
+        "modelSemaphores hit cap and all entries have waiters — using shared fallback",
+      );
+      return FALLBACK_MODEL_SEMAPHORE;
+    }
+  }
+
+  const limit = MODEL_CONCURRENCY_LIMITS[model] ?? DEFAULT_CONCURRENCY_LIMIT;
+  const sem = new Semaphore(limit);
+  modelSemaphores.set(model, sem);
+  return sem;
 }
 
 export interface TextContent {
@@ -154,20 +260,77 @@ const DEFAULT_TOOL_IMPORTANCE = 40;
 const MAX_TOOL_RESULT_BYTES = 15_000;
 const KEEP_RECENT_MESSAGES = 10;       // Never prune last N messages
 
-function getFetchTimeoutMs(): number {
+// 18-L-fetch-timeout-fallback: hard-coded fallback used when
+// loadConfig() itself throws (e.g. the env file is missing or
+// malformed). We can't safely reference the API_TIMEOUT_MS env
+// default here because loadConfig() is what reads the env, and
+// the recursion would be infinite. 120s is generous enough for a
+// 2-minute-max single LLM call and matches the documented default
+// in config.ts.
+const FALLBACK_FETCH_TIMEOUT_MS = 120_000;
+
+// 28-L-zai-fetch-timeout-modulelevel: previous shape called
+// `loadConfig()` on every fetch via `getFetchTimeoutMs()`. While
+// loadConfig is memoized (configState cache hit after the first
+// call), each call still does a `configState.API_TIMEOUT_MS`
+// property read. With the retry loop calling fetchWithRetry
+// per-attempt, this is hot. Resolve the timeout once at module
+// load (with the same try/catch fallback) and inline a constant.
+const FETCH_TIMEOUT_MS: number = (() => {
   try {
-    const config = loadConfig();
-    return config.API_TIMEOUT_MS;
+    return loadConfig().API_TIMEOUT_MS;
   } catch {
-    return 120_000;
+    return FALLBACK_FETCH_TIMEOUT_MS;
   }
+})();
+
+/**
+ * Sleep for `ms` milliseconds, but bail out immediately if the
+ * external abort signal fires. Without this, an abort during a retry
+ * backoff would still wait the full delay before the next fetch call
+ * notices the abort — wasting wall time and (in the case of a
+ * sub-agent cancel) potentially letting the abort happen after the
+ * user already gave up.
+ *
+ * 11-H6: the three retry sites in fetchWithRetry previously called
+ * `setTimeout(r, delay)` with no abort awareness.
+ */
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException("Aborted", "AbortError"));
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 async function fetchWithRetry(url: string, options: RequestInit, retries = MAX_RETRIES, externalSignal?: AbortSignal): Promise<Response> {
   let lastError: Error | null = null;
+  // Cap total wall time across all retries. Without this, the per-attempt
+  // 120s timeout + exponential backoff (1s+2s+4s+8s = 15s) + jitter stacks
+  // to 4*120s + 15s = ~495s for 4 attempts — well past any sensible
+  // upstream deadline (LLM chat is typically bounded to 30-90s). If the
+  // caller provided an external signal with a deadline, we honor it;
+  // otherwise default to (per-attempt timeout × retries + backoff budget).
+  // 28-L-zai-fetch-timeout-modulelevel: inlined the constant.
+  const perAttemptTimeoutMs = FETCH_TIMEOUT_MS;
+  const maxTotalMs = Math.min(
+    perAttemptTimeoutMs * (retries + 1) + 30_000,
+    300_000, // hard ceiling — 5 min, even with MAX_RETRIES raised later
+  );
+  const startTime = Date.now();
   for (let attempt = 0; attempt <= retries; attempt++) {
     // Combine timeout signal with optional external abort signal
-    const signals: AbortSignal[] = [AbortSignal.timeout(getFetchTimeoutMs())];
+    const signals: AbortSignal[] = [AbortSignal.timeout(perAttemptTimeoutMs)];
     if (externalSignal) signals.push(externalSignal);
     const combinedSignal = signals.length === 1 ? signals[0] : AbortSignal.any(signals);
 
@@ -176,16 +339,28 @@ async function fetchWithRetry(url: string, options: RequestInit, retries = MAX_R
         ...options,
         signal: combinedSignal,
       });
-      if (response.status === 429 && attempt < retries) {
-        // Rate limit — use longer delay (5s, 10s, 20s) to avoid hammering
-        const delay = 5000 * Math.pow(2, attempt) + Math.random() * 2000;
-        logger.warn({ status: 429, attempt, delayMs: Math.round(delay), event: "rate_limit_retry" }, "Rate limited — backing off");
-        await new Promise((r) => setTimeout(r, delay));
-        continue;
-      }
-      if (response.status >= 500 && attempt < retries) {
-        const delay = RETRY_DELAY_MS * Math.pow(2, attempt) + Math.random() * 1000;
-        await new Promise((r) => setTimeout(r, delay));
+      // 28-L-zai-retryable-status: previous shape only retried on
+      // 429 and 5xx. The Z.ai / Anthropic gateway commonly returns
+      // 408 Request Timeout and 425 Too Early, and CDN / proxy
+      // layers commonly return 502-504 as transient failures. The
+      // Anthropic / OpenAI retry policies all cover the union
+      // (408 || 425 || 429 || 5xx). Widen the trigger set.
+      const RETRYABLE = (s: number) =>
+        s === 408 || s === 425 || s === 429 || (s >= 500 && s < 600);
+      if (RETRYABLE(response.status) && attempt < retries) {
+        // 429 gets a longer delay (5s, 10s, 20s) to avoid hammering;
+        // 408/425/5xx use the standard exponential backoff.
+        const isRateLimit = response.status === 429;
+        const baseDelay = isRateLimit ? 5000 : RETRY_DELAY_MS;
+        const jitter = isRateLimit ? 2000 : 1000;
+        const delay = baseDelay * Math.pow(2, attempt) + Math.random() * jitter;
+        if (Date.now() - startTime + delay > maxTotalMs) break;
+        logger.warn(
+          { status: response.status, attempt, delayMs: Math.round(delay), event: "llm_retry" },
+          `${isRateLimit ? "Rate limited" : "Transient error"} — backing off`,
+        );
+        // 11-H6: respect the external abort signal during the backoff.
+        await abortableSleep(delay, externalSignal);
         continue;
       }
       return response;
@@ -194,7 +369,9 @@ async function fetchWithRetry(url: string, options: RequestInit, retries = MAX_R
       // Don't retry if the external abort signal fired — caller intentionally cancelled
       if (externalSignal?.aborted) throw lastError;
       if (attempt < retries) {
-        await new Promise((r) => setTimeout(r, RETRY_DELAY_MS * Math.pow(2, attempt)));
+        const delay = RETRY_DELAY_MS * Math.pow(2, attempt);
+        if (Date.now() - startTime + delay > maxTotalMs) break;
+        await abortableSleep(delay, externalSignal);
       }
     }
   }
@@ -210,10 +387,33 @@ const MAX_CONSECUTIVE_SAME_TOOL_CALLS = 6;
 const MAX_REPETITION_WINDOW = 30;
 
 function hashToolInput(input: Record<string, unknown>): string {
+  // 11-M4: use a real hash. The previous implementation just
+  // stringified the input with sorted keys, which (a) produces
+  // unbounded-length keys (slow Map ops on long sessions), and (b)
+  // can be spoofed by any input shape that JSON-serializes to the
+  // same string. SHA-256 is 64 hex chars regardless of input size
+  // and has effectively zero collision rate for tool-input space.
+  //
+  // 20-L-hash-fallback: the prior `catch { return String(input) }`
+  // collapsed every unstringifiable input (circular refs, BigInts,
+  // functions) to either `"[object Object]"` or a debuggy recursive
+  // dump — so two structurally-different inputs that both fail
+  // JSON.stringify hashed to the same string and the repetitive-
+  // loop detector silently treated them as identical. The detector
+  // exists to break infinite tool-call loops, so silently merging
+  // distinct loop candidates is the exact failure mode it was
+  // supposed to prevent. Log the failure and return a stable
+  // surrogate that includes the keys' sorted names so a second
+  // structurally-different input still hashes differently.
   try {
-    return JSON.stringify(input, Object.keys(input).sort());
-  } catch {
-    return String(input);
+    return createHash("sha256").update(JSON.stringify(input, Object.keys(input).sort())).digest("hex");
+  } catch (err) {
+    const keyNames = Object.keys(input).sort().join(",");
+    logger.warn(
+      { err: err instanceof Error ? err.message : String(err), keyCount: Object.keys(input).length, event: "hash_tool_input_fallback" },
+      "hashToolInput: JSON.stringify failed; using key-name surrogate hash",
+    );
+    return createHash("sha256").update(`unstringifiable:${keyNames}`).digest("hex");
   }
 }
 
@@ -268,6 +468,14 @@ function estimateMessageTokens(messages: LLMMessage[]): number {
   return Math.ceil(countMessageChars(messages) / CHARS_PER_TOKEN_ESTIMATE);
 }
 
+// 11-M2: hard ceiling on the joined summarization input. Per-message
+// slice caps at 2000 chars (below), but a runaway 500-message
+// conversation could still produce a 1 MB summarization prompt — well
+// past the glm-4.7-flash 128k token (~400k char) context window. We
+// truncate to 200 000 chars (~50k tokens) here, preferring the tail
+// (most recent context is usually more relevant to the live agent state).
+const MAX_SUMMARIZATION_INPUT_CHARS = 200_000;
+
 /** Summarize old messages when context exceeds threshold */
 async function summarizeOldMessages(messages: LLMMessage[], summarizeThreshold: number): Promise<string | null> {
   if (estimateMessageTokens(messages) <= summarizeThreshold) return null;
@@ -281,7 +489,7 @@ async function summarizeOldMessages(messages: LLMMessage[], summarizeThreshold: 
   if (oldMsgs.length === 0) return null;
 
   // Build summary prompt
-  const conversationText = oldMsgs
+  const rawConversationText = oldMsgs
     .map(m => {
       if (typeof m.content === "string") return `${m.role}: ${m.content.slice(0, 2000)}`;
       const textParts = m.content.filter((c): c is TextContent => c.type === "text").map(c => c.text).join(" ");
@@ -289,6 +497,14 @@ async function summarizeOldMessages(messages: LLMMessage[], summarizeThreshold: 
       return `${m.role}: ${textParts.slice(0, 2000)}${hasImage ? " [image attached]" : ""}`;
     })
     .join("\n");
+
+  // 11-M2: bound the total length so the summarizer model's context
+  // window can't be blown by a runaway conversation. Prefer the tail
+  // (most recent old messages); prefix a truncation marker so the
+  // summary model knows context is incomplete.
+  const conversationText = rawConversationText.length > MAX_SUMMARIZATION_INPUT_CHARS
+    ? `[...truncated ${rawConversationText.length - MAX_SUMMARIZATION_INPUT_CHARS} chars from the head]\n${rawConversationText.slice(-MAX_SUMMARIZATION_INPUT_CHARS)}`
+    : rawConversationText;
 
   const summaryPrompt = `Summarize this conversation history concisely.
 Keep: key decisions, important facts, active tasks, code snippets.
@@ -303,9 +519,8 @@ Respond ONLY with the summary, nothing else. Max 2000 characters.`;
   const config = loadConfig();
   const summaryModel = getModelForTier("haiku"); // glm-4.7-flash — cheap summarization
   const summaryProvider = resolveProviderConfig(config, summaryModel);
-  const summarySemaphore = getSemaphore(summaryModel);
   try {
-    await summarySemaphore.acquire();
+    await SUMMARY_SEMAPHORE.acquire();
     let summaryResponse: Response;
     try {
       summaryResponse = await fetchWithRetry(
@@ -321,7 +536,7 @@ Respond ONLY with the summary, nothing else. Max 2000 characters.`;
         }
       );
     } finally {
-      summarySemaphore.release();
+      SUMMARY_SEMAPHORE.release();
     }
 
     if (summaryResponse.ok) {
@@ -369,8 +584,16 @@ function pruneMessages(messages: LLMMessage[], maxTokens: number): LLMMessage[] 
     recent = recent.slice(safeStart);
   }
 
-  for (let i = 0; i < recent.length; i++) {
-    const msg = recent[i];
+  // 10-M2: iterate the recent slice from the END (most-recent message)
+  // backwards so when the token budget is exhausted we drop the OLDEST
+  // messages in `recent`, not the newest. The previous forward loop
+  // would `break` when budget ran out and silently drop the user's
+  // most recent query plus its tool results — exactly the messages
+  // the LLM needs most to answer the next turn.
+  const reversed = recent.slice().reverse();
+  const kept: LLMMessage[] = [];
+  for (let i = 0; i < reversed.length; i++) {
+    const msg = reversed[i];
     const charCount = typeof msg.content === "string"
       ? msg.content.length
       : msg.content.reduce((s, c) => s + (c.type === "text" ? c.text.length : 1000), 0);
@@ -379,31 +602,90 @@ function pruneMessages(messages: LLMMessage[], maxTokens: number): LLMMessage[] 
     // Don't split assistant+tool pairs: if this message has tool_calls, the next
     // message (tool results) MUST be kept too — otherwise the LLM sees orphaned calls
     if (usedTokens + tokenCount <= maxTokens) {
-      result.push(msg);
+      kept.push(msg);
       usedTokens += tokenCount;
     } else {
-      // If the PREVIOUS kept message has tool_calls, drop it too — orphaned tool calls
-      // without results will confuse the LLM
-      const prevKept = result[result.length - 1];
-      if (prevKept && prevKept.role === "assistant" && (prevKept as any).tool_calls) {
-        result.pop();
-      }
-
       const remainingTokens = maxTokens - usedTokens;
       const remainingChars = remainingTokens * CHARS_PER_TOKEN_ESTIMATE;
       if (remainingChars > 100) {
         if (typeof msg.content === "string") {
-          result.push({ ...msg, content: truncate(msg.content, remainingChars) });
+          kept.push({ ...msg, content: truncate(msg.content, remainingChars) });
         } else {
           const truncated = msg.content.map((c) =>
             c.type === "text" ? { type: "text" as const, text: truncate(c.text, remainingChars) } : c
           );
-          result.push({ ...msg, content: truncated });
+          kept.push({ ...msg, content: truncated });
         }
       }
+      // We've hit the budget — stop pulling in older messages, but
+      // we've already preserved the most-recent ones above.
       break;
     }
   }
+
+  // Re-reverse to put back in chronological order, then drop any
+  // orphaned tool-result-without-preceding-assistant at the start.
+  let chrono = kept.slice().reverse();
+  while (chrono.length > 0 && chrono[0].role === "user" && Array.isArray(chrono[0].content) && (chrono[0].content[0] as unknown as ToolResultContent | undefined)?.type === "tool_result") {
+    chrono = chrono.slice(1);
+  }
+  // 11-H7: drop any tool_result that lost its preceding assistant
+  // AND any assistant-with-tool_calls that lost its following tool
+  // results. The Anthropic API rejects both directions of the broken
+  // pair, and the previous code only handled the leading-edge case
+  // (orphan at the very start of `chrono`). The token-budget loop
+  // above can now land a cut between an assistant message and its
+  // tool results, or between tool results and the next assistant.
+  for (let pass = 0; pass < 2; pass++) {
+    let changed = false;
+    for (let i = 0; i < chrono.length; i++) {
+      const m = chrono[i];
+      if (!m) continue;
+      // Orphan tool result at the start: handled by the leading-edge
+      // while-loop above, skip.
+      if (i === 0 && m.role === "user" && Array.isArray(m.content) && (m.content[0] as unknown as ToolResultContent | undefined)?.type === "tool_result") {
+        chrono.splice(i, 1);
+        i--;
+        changed = true;
+        continue;
+      }
+      // Mid-array orphan tool result: no preceding assistant with a
+      // matching tool_call_id.
+      if (m.role === "user" && Array.isArray(m.content)) {
+        const first = m.content[0] as unknown as ToolResultContent | undefined;
+        if (first?.type === "tool_result") {
+          const prev = chrono[i - 1];
+          const prevIsMatchingAssistant = prev?.role === "assistant"
+            && Array.isArray(prev.tool_calls)
+            && prev.tool_calls.some((tc) => tc.id === first.tool_use_id);
+          if (!prevIsMatchingAssistant) {
+            chrono.splice(i, 1);
+            i--;
+            changed = true;
+            continue;
+          }
+        }
+      }
+      // Orphan assistant with tool_calls: no following tool result
+      // for at least one of its tool_call ids.
+      if (m.role === "assistant" && m.tool_calls && m.tool_calls.length > 0) {
+        const next = chrono[i + 1];
+        const nextFirst = Array.isArray(next?.content) ? (next!.content[0] as unknown as ToolResultContent | undefined) : undefined;
+        const nextMatches = next?.role === "user"
+          && Array.isArray(next.content)
+          && nextFirst?.type === "tool_result"
+          && m.tool_calls.some((tc) => tc.id === nextFirst.tool_use_id);
+        if (!nextMatches) {
+          chrono.splice(i, 1);
+          i--;
+          changed = true;
+          continue;
+        }
+      }
+    }
+    if (!changed) break;
+  }
+  for (const m of chrono) result.push(m);
 
   return result;
 }
@@ -442,6 +724,20 @@ export async function callZAI(request: LLMRequest): Promise<LLMResponse> {
           role: m.role as "user" | "assistant",
           content: m.content,
         };
+      }
+      // String content. If the message also carries tool_calls, fold the
+      // tool_use blocks into the content array in the API-required order:
+      // text blocks first, then tool_use. The Anthropic API rejects
+      // tool_use blocks that appear before a final text block in the
+      // assistant turn, and the LLM may emit them interleaved.
+      if (m.role === "assistant" && m.tool_calls && m.tool_calls.length > 0) {
+        const blocks: Array<TextContent | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> }> = [];
+        const text = typeof m.content === "string" ? m.content : "";
+        if (text) blocks.push({ type: "text", text });
+        for (const tc of m.tool_calls) {
+          blocks.push({ type: "tool_use", id: tc.id, name: tc.name, input: tc.input });
+        }
+        return { role: "assistant" as const, content: blocks };
       }
       return {
         role: m.role as "user" | "assistant",
@@ -506,7 +802,13 @@ export async function callZAI(request: LLMRequest): Promise<LLMResponse> {
         content += c.text;
       } else if (c.type === "tool_use" && c.name && c.input) {
         toolCalls.push({
-          id: c.id ?? `tool-${crypto.randomUUID().slice(0, 8)}`,
+          // 10-L7: use the full UUID, not the first 8 hex chars. The
+          // previous slice(0, 8) yielded 32 bits of entropy — at 100
+          // tool calls per turn (max_tools), collisions become
+          // likely within a single long-running session. A colliding
+          // tool_use id is silently dropped by the Anthropic API and
+          // the tool result is orphaned in the conversation history.
+          id: c.id ?? `tool-${crypto.randomUUID()}`,
           name: c.name,
           input: c.input,
         });
@@ -525,8 +827,11 @@ export async function callZAI(request: LLMRequest): Promise<LLMResponse> {
 /** Resolve provider config (base URL, API key, headers) from model name */
 function resolveProviderConfig(config: ReturnType<typeof loadConfig>, model: string) {
   const isKimi = model.startsWith("kimi-");
-  if (isKimi && !config.KIMI_API_KEY) {
+  if (isKimi && !config.KIMI_API_KEY?.trim()) {
     throw new Error(`KIMI_API_KEY is required for model "${model}". Set it in .env or switch DEFAULT_MODEL to a GLM model.`);
+  }
+  if (!isKimi && !config.ZAI_API_KEY?.trim()) {
+    throw new Error(`ZAI_API_KEY is required for model "${model}". Set it in .env or use Kimi with KIMI_API_KEY.`);
   }
   const baseUrl = isKimi ? config.KIMI_BASE_URL : config.ZAI_BASE_URL;
   const apiKey = isKimi ? config.KIMI_API_KEY : config.ZAI_API_KEY;
@@ -602,10 +907,12 @@ export async function callLLMWithTools(
   let readWarningInjected = false;
   let buildGateTriggeredAt = 0;
 
-  // Per-model context limits (use 80% of window as max, 50% as summarize threshold)
+  // Per-model context limits (use PRUNE_HEADROOM_RATIO of window as
+  // max, SUMMARIZE_TRIGGER_RATIO as summarize threshold — see
+  // utils/progress.ts-style named constants near the top of the file).
   const contextWindow = getModelContextWindow(request.model ?? "");
-  const maxContextTokens = Math.floor(contextWindow * 0.8);
-  const summarizeThreshold = Math.floor(contextWindow * 0.5);
+  const maxContextTokens = Math.floor(contextWindow * PRUNE_HEADROOM_RATIO);
+  const summarizeThreshold = Math.floor(contextWindow * SUMMARIZE_TRIGGER_RATIO);
 
   while (iteration < 200) {
     iteration++;
@@ -653,9 +960,35 @@ export async function callLLMWithTools(
     const toolResults: string[] = [];
     for (const tc of response.tool_calls) {
       onProgress?.({ iteration, totalTools, currentTool: tc.name, phase: "executing" });
-      const result = await toolExecutor(tc.name, tc.input);
-      // Track file operations for long-running task context
-      const filePath = (tc.input?.file_path ?? tc.input?.path) as string | undefined;
+      let result: string;
+      try {
+        result = await toolExecutor(tc.name, tc.input);
+      } catch (toolErr) {
+        // 12-H15: a single tool throwing should not kill the entire
+        // iteration. The previous behavior was to let the exception
+        // propagate up to callLLMWithTools's caller (continueConversation
+        // / spawn handler), which surfaced as a generic "agent failed"
+        // toast and abandoned any subsequent tool calls in the same
+        // iteration. The LLM often includes several tools in one
+        // response (e.g., Read + Write + Bash for "look at the file,
+        // edit it, run the test"). If the Read throws on a missing
+        // file, the Write and Bash never run, and the LLM is left
+        // with no feedback to retry from. Convert the throw to a
+        // tool result so the LLM sees the error and the rest of the
+        // iteration continues.
+        const errMsg = toolErr instanceof Error ? toolErr.message : String(toolErr);
+        logger.warn(
+          { tool: tc.name, err: errMsg, event: "tool_execution_threw" },
+          `Tool ${tc.name} threw — converting to error result so the LLM can recover`,
+        );
+        result = `[Tool execution failed: ${tc.name}] ${errMsg}`;
+      }
+      // Track file operations for long-running task context. Coerce the
+      // tool input to a string defensively rather than `as string` — a
+      // bad payload with `file_path: 42` would otherwise surface as the
+      // literal string "42" in the activity log and confuse operators.
+      const filePathRaw = tc.input?.file_path ?? tc.input?.path;
+      const filePath = typeof filePathRaw === "string" ? filePathRaw : undefined;
       const isFileOp = ["Read", "Write", "Edit", "Glob", "Grep", "Bash"].includes(tc.name);
       if (isFileOp) {
         onFileOperation?.({ tool: tc.name, path: filePath, result: result.startsWith("Error:") ? "failed" : "success" });
@@ -664,11 +997,25 @@ export async function callLLMWithTools(
       // Special case: AskUserQuestion should stop the loop and return the question
       if (result.startsWith("__ASK_USER_QUESTION__")) {
         const questionJson = result.substring("__ASK_USER_QUESTION__".length);
-        const questionData = JSON.parse(questionJson);
+        // Q2-6th: try/catch around JSON.parse. A malformed payload (a
+        // tool that returned "__ASK_USER_QUESTION__{not json}" used to
+        // throw synchronously, escape the Promise chain, and trip the
+        // unhandledRejection handler at index.ts:356 — process exit 1
+        // with no graceful drain. Log a warning and return an empty
+        // question so the loop continues; the user can re-ask if needed.
+        let questionData: { question?: string };
+        try {
+          questionData = JSON.parse(questionJson);
+        } catch (parseErr) {
+          logger.warn({ err: String(parseErr), event: "ask_user_question_parse_failed" },
+            "Failed to parse __ASK_USER_QUESTION__ payload — returning empty question");
+          questionData = { question: "" };
+        }
         return {
-          content: questionData.question,
+          content: questionData.question ?? "",
           tool_calls: [{
-            id: tc.id ?? `call_${crypto.randomUUID().slice(0, 8)}`,
+            // 10-L7: full UUID — see tool_use branch above
+            id: tc.id ?? `call_${crypto.randomUUID()}`,
             name: tc.name,
             input: questionData,
           }],
@@ -679,11 +1026,21 @@ export async function callLLMWithTools(
       // Special case: ProposePlan should stop the loop and return the plan
       if (result.startsWith("__PROPOSE_PLAN__")) {
         const planJson = result.substring("__PROPOSE_PLAN__".length);
-        const planData = JSON.parse(planJson);
+        // Q2-6th: same parse-error safety as above — a malformed plan
+        // payload shouldn't take down the process.
+        let planData: { title?: string };
+        try {
+          planData = JSON.parse(planJson);
+        } catch (parseErr) {
+          logger.warn({ err: String(parseErr), event: "propose_plan_parse_failed" },
+            "Failed to parse __PROPOSE_PLAN__ payload — returning empty plan");
+          planData = { title: "" };
+        }
         return {
-          content: planData.title,
+          content: planData.title ?? "",
           tool_calls: [{
-            id: tc.id ?? `call_${crypto.randomUUID().slice(0, 8)}`,
+            // 10-L7: full UUID — see tool_use branch above
+            id: tc.id ?? `call_${crypto.randomUUID()}`,
             name: tc.name,
             input: planData,
           }],
@@ -742,7 +1099,7 @@ export async function callLLMWithTools(
           toolName: tc.name,
           iterations: iteration,
           message: loopCheck.message,
-        } as any);
+        });
 
         // Inject enhanced warning into context with continuation reminder
         messages.push({ role: "assistant", content: response.content, tool_calls: response.tool_calls });
@@ -1141,6 +1498,26 @@ export const GAME_STUDIO_TOOLS: LLMTool[] = [
         platform: { type: "string", enum: ["android", "ios"], description: "Target mobile platform" },
       },
       required: ["platform"],
+    },
+  },
+  {
+    name: "DeepResearch",
+    description:
+      "Perform deep multi-turn research using MiroMind's specialised deep research model. " +
+      "The research runs in multiple turns: broad analysis → deep-dive on gaps → (optional) synthesis. " +
+      "Returns a structured research report with numbered citations and a consolidated sources section. " +
+      "Use for market analysis, genre trends, competitive landscape evaluation, target audience " +
+      "profiling, technical feasibility assessment, and GDD recommendations. " +
+      "Best used during pre-production / GDD creation phase, or when the producer needs data-driven decisions. " +
+      "Requires MIROMIND_API_KEY to be configured in .env.",
+    input_schema: {
+      type: "object",
+      properties: {
+        topic: { type: "string", description: "The research topic or question. Be specific (e.g., 'Market viability of a roguelike deckbuilder for mobile in 2025')" },
+        context: { type: "string", description: "Additional context — project description, target platforms, genre, target audience hints (optional)" },
+        requireCitations: { type: "boolean", description: "Request numbered citations with sources appended to output (default: true). Set false for quick lookups." },
+      },
+      required: ["topic"],
     },
   },
 ];

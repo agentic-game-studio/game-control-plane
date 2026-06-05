@@ -14,6 +14,15 @@ export const MILESTONES = [
   { id: "ship", name: "Ship Ready", phase: 4, minCompleted: 18 },
 ] as const;
 
+// 27-C-milestone-cache-cap: hard cap on the per-project "last gated
+// milestone index" cache. The map is only written to (line 72), never
+// evicted; a long-running API that processes many short-lived projects
+// (CI runs, demo accounts, test rigs) grew it without bound. The
+// entries are tiny (8 bytes of value + map overhead) so the
+// memory cost is low, but the unboundedness trips health-check
+// alerts and bloats heap snapshots. Cap at 1000 — well above any
+// realistic single-tenant active-project count.
+const MAX_LAST_GATED_PROJECTS = 1000;
 const lastGatedByProject = new Map<string, number>();
 
 export interface MilestoneStatus {
@@ -70,6 +79,21 @@ export async function advanceMilestoneIfReady(
   }
 
   lastGatedByProject.set(projectId, nextIndex);
+  // 27-C-milestone-cache-cap: enforce the cap after every write.
+  // Map preserves insertion order, so the oldest projects are
+  // evicted first — same shape as the 26th-pass gateVerdicts /
+  // toolsCache caps. A re-inserted projectId moves to the end and
+  // is preserved; only projects that haven't progressed in months
+  // are dropped.
+  if (lastGatedByProject.size > MAX_LAST_GATED_PROJECTS) {
+    const toDrop = lastGatedByProject.size - MAX_LAST_GATED_PROJECTS;
+    let dropped = 0;
+    for (const key of lastGatedByProject.keys()) {
+      if (dropped >= toDrop) break;
+      lastGatedByProject.delete(key);
+      dropped++;
+    }
+  }
 
   await updateTicketsBoard(projectId, (board) => {
     board.milestone = next.name;

@@ -76,7 +76,7 @@ function TabButton({
 }) {
   const icon = getAgentIcon(session.role);
   const label = session.role === "producer" ? "BOARD_ROOM" : session.role.replace(/-/g, "_").toUpperCase();
-  const isDone = session.status === "done";
+  const isDone = session.status === "completed";
   const isProducer = session.role === "producer";
   const statusChip = isProducer
     ? producerState?.mode === "thinking"
@@ -131,7 +131,15 @@ function TabButton({
 
       {/* Close button */}
       {isClosable && (
-        <span
+        // 26-L-tabs-close-aria: was a <span> with onClick — a
+        // non-semantic click target that screen readers couldn't
+        // discover as a button, and missing aria-label entirely.
+        // Switch to a real <button> with explicit role/label/keyboard
+        // support. The `e.stopPropagation()` is preserved so clicking
+        // × doesn't bubble up and trigger the parent tab's onClick.
+        <button
+          type="button"
+          aria-label="Close session"
           onClick={(e) => {
             e.stopPropagation();
             onClose?.();
@@ -140,7 +148,7 @@ function TabButton({
           title="Close session"
         >
           ×
-        </span>
+        </button>
       )}
     </button>
   );

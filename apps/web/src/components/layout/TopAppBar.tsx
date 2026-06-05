@@ -96,17 +96,33 @@ export default function TopAppBar() {
         <div className="border-2 border-black flex items-center px-2 py-1 bg-white hidden md:flex">
           <span className="material-symbols-outlined text-black mr-2 text-sm">search</span>
           <input
+            // 11-M11: aria-label for screen readers. The input is
+            // icon-only visually (a search icon sits next to the
+            // placeholder), so without an aria-label a screen reader
+            // announces only "edit text" with no purpose.
+            aria-label="Search"
             className="bg-transparent border-none outline-none text-black font-[var(--font-terminal)] text-sm p-0 w-32 focus:ring-0 placeholder:text-black"
             placeholder="SEARCH_"
             type="text"
           />
         </div>
-        <button className="border-2 border-black bg-white p-1 hover:bg-black hover:text-white transition-colors retro-press">
-          <span className="material-symbols-outlined">notifications</span>
+        <button
+          // 10-L8: icon-only button — announce the action to assistive
+          // tech. Visible hover/focus styles exist; the title is now
+          // paired with an explicit aria-label for screen readers.
+          aria-label="Notifications"
+          title="Notifications"
+          className="border-2 border-black bg-white p-1 hover:bg-black hover:text-white transition-colors retro-press"
+        >
+          <span className="material-symbols-outlined" aria-hidden="true">notifications</span>
         </button>
-        <Link href="/settings">
-          <button className="border-2 border-black bg-white p-1 hover:bg-black hover:text-white transition-colors retro-press">
-            <span className="material-symbols-outlined">settings</span>
+        <Link href="/settings" aria-label="Open settings">
+          <button
+            aria-label="Open settings"
+            title="Open settings"
+            className="border-2 border-black bg-white p-1 hover:bg-black hover:text-white transition-colors retro-press"
+          >
+            <span className="material-symbols-outlined" aria-hidden="true">settings</span>
           </button>
         </Link>
         <div className="w-8 h-8 border-2 border-black bg-surface-container-high overflow-hidden">

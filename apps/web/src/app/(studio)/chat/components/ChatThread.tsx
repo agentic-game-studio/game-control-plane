@@ -9,6 +9,7 @@ import DiffView from "./DiffView";
 import QuestionMessage from "./QuestionMessage";
 import PlanMessage from "./PlanMessage";
 import WorkflowMessage from "./WorkflowMessage";
+import { COMMANDS } from "./CommandInput";
 
 interface ChatThreadProps {
   messages: ChatMessage[];
@@ -64,6 +65,16 @@ const TOOL_COLORS: Record<string, string> = {
   AskUserQuestion: "#c13301",
 };
 
+/** Default color for tools missing from TOOL_COLORS. Mirrors the
+ * chrome/secondary text color used elsewhere so unknown tools blend
+ * in rather than jumping out as "broken". Centralized so the value
+ * stays in sync between the tool pill and any future call site. */
+const DEFAULT_TOOL_COLOR = "#737688";
+
+function getToolColor(name: string): string {
+  return TOOL_COLORS[name] ?? DEFAULT_TOOL_COLOR;
+}
+
 function truncateArg(str: string, maxLen: number): string {
   // Split at word boundary or path separator for cleaner truncation
   const splitPoints = str.match(/[/\\. _-]/g) || [];
@@ -91,6 +102,16 @@ type LogEntry =
 const ActivityLog = memo(function ActivityLog({ toolCalls, logs, defaultExpanded = false }: ActivityLogProps) {
   const [expanded, setExpanded] = useState(defaultExpanded);
 
+  // 25-M-key-stability: previously the entries were keyed by
+  // array index alone. When a new tool call was prepended (the
+  // common case — newest first) and a log was trimmed from the
+  // tail, every surviving entry's index shifted, so React reused
+  // the old DOM node for a new content slot and the text inside
+  // flickered / showed the wrong state during the in-place
+  // reconcile. Pair the index with a content-derived suffix so
+  // each entry has a stable id across reorders; React now mounts
+  // a new node for genuinely new entries and reuses the old
+  // node only when the content is the same.
   const entries: LogEntry[] = useMemo(() => {
     const combined: LogEntry[] = [
       ...toolCalls.map((tc) => ({ kind: "tool" as const, ...tc })),
@@ -98,6 +119,11 @@ const ActivityLog = memo(function ActivityLog({ toolCalls, logs, defaultExpanded
     ];
     return combined.reverse();
   }, [toolCalls, logs]);
+
+  const entryKey = (entry: LogEntry, i: number): string =>
+    entry.kind === "tool"
+      ? `tool-${i}-${entry.name}-${entry.status}`
+      : `log-${i}-${entry.text.slice(0, 32)}`;
 
   const totalCount = toolCalls.length + (logs?.length ?? 0);
   const previewEntries = entries.slice(0, 3);
@@ -107,6 +133,12 @@ const ActivityLog = memo(function ActivityLog({ toolCalls, logs, defaultExpanded
       {/* Header bar */}
       <button
         onClick={() => setExpanded((e) => !e)}
+        aria-expanded={expanded}
+        // 14-FH6-activity-aria: aria-expanded announces collapsed/
+        // expanded state to screen readers (matches the WAI-ARIA
+        // disclosure pattern). aria-controls wires the button to the
+        // region it toggles so SR users can navigate to the content.
+        aria-controls="activity-log-panel"
         className="w-full px-3 py-1.5 bg-black flex items-center gap-2 hover:bg-[#191b25] transition-colors"
       >
         <span className="material-symbols-outlined text-white text-sm">
@@ -122,14 +154,14 @@ const ActivityLog = memo(function ActivityLog({ toolCalls, logs, defaultExpanded
 
       {/* Collapsed: show 3 latest entries */}
       {!expanded && previewEntries.length > 0 && (
-        <div className="divide-y divide-[#e1e1ef]">
+        <div id="activity-log-panel" className="divide-y divide-[#e1e1ef]">
           {previewEntries.map((entry, i) => (
-            <div key={i} className="flex items-center gap-2 px-3 py-1.5 min-w-0">
+            <div key={entryKey(entry, i)} className="flex items-center gap-2 px-3 py-1.5 min-w-0">
               {entry.kind === "tool" ? (
                 <>
                   <span
                     className="material-symbols-outlined text-sm shrink-0"
-                    style={{ color: TOOL_COLORS[entry.name] ?? "#737688" }}
+                    style={{ color: getToolColor(entry.name) }}
                   >
                     {TOOL_ICONS[entry.name] ?? "build"}
                   </span>
@@ -155,13 +187,13 @@ const ActivityLog = memo(function ActivityLog({ toolCalls, logs, defaultExpanded
 
       {/* Expanded: all entries in reverse order (newest first) */}
       {expanded && (
-        <div className="divide-y divide-[#e1e1ef]">
+        <div id="activity-log-panel" className="divide-y divide-[#e1e1ef]">
           {entries.map((entry, i) =>
             entry.kind === "tool" ? (
-              <div key={i} className="flex items-center gap-2 px-3 py-1.5 min-w-0">
+              <div key={entryKey(entry, i)} className="flex items-center gap-2 px-3 py-1.5 min-w-0">
                 <span
                   className="material-symbols-outlined text-sm shrink-0"
-                  style={{ color: TOOL_COLORS[entry.name] ?? "#737688" }}
+                  style={{ color: getToolColor(entry.name) }}
                 >
                   {TOOL_ICONS[entry.name] ?? "build"}
                 </span>
@@ -176,7 +208,7 @@ const ActivityLog = memo(function ActivityLog({ toolCalls, logs, defaultExpanded
                 </span>
               </div>
             ) : (
-              <div key={i} className="flex items-center gap-2 px-3 py-1.5 min-w-0">
+              <div key={entryKey(entry, i)} className="flex items-center gap-2 px-3 py-1.5 min-w-0">
                 <span className="material-symbols-outlined text-sm shrink-0 text-[#a0a0b0]">notes</span>
                 <span className="font-[var(--font-terminal)] text-xs text-[#737688] flex-1 min-w-0 truncate">
                   {entry.text}
@@ -194,10 +226,35 @@ const ActivityLog = memo(function ActivityLog({ toolCalls, logs, defaultExpanded
 
 const ImageGallery = memo(function ImageGallery({ images }: { images?: string[] }) {
   if (!images || images.length === 0) return null;
+  // 12-C3: only render allowlisted URL schemes. The producer chat lets
+  // users paste arbitrary content, and a malicious paste of e.g.
+  // `data:text/html,<script>...</script>` would otherwise render as an
+  // <img> whose `src` browsers may treat as a navigation target on
+  // right-click / drag-out. Allow only http(s), blob:, and data:image/*.
+  // Anything else is silently dropped so the chat keeps rendering.
+  const safe = images.filter((src) => {
+    if (typeof src !== "string" || src.length === 0) return false;
+    const trimmed = src.trim().toLowerCase();
+    if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) return true;
+    if (trimmed.startsWith("blob:") || trimmed.startsWith("/")) return true;
+    // data:image/png;base64,..., data:image/jpeg;..., data:image/webp;..., etc.
+    // Block data:text/html, data:application/*, etc.
+    if (trimmed.startsWith("data:image/")) return true;
+    return false;
+  });
+  if (safe.length === 0) return null;
   return (
       <div className="flex flex-col gap-2 mt-3 max-w-full min-w-0">
-        {images.map((src, i) => (
-          <div key={i} className="border-2 border-black shadow-[2px_2px_0_0_rgba(0,0,0,1)] overflow-hidden max-w-full">
+        {safe.map((src, i) => (
+          // 26-M-image-gallery-keys: key off the image src (truncated
+          // so React's reconciler doesn't carry megabytes of base64
+          // into every key) instead of the array index. With index
+          // keys, removing the first image reuses the second image's
+          // DOM (wrong src on a cached element) and React's
+          // `loading="lazy"` would short-circuit the load. The src
+          // is stable across re-renders unless the image itself
+          // changes, which is exactly the property a key needs.
+          <div key={src.slice(-64)} className="border-2 border-black shadow-[2px_2px_0_0_rgba(0,0,0,1)] overflow-hidden max-w-full">
           <img src={src} alt={`Attachment ${i + 1}`} className="max-w-full max-h-64 object-contain" loading="lazy" />
         </div>
       ))}
@@ -352,7 +409,7 @@ const WelcomeMessage = memo(function WelcomeMessage({ msg }: { msg: ChatMessage 
             </div>
             <div className="mt-3 pt-2 border-t border-[#e1e1ef]">
               <span className="font-[var(--font-terminal)] text-[10px] text-[#737688]">
-                Type <code className="text-[#0055FF] font-bold">/help</code> to see all {19} commands
+                Type <code className="text-[#0055FF] font-bold">/help</code> to see all {COMMANDS.length} commands
               </span>
             </div>
           </div>
@@ -373,20 +430,74 @@ const WelcomeMessage = memo(function WelcomeMessage({ msg }: { msg: ChatMessage 
   );
 });
 
-/* Markdown render cache to avoid re-parsing on every render */
-const mdCache = new Map<string, string>();
-const MAX_CACHE = 200;
+/* Markdown render cache — LRU with project-scoped buckets (10-C2).
+ *
+ * The old module-level Map used FIFO eviction and never cleared on
+ * project switch, so long-running sessions leaked up to MAX_CACHE large
+ * HTML strings per project, with no LRU semantics (FIFO deletes the
+ * oldest-inserted, not the least-recently-used). We split by project
+ * (keyed by the current project's id) and use a true LRU: read
+ * promotes to most-recent, write evicts the least-recently-read entry.
+ *
+ * `currentProjectIdRef` is read at call time so callers don't have to
+ * thread the project through every renderMarkdown site. The parent
+ * (chat page) sets the ref via setCurrentProjectIdForMarkdownCache()
+ * whenever currentProjectId changes — see useEffect there. */
+const MD_CACHE_LIMIT = 200;
+const mdCaches = new Map<string, Map<string, string>>();
+// 14-CR-markdown-cache: the ref holds the *currently active* project
+// id. Without it, every call site that forgot to pass projectId would
+// bucket into the same `__default__` Map, causing cross-project HTML
+// contamination (a 100KB entry from project A served for project B's
+// message if the markdown bodies happened to collide) and unbounded
+// growth (one map per app session, never reclaimed on project switch).
+let currentProjectIdRef: string | null = null;
 
-function cachedRenderMarkdown(content: string): string {
-  const cached = mdCache.get(content);
-  if (cached) return cached;
-  const html = renderMarkdown(content);
-  if (mdCache.size >= MAX_CACHE) {
-    const firstKey = mdCache.keys().next().value;
-    if (firstKey) mdCache.delete(firstKey);
+/** Update the projectId used to bucket the markdown cache. Call from
+ * a useEffect on currentProjectId change in the chat page. */
+export function setCurrentProjectIdForMarkdownCache(projectId: string | null): void {
+  currentProjectIdRef = projectId;
+}
+
+function getMdCache(projectId: string | null): Map<string, string> {
+  const key = projectId ?? "__default__";
+  let cache = mdCaches.get(key);
+  if (!cache) {
+    cache = new Map();
+    mdCaches.set(key, cache);
   }
-  mdCache.set(content, html);
+  return cache;
+}
+
+function cachedRenderMarkdown(content: string, projectId?: string | null): string {
+  // 14-CR-markdown-cache: prefer the explicit arg, fall back to the
+  // ref (so legacy call sites that didn't pass projectId still bucket
+  // correctly), fall back to `__default__`. The ref path is what
+  // fixes the cross-project contamination.
+  const effectiveProjectId = projectId ?? currentProjectIdRef;
+  const cache = getMdCache(effectiveProjectId);
+  const cached = cache.get(content);
+  if (cached !== undefined) {
+    // LRU: re-insert to mark as most-recently-used.
+    cache.delete(content);
+    cache.set(content, cached);
+    return cached;
+  }
+  const html = renderMarkdown(content);
+  if (cache.size >= MD_CACHE_LIMIT) {
+    // Delete the oldest-inserted (which is also the least-recently-used
+    // because we re-insert on read).
+    const firstKey = cache.keys().next().value;
+    if (firstKey !== undefined) cache.delete(firstKey);
+  }
+  cache.set(content, html);
   return html;
+}
+
+/** Drop the markdown cache for a specific project. Called on project
+ * switch so a long-lived session doesn't keep prior projects' HTML. */
+export function clearProjectMarkdownCache(projectId: string): void {
+  mdCaches.delete(projectId);
 }
 
 const AgentMessage = memo(function AgentMessage({
@@ -477,12 +588,6 @@ const AgentMessage = memo(function AgentMessage({
             {!isProgress && (toolCalls?.length || msg.logs?.length) && (
               <ActivityLog toolCalls={toolCalls ?? []} logs={msg.logs} />
             )}
-
-            <div className="absolute -right-3 -top-3 opacity-0 group-hover:opacity-100 transition-opacity">
-              <button className="w-8 h-8 border-2 border-black bg-black text-white hover:bg-[#0055FF] flex justify-center items-center retro-press" title="Trace Thought Process">
-                <span className="material-symbols-outlined text-sm">search</span>
-              </button>
-            </div>
           </div>
         </div>
 
@@ -602,11 +707,32 @@ export default function ChatThread({ messages, sessions, threadId, threadTitle, 
   const bottomRef = useRef<HTMLDivElement>(null);
   const prevMsgCountRef = useRef(0);
 
-  // Only scroll when new messages are added (not on progress updates)
+  // 11-M13: only auto-scroll when the user is already near the bottom.
+  // If they've scrolled up to read history, yanking them back to the
+  // bottom on every incoming message is hostile. Use the scroll
+  // container of `bottomRef.current` and treat "within 150px of bottom"
+  // as "follow the tail."
   const msgCount = messages.length;
   useEffect(() => {
     if (msgCount > prevMsgCountRef.current) {
-      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+      const el = bottomRef.current;
+      if (el) {
+        // The nearest scrollable ancestor — walk up until we find one.
+        let scrollContainer: HTMLElement | null = el.parentElement;
+        while (scrollContainer && scrollContainer !== document.body) {
+          const style = window.getComputedStyle(scrollContainer);
+          if (/auto|scroll/.test(style.overflowY)) break;
+          scrollContainer = scrollContainer.parentElement;
+        }
+        const FOLLOW_TAIL_THRESHOLD_PX = 150;
+        const isFirstMessage = prevMsgCountRef.current === 0;
+        const isAtBottom = scrollContainer
+          ? scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight < FOLLOW_TAIL_THRESHOLD_PX
+          : true;
+        if (isFirstMessage || isAtBottom) {
+          el.scrollIntoView({ behavior: "smooth" });
+        }
+      }
     }
     prevMsgCountRef.current = msgCount;
   }, [msgCount]);
@@ -616,7 +742,7 @@ export default function ChatThread({ messages, sessions, threadId, threadTitle, 
     const map = new Map<string, boolean>();
     if (sessions) {
       for (const [key, session] of sessions) {
-        map.set(key, session.status === "done");
+        map.set(key, session.status === "completed");
       }
     }
     return map;

@@ -1,9 +1,11 @@
 "use client";
 
 import Link from "next/link";
+import type { Route } from "next";
 import { usePathname } from "next/navigation";
 import { useState, useEffect } from "react";
 import { apiFetch } from "@/lib/api";
+import { useAbortableEffect } from "@/hooks/useAbortableEffect";
 import type { DashboardData } from "@game-studio/types";
 
 /** Hidden from sidebar only; pages remain reachable by URL */
@@ -15,7 +17,9 @@ const SIDEBAR_HIDDEN_HREFS = new Set([
   "/sessions",
 ]);
 
-const navItems = [
+type NavItem = { href: Route; icon: string; label: string; fill: boolean };
+
+const navItems: NavItem[] = [
   { href: "/dashboard", icon: "dashboard", label: "Dashboard", fill: false },
   { href: "/chat", icon: "chat", label: "Comms", fill: false },
   { href: "/agents", icon: "smart_toy", label: "Agents", fill: false },
@@ -34,16 +38,27 @@ export default function SideNavBar() {
   const pathname = usePathname();
   const [credits, setCredits] = useState<{ current: number; max: number }>({ current: 100, max: 100 });
 
-  useEffect(() => {
-    apiFetch<DashboardData>("/api/dashboard")
-      .then((data) => setCredits(data.summary.credits))
-      .catch(() => {
-        // Keep default credits on error
-      });
+  // 29-M-sidenav-mount-fetch: previous shape had no AbortController
+  // on the mount-time /api/dashboard fetch. An unmount mid-flight
+  // (route change, app teardown) would log a React "setState on
+  // unmounted component" warning and could trigger a no-op state
+  // update. useAbortableEffect handles both the abort on unmount
+  // and the no-state-update-after-unmount guard via signal.aborted.
+  useAbortableEffect(async (signal) => {
+    try {
+      const data = await apiFetch<DashboardData>("/api/dashboard", { signal });
+      if (!signal.aborted) setCredits(data.summary.credits);
+    } catch {
+      // Keep default credits on error — the abort case is a
+      // benign no-op, all other errors keep the placeholder.
+    }
   }, []);
 
   return (
-    <nav className="hidden md:flex flex-col h-full w-64 border-r-2 border-black bg-white z-40 shrink-0">
+    <nav
+      aria-label="Studio navigation"
+      className="hidden md:flex flex-col h-full w-64 border-r-2 border-black bg-white z-40 shrink-0"
+    >
       {/* Studio Identity */}
       <div className="p-4 border-b-2 border-black">
         <div className="flex items-center gap-3 mb-2">
@@ -89,20 +104,33 @@ export default function SideNavBar() {
 
       {/* Footer Links */}
       <div className="mt-auto border-t-2 border-black p-4">
-        <Link
-          href="#"
-          className="text-black flex items-center gap-3 p-2 hover:bg-[#0055FF] hover:text-white font-[var(--font-terminal)] text-sm font-bold uppercase transition-colors"
+        {/* 14-FH7-placeholder-links: previously these were href="#"
+            which scrolls to the top of the page on click and does
+            nothing else — and "Logout" with a no-op handler is
+            actively dangerous: a user clicking it would believe they
+            were logged out, but their session is still valid.
+            Until real auth/session-handling exists, render the
+            controls as disabled buttons with a clear title
+            explaining why, rather than fake links. Once the auth
+            routes land, wire these to the real handlers. */}
+        <button
+          type="button"
+          disabled
+          title="Support is not yet wired to a help system"
+          className="w-full text-left text-black/40 flex items-center gap-3 p-2 font-[var(--font-terminal)] text-sm font-bold uppercase cursor-not-allowed"
         >
           <span className="material-symbols-outlined">help</span>
           Support
-        </Link>
-        <Link
-          href="#"
-          className="text-black flex items-center gap-3 p-2 hover:bg-[#0055FF] hover:text-white font-[var(--font-terminal)] text-sm font-bold uppercase transition-colors"
+        </button>
+        <button
+          type="button"
+          disabled
+          title="Logout is not yet wired to an auth flow"
+          className="w-full text-left text-black/40 flex items-center gap-3 p-2 font-[var(--font-terminal)] text-sm font-bold uppercase cursor-not-allowed"
         >
           <span className="material-symbols-outlined">logout</span>
           Logout
-        </Link>
+        </button>
       </div>
     </nav>
   );

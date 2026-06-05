@@ -5,7 +5,12 @@ import { test, expect } from "@playwright/test";
  * These tests require the backend (port 3001) and frontend (port 3000) to be running.
  */
 
-const API_KEY = "change_this_to_a_random_secret";
+// Pulled from env so CI / dev can pass `E2E_API_KEY=...` without editing.
+// The fallback is the same placeholder the auth middleware uses for the
+// default `.env.example` — it satisfies the type check but a running API
+// configured with a real secret will reject the request, which is the
+// desired behavior (the test should be re-run with the right env).
+const API_KEY = process.env.E2E_API_KEY ?? "e2e-test-only-not-a-secret";
 
 interface ApiResponse<T> {
   success: boolean;

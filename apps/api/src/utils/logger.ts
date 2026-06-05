@@ -2,6 +2,29 @@ import pino from "pino";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { existsSync, mkdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import type { Request } from "express";
+import { readLoggerConfig } from "../config.js";
+
+/**
+ * Extract a stable request ID from incoming headers, falling back to a
+ * fresh random UUID when none is supplied. Centralized so the request
+ * logger middleware and any future cross-cutting middleware (error
+ * handler, request validator) agree on the same header precedence:
+ * x-request-id → x-correlation-id → generated.
+ *
+ * 10-M6: previously this returned `randomUUID().slice(0, 8)` — that's
+ * only 32 bits of entropy. With ~10 RPS sustained traffic, collisions
+ * become statistically likely in roughly 12 hours. Use the full 128-bit
+ * UUID; log lines and correlation IDs aren't user-visible so the extra
+ * characters cost nothing.
+ */
+export function getRequestId(req: Request): string {
+  const headerVal = req.headers["x-request-id"] ?? req.headers["x-correlation-id"];
+  if (typeof headerVal === "string" && headerVal.length > 0) return headerVal;
+  if (Array.isArray(headerVal) && headerVal.length > 0 && headerVal[0]) return headerVal[0];
+  return randomUUID();
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -12,6 +35,19 @@ if (!existsSync(LOG_DIR)) {
 }
 
 const LOG_FILE = join(LOG_DIR, "api.log");
+// 24-M-env-var-drift: read LOG_TO_FILE and RAILWAY_ENVIRONMENT_ID
+// from the Zod-validated config via `readLoggerConfig()` instead of
+// the inline `process.env.X` checks. The 23rd pass added both to the
+// Zod schema (config.ts:62-65) but didn't migrate this consumer —
+// the logger module is the one place that runs before
+// `loadConfig()` is callable (it would force a circular import with
+// the pino transports), so we expose a `readLoggerConfig()` side
+// door in config.ts. Semantics are preserved: `LOG_TO_FILE !== "false"`
+// is true for empty/unset (file logs on) and false only for the
+// literal string "false"; `!RAILWAY_ENVIRONMENT_ID` is true when the
+// var is unset or empty.
+const { logToFile, isRailway } = readLoggerConfig();
+const enableFileLogs = logToFile && !isRailway;
 
 const transport = pino.transport({
   targets: [
@@ -24,24 +60,28 @@ const transport = pino.transport({
         ignore: "pid,hostname",
       },
     },
-    {
-      level: "info",
-      target: "pino-file-transport",
-      options: {
-        path: LOG_FILE,
-        rotation: { maxSize: 50, frequency: "daily", logging: false },
-        retention: { duration: "7d", logging: false },
-      },
-    },
-    {
-      level: "error",
-      target: "pino-file-transport",
-      options: {
-        path: join(LOG_DIR, "error.log"),
-        rotation: { maxSize: 20, frequency: "daily", logging: false },
-        retention: { duration: "14d", logging: false },
-      },
-    },
+    ...(enableFileLogs
+      ? [
+          {
+            level: "info",
+            target: "pino-file-transport",
+            options: {
+              path: LOG_FILE,
+              rotation: { maxSize: 50, frequency: "daily", logging: false },
+              retention: { duration: "7d", logging: false },
+            },
+          },
+          {
+            level: "error",
+            target: "pino-file-transport",
+            options: {
+              path: join(LOG_DIR, "error.log"),
+              rotation: { maxSize: 20, frequency: "daily", logging: false },
+              retention: { duration: "14d", logging: false },
+            },
+          },
+        ]
+      : []),
   ],
 });
 

@@ -34,6 +34,18 @@ export const godotAgents: Partial<Record<AgentRole, AgentDefinition>> = {
     memory: "session",
     reportsTo: ["godot-specialist"],
   },
+  "godot-csharp-specialist": {
+    name: "godot-csharp-specialist",
+    description: "C# in Godot 4: .csproj setup, [Export]/[Signal] attributes, async/await patterns, P/Invoke to GDExtension, and Mono/Cecil tooling. Pair-programs with godot-gdscript-specialist for mixed-codebase projects.",
+    tier: 3,
+    model: "sonnet",
+    tools: ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Task"],
+    maxTurns: 30,
+    skills: ["dev-story", "compose-scene", "run-godot-headless", "code-review"],
+    memory: "session",
+    reportsTo: ["godot-specialist", "lead-programmer"],
+    experimental: true,
+  },
   "godot-shader-specialist": {
     name: "godot-shader-specialist",
     description: "Godot shading language, visual shaders, VFX.",
@@ -55,5 +67,6 @@ export const godotAgents: Partial<Record<AgentRole, AgentDefinition>> = {
     skills: ["dev-story"],
     memory: "session",
     reportsTo: ["godot-specialist"],
+    experimental: true,
   },
 };

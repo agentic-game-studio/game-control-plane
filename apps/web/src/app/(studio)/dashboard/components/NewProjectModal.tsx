@@ -97,11 +97,44 @@ export function NewProjectModal({ isOpen, onClose, onSubmit }: NewProjectModalPr
 
     // Validate absolute path before submit
     if (workspacePath && workspacePath.startsWith("/")) {
-      if (!pathValidation) {
-        await validatePath(workspacePath);
+      // 15-H-new-project-modal-stale-closure: the previous code did
+      // `await validatePath(workspacePath)` (which calls
+      // setPathValidation in state) and then immediately read
+      // `pathValidation` from the closure to decide whether to bail.
+      // But the closure's `pathValidation` is the value from when
+      // handleSubmit was last memoized — the freshly-set state isn't
+      // visible to this same function call. If the user clicked
+      // Submit with no prior blur validation, pathValidation was
+      // null, validatePath set it, but the next line's `if
+      // (pathValidation && ...)` was still reading the OLD null —
+      // so an invalid path would be silently accepted. Read the
+      // freshly-validated result back from the server and use that
+      // local variable instead.
+      let validation = pathValidation;
+      if (!validation) {
+        try {
+          const result = await apiFetch<{ success: boolean; data: PathValidation }>(
+            "/api/dashboard/validate-path",
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ path: workspacePath.trim() }),
+            }
+          );
+          validation = result.data;
+          setPathValidation(result.data);
+        } catch {
+          // Treat as invalid but don't block the user from a relative
+          // path submission — the server will validate again on POST.
+          if (workspacePath.startsWith("/")) {
+            setSubmitError("Could not validate workspace path");
+            return;
+          }
+          validation = null;
+        }
       }
-      if (pathValidation && !pathValidation.valid) {
-        setSubmitError(pathValidation.error ?? "Invalid workspace path");
+      if (validation && !validation.valid) {
+        setSubmitError(validation.error ?? "Invalid workspace path");
         return;
       }
     }
@@ -245,7 +278,7 @@ export function NewProjectModal({ isOpen, onClose, onSubmit }: NewProjectModalPr
               </div>
             )}
             <span className="font-[var(--font-terminal)] text-[10px] text-[#737688]">
-              Absolute path to link an existing project, or relative name to create inside workspace.
+              On the hosted demo, Browse shows the Railway server workspace. Use a relative name, or use CLOUD_DEMO from the dashboard.
             </span>
           </div>
         </FormField>

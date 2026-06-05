@@ -99,6 +99,7 @@ export const specialistAgents: Partial<Record<AgentRole, AgentDefinition>> = {
     skills: ["dev-story"],
     memory: "session",
     reportsTo: ["lead-programmer"],
+    experimental: true,
   },
   "ui-programmer": {
     name: "ui-programmer",
@@ -209,6 +210,7 @@ export const specialistAgents: Partial<Record<AgentRole, AgentDefinition>> = {
     skills: ["security-audit"],
     memory: "session",
     reportsTo: ["technical-director"],
+    experimental: true,
   },
   prototyper: {
     name: "prototyper",
@@ -220,6 +222,7 @@ export const specialistAgents: Partial<Record<AgentRole, AgentDefinition>> = {
     skills: ["prototype"],
     memory: "session",
     reportsTo: ["producer"],
+    experimental: true,
   },
   "accessibility-specialist": {
     name: "accessibility-specialist",
@@ -239,7 +242,13 @@ export const specialistAgents: Partial<Record<AgentRole, AgentDefinition>> = {
     model: "sonnet",
     tools: ["Read", "Write", "Edit", "Glob", "Grep"],
     maxTurns: 30,
-    skills: [],
+    // 6I-6th: wire the live-ops-designer to the team-live-ops workflow and
+    // the changelog / patch-notes skills. Before this, an autonomous-loop
+    // producer that wanted to spin up a live event had no way to delegate
+    // to live-ops-designer because the agent's `skills` was empty — the
+    // skill registry filters agents by `uses`/`agents` and the agent
+    // itself had no skills to be filtered by.
+    skills: ["team-live-ops", "changelog", "patch-notes", "balance-check"],
     memory: "session",
     reportsTo: ["producer"],
   },
@@ -253,5 +262,17 @@ export const specialistAgents: Partial<Record<AgentRole, AgentDefinition>> = {
     skills: ["changelog", "patch-notes"],
     memory: "project",
     reportsTo: ["producer"],
+  },
+  "market-researcher": {
+    name: "market-researcher",
+    description: "Deep research specialist powered by MiroMind. Conducts market analysis, competitive landscape evaluation, genre trend analysis, target audience profiling, and technical feasibility assessments. Provides data-driven recommendations to inform GDD creation and scope decisions. Uses the DeepResearch tool for external research queries.",
+    tier: 3,
+    model: "haiku",
+    tools: ["Read", "Write", "Edit", "DeepResearch"],
+    maxTurns: 15,
+    skills: ["brainstorm", "gate-check"],
+    memory: "project",
+    reportsTo: ["creative-director", "producer"],
+    delegates: [],
   },
 };

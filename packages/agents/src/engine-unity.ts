@@ -11,6 +11,7 @@ export const unityAgents: Partial<Record<AgentRole, AgentDefinition>> = {
     skills: ["dev-story", "code-review"],
     memory: "session",
     reportsTo: ["lead-programmer"],
+    experimental: true,
   },
   "unity-dots-specialist": {
     name: "unity-dots-specialist",
@@ -22,6 +23,7 @@ export const unityAgents: Partial<Record<AgentRole, AgentDefinition>> = {
     skills: ["dev-story"],
     memory: "session",
     reportsTo: ["unity-specialist"],
+    experimental: true,
   },
   "unity-shader-specialist": {
     name: "unity-shader-specialist",
@@ -33,6 +35,7 @@ export const unityAgents: Partial<Record<AgentRole, AgentDefinition>> = {
     skills: [],
     memory: "session",
     reportsTo: ["unity-specialist", "technical-artist"],
+    experimental: true,
   },
   "unity-addressables-specialist": {
     name: "unity-addressables-specialist",
@@ -44,6 +47,7 @@ export const unityAgents: Partial<Record<AgentRole, AgentDefinition>> = {
     skills: [],
     memory: "session",
     reportsTo: ["unity-specialist"],
+    experimental: true,
   },
   "unity-ui-specialist": {
     name: "unity-ui-specialist",
@@ -55,5 +59,6 @@ export const unityAgents: Partial<Record<AgentRole, AgentDefinition>> = {
     skills: ["ux-design", "dev-story"],
     memory: "session",
     reportsTo: ["unity-specialist", "ui-programmer"],
+    experimental: true,
   },
 };

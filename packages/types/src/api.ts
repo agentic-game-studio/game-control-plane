@@ -10,6 +10,7 @@ import type { SettingsConfig } from "./settings.js";
 import type { ChatSession, ChatMessage, ContextUsage } from "./chat.js";
 import type { GameBuild } from "./builds.js";
 import type { AutonomousRunMetrics } from "./metrics.js";
+import type { SkillName } from "./skill.js";
 
 /** WebSocket event types for real-time frontend updates */
 export type WSEvent =
@@ -23,6 +24,7 @@ export type WSEvent =
   | { type: "log:entry"; sessionId: string; level: string; message: string; timestamp: string; agent?: string }
   | { type: "document:created"; documentId: string; category: DocumentCategory; title: string }
   | { type: "document:updated"; documentId: string; category: DocumentCategory; title: string }
+  | { type: "documents:bulk-updated"; count: number }
   | { type: "project:created"; project: Project }
   | { type: "project:updated"; project: Project }
   | { type: "project:deleted"; projectId: string }
@@ -31,10 +33,11 @@ export type WSEvent =
   | { type: "ticket:deleted"; ticketId: string; projectId?: string | null }
   | { type: "ticket:moved"; ticket: Ticket; fromColumn: string; toColumn: string; projectId?: string | null }
   | { type: "ticket:verified"; ticketId: string; projectId?: string | null; verdict: string; passed: boolean; verifier: AgentRole }
-  | { type: "asset:created"; asset: GameAsset }
-  | { type: "asset:updated"; asset: GameAsset }
-  | { type: "asset:deleted"; assetId: string }
-  | { type: "asset:generated"; asset: GameAsset }
+  | { type: "ticket:deadletter"; ticketId: string; projectId?: string | null; reason: string; attempts: number }
+  | { type: "asset:created"; asset: GameAsset; projectId?: string | null }
+  | { type: "asset:updated"; asset: GameAsset; projectId?: string | null }
+  | { type: "asset:deleted"; assetId: string; projectId?: string | null }
+  | { type: "asset:generated"; asset: GameAsset; projectId?: string | null }
   | { type: "settings:updated"; settings: SettingsConfig }
   | { type: "team:started"; teamId: string; sessionId: string }
   | { type: "team:completed"; teamId: string; sessionId: string; output: string }
@@ -49,6 +52,7 @@ export type WSEvent =
   | { type: "chat:session:compacted"; oldSessionId: string; newSession: ChatSession }
   | { type: "workflow:stage"; sessionId: string; workflowId: string; stage: WorkflowStage; ticketId?: string; agentRole?: string }
   | { type: "workflow:complete"; sessionId: string; workflowId: string; success: boolean }
+  | { type: "workflow:cleared"; sessionId: string; projectId: string }
   | { type: "quest:linked"; sessionId: string; ticketId: string; agentRole: string }
   | { type: "subagent:spawned"; agentRole: AgentRole; parentSessionId: string; ticketId: string; task: string }
   | { type: "subagent:completed"; agentRole: AgentRole; parentSessionId: string; ticketId: string; output: string }
@@ -70,7 +74,10 @@ export type WSEvent =
   | { type: "build:created"; build: GameBuild }
   | { type: "build:updated"; build: GameBuild }
   // Run metrics
-  | { type: "autonomous:metrics"; sessionId: string; metrics: AutonomousRunMetrics };
+  | { type: "autonomous:metrics"; sessionId: string; metrics: AutonomousRunMetrics }
+  // Deep research events (MiroMind)
+  | { type: "autonomous:research"; phase: "started" | "completed"; projectId: string; concept?: string; sections?: number }
+  | { type: "research:completed"; projectId: string; concept?: string; sections: number };
 
 /** API request/response types */
 export interface ApiResponse<T = unknown> {
@@ -100,7 +107,7 @@ export interface SpawnAgentRequest {
 // Skills
 export interface InvokeSkillRequest {
   sessionId: string;
-  skillId: string;
+  skillId: SkillName;
   args?: Record<string, string>;
   reviewMode?: ReviewMode;
 }

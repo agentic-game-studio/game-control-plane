@@ -11,6 +11,7 @@ export const unrealAgents: Partial<Record<AgentRole, AgentDefinition>> = {
     skills: ["dev-story", "code-review"],
     memory: "session",
     reportsTo: ["lead-programmer"],
+    experimental: true,
   },
   "ue-gas-specialist": {
     name: "ue-gas-specialist",
@@ -22,6 +23,7 @@ export const unrealAgents: Partial<Record<AgentRole, AgentDefinition>> = {
     skills: ["dev-story"],
     memory: "session",
     reportsTo: ["unreal-specialist"],
+    experimental: true,
   },
   "ue-blueprint-specialist": {
     name: "ue-blueprint-specialist",
@@ -33,6 +35,7 @@ export const unrealAgents: Partial<Record<AgentRole, AgentDefinition>> = {
     skills: ["dev-story"],
     memory: "session",
     reportsTo: ["unreal-specialist"],
+    experimental: true,
   },
   "ue-replication-specialist": {
     name: "ue-replication-specialist",
@@ -44,6 +47,7 @@ export const unrealAgents: Partial<Record<AgentRole, AgentDefinition>> = {
     skills: ["dev-story"],
     memory: "session",
     reportsTo: ["unreal-specialist", "network-programmer"],
+    experimental: true,
   },
   "ue-umg-specialist": {
     name: "ue-umg-specialist",
@@ -55,5 +59,6 @@ export const unrealAgents: Partial<Record<AgentRole, AgentDefinition>> = {
     skills: ["ux-design", "dev-story"],
     memory: "session",
     reportsTo: ["unreal-specialist", "ui-programmer"],
+    experimental: true,
   },
 };

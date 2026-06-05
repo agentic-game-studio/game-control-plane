@@ -132,7 +132,7 @@ try:
 except Exception as e:
     # Downloading/caching is also fine
     print('Model download triggered (may continue in background)')
-" 2>/dev/null || echo "  (model will download on first pipeline use)"
+" || echo "  (model will download on first pipeline use; check rembg install if this persists)"
 fi
 
 # ── Summary ──────────────────────────────────────────────────────────────────

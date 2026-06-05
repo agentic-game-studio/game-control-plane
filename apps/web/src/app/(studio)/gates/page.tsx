@@ -1,9 +1,11 @@
 "use client";
-
+import { createLogger } from "../../../lib/logger";
 import { useState, useEffect } from "react";
 import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "@/hooks/useWebSocket";
+import { useDialog } from "@/hooks/useDialog";
 import type { WSEvent } from "@game-studio/types";
+const logger = createLogger("page");
 
 interface GateStatus {
   gateId: string;
@@ -83,7 +85,7 @@ export default function GatesPage() {
         const sessions = await apiFetch<{ currentSessionId: string }>("/api/chat/sessions");
         setSessionId(sessions.currentSessionId);
       } catch (error) {
-        console.error("Failed to get session:", error);
+        logger.error("Failed to get session", { err: error });
       }
     };
     initSession();
@@ -96,7 +98,7 @@ export default function GatesPage() {
       const data = await apiFetch<GateStatus[]>(`/api/gates?sessionId=${sessionToUse}`);
       setGates(data);
     } catch (error) {
-      console.error("Failed to load gates:", error);
+      logger.error("Failed to load gates", { err: error });
     } finally {
       setLoading(false);
     }
@@ -109,10 +111,11 @@ export default function GatesPage() {
   };
 
   useWebSocket(handleWSEvent);
+  const { alert: showAlert } = useDialog();
 
   const handleRunGate = async (gateId: string) => {
     if (!sessionId) {
-      alert("No session available. Please select a session first.");
+      await showAlert("No session available. Please select a session first.");
       return;
     }
     setRunning(gateId);
@@ -128,8 +131,8 @@ export default function GatesPage() {
       setVerdict(result);
       loadGates();
     } catch (error) {
-      console.error("Failed to run gate:", error);
-      alert(`Failed to run gate: ${error}`);
+      logger.error("Failed to run gate", { err: error });
+      await showAlert(`Failed to run gate: ${error}`);
     } finally {
       setRunning(null);
     }

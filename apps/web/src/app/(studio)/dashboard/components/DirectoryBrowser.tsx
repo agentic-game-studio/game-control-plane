@@ -69,8 +69,11 @@ export function DirectoryBrowser({ isOpen, onClose, onSelect, initialPath }: Dir
           <button
             onClick={onClose}
             className="w-7 h-7 border-2 border-black flex items-center justify-center hover:bg-black hover:text-white transition-colors"
+            // 10-L8: icon-only close button — announce to assistive tech
+            aria-label="Close directory browser"
+            title="Close"
           >
-            <span className="material-symbols-outlined text-sm">close</span>
+            <span className="material-symbols-outlined text-sm" aria-hidden="true">close</span>
           </button>
         </div>
 
@@ -132,8 +135,13 @@ export function DirectoryBrowser({ isOpen, onClose, onSelect, initialPath }: Dir
                   key={dir}
                   onClick={() => browse(currentPath + "/" + dir)}
                   className="w-full flex items-center gap-2 px-3 py-2 border-b border-[#e1e1ef] hover:bg-[#f3f2ff] transition-colors text-left"
+                  // 10-L8: visible label is the dir name, but the
+                  // accessible name should describe the action so a
+                  // screen reader hears "Open directory 'foo'" instead
+                  // of just "foo".
+                  aria-label={`Open directory ${dir}`}
                 >
-                  <span className="material-symbols-outlined text-sm">folder</span>
+                  <span className="material-symbols-outlined text-sm" aria-hidden="true">folder</span>
                   <span className="font-[var(--font-terminal)] text-xs truncate">{dir}</span>
                 </button>
               ))}

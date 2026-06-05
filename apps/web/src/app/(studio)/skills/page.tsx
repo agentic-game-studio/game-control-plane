@@ -1,7 +1,10 @@
 "use client";
-
-import { useState, useEffect } from "react";
+import { createLogger } from "../../../lib/logger";
+import { useState, useEffect, useRef } from "react";
 import { apiFetch } from "@/lib/api";
+import { useDialog } from "@/hooks/useDialog";
+import { SUCCESS_TOAST_DURATION_MS } from "@/lib/timing";
+const logger = createLogger("page");
 
 interface SkillPhase {
   order: number;
@@ -44,6 +47,19 @@ export default function SkillsPage() {
   const [selectedSkill, setSelectedSkill] = useState<Skill | null>(null);
   const [invoking, setInvoking] = useState(false);
   const [invokeSuccess, setInvokeSuccess] = useState(false);
+  // 14-FH5-toast-cleanup: same pattern as agents/page.tsx — track
+  // the auto-dismiss timer so unmount or a quick re-invoke doesn't
+  // leak a setState call onto a dead component or race two timers
+  // against the same success state.
+  const invokeSuccessTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    return () => {
+      if (invokeSuccessTimerRef.current) {
+        clearTimeout(invokeSuccessTimerRef.current);
+        invokeSuccessTimerRef.current = null;
+      }
+    };
+  }, []);
   const [sessionId, setSessionId] = useState("");
   const [activeTab, setActiveTab] = useState<"all" | "team" | "solo">("all");
 
@@ -53,7 +69,7 @@ export default function SkillsPage() {
         const data = await apiFetch<Skill[]>("/api/skills");
         setSkills(data);
       } catch (error) {
-        console.error("Failed to load skills:", error);
+        logger.error("Failed to load skills", { err: error });
       } finally {
         setLoading(false);
       }
@@ -68,7 +84,7 @@ export default function SkillsPage() {
         );
         setSessionId(sessions.currentSessionId);
       } catch (error) {
-        console.error("Failed to get session:", error);
+        logger.error("Failed to get session", { err: error });
       }
     };
     initSession();
@@ -121,9 +137,11 @@ export default function SkillsPage() {
     return matchesSearch && matchesCategory && matchesTab;
   });
 
+  const { alert: showAlert } = useDialog();
+
   const handleInvoke = async (skill: Skill) => {
     if (!sessionId) {
-      alert("No session available. Please refresh the page.");
+      await showAlert("No session available. Please refresh the page.");
       return;
     }
     setInvoking(true);
@@ -135,10 +153,16 @@ export default function SkillsPage() {
         body: JSON.stringify({ sessionId, reviewMode: "lean" }),
       });
       setInvokeSuccess(true);
-      setTimeout(() => setInvokeSuccess(false), 3000);
+      if (invokeSuccessTimerRef.current) {
+        clearTimeout(invokeSuccessTimerRef.current);
+      }
+      invokeSuccessTimerRef.current = setTimeout(() => {
+        setInvokeSuccess(false);
+        invokeSuccessTimerRef.current = null;
+      }, SUCCESS_TOAST_DURATION_MS);
     } catch (error) {
-      console.error("Failed to invoke skill:", error);
-      alert(`Failed to invoke skill: ${error}`);
+      logger.error("Failed to invoke skill", { err: error });
+      await showAlert(`Failed to invoke skill: ${error}`);
     } finally {
       setInvoking(false);
     }

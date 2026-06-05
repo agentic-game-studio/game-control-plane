@@ -4,6 +4,7 @@ import { useState, useCallback, useRef, useMemo } from "react";
 import type { ChatMessage } from "@/hooks/useCommandRoom";
 import { renderMarkdown } from "@/lib/markdown";
 import { formatTime } from "@/lib/format-time";
+import { optionLetter } from "@/lib/question-options";
 
 interface QuestionMessageProps {
   msg: ChatMessage;
@@ -12,8 +13,6 @@ interface QuestionMessageProps {
   isAnswered?: boolean;
   answerContent?: string;
 }
-
-const OPTION_LETTERS = ["A", "B", "C", "D", "E", "F", "G", "H"];
 
 export default function QuestionMessage({ msg, onAnswer, sender, isAnswered, answerContent }: QuestionMessageProps) {
   const [selected, setSelected] = useState<string[]>([]);
@@ -133,7 +132,7 @@ export default function QuestionMessage({ msg, onAnswer, sender, isAnswered, ans
               {/* Options */}
               <div className="space-y-2.5 mb-5">
                 {question.options.map((option, index) => {
-                  const letter = OPTION_LETTERS[index] ?? String(index + 1);
+                  const letter = optionLetter(index);
                   const checked = isSelected(option.id);
 
                   return (

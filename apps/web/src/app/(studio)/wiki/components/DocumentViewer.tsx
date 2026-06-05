@@ -2,6 +2,7 @@
 
 import { useMemo } from "react";
 import type { DocumentDetail } from "@game-studio/types";
+import { renderMarkdown } from "@/lib/markdown";
 
 interface DocumentViewerProps {
   document: DocumentDetail | null;
@@ -9,88 +10,14 @@ interface DocumentViewerProps {
   loading: boolean;
 }
 
-/** Minimal markdown-to-HTML renderer */
-function renderMarkdown(md: string, onWikilink: (target: string) => void): string {
-  let html = md;
-
-  // Escape HTML entities
-  html = html.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-
-  // Code blocks (``` ... ```)
-  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_m, lang, code) =>
-    `<pre class="bg-black text-green-400 p-2 border-2 border-black my-2 text-xs overflow-x-auto"><code>${code.trim()}</code></pre>`
-  );
-
-  // Inline code
-  html = html.replace(/`([^`]+)`/g, '<code class="bg-black text-green-400 px-1 text-xs">$1</code>');
-
-  // Wikilinks [[target]] — rendered as clickable spans
-  html = html.replace(/\[\[([^\]]+)\]\]/g, (_m, target) => {
-    const slug = target.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
-    return `<span data-wikilink="${slug}" class="text-blue-600 underline cursor-pointer hover:text-blue-800">[[${target}]]</span>`;
-  });
-
-  // Headings
-  html = html.replace(/^### (.+)$/gm, '<h3 class="text-base font-bold mt-4 mb-1">$1</h3>');
-  html = html.replace(/^## (.+)$/gm, '<h2 class="text-lg font-bold mt-4 mb-1">$1</h2>');
-  html = html.replace(/^# (.+)$/gm, '<h1 class="text-xl font-bold mt-4 mb-2 border-b-2 border-black pb-1">$1</h1>');
-
-  // Bold
-  html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
-
-  // Italic
-  html = html.replace(/\*(.+?)\*/g, "<em>$1</em>");
-
-  // Blockquotes
-  html = html.replace(/^&gt; (.+)$/gm, '<blockquote class="border-l-4 border-black pl-2 italic opacity-80 my-1">$1</blockquote>');
-
-  // Tables (pipe-delimited)
-  const tableRegex = /(\|.+\|[\r\n]+\|[-| :]+\|[\r\n]+((?:\|.+\|[\r\n]*)+))/g;
-  html = html.replace(tableRegex, (match) => {
-    const rows = match.trim().split("\n").filter((r) => r.trim());
-    if (rows.length < 2) return match;
-
-    const headerCells = rows[0].split("|").filter((c) => c.trim());
-    const bodyRows = rows.slice(2);
-
-    let table = '<table class="w-full border-2 border-black text-xs my-2"><thead><tr>';
-    for (const cell of headerCells) {
-      table += `<th class="border-2 border-black p-1 bg-surface-container text-left">${cell.trim()}</th>`;
-    }
-    table += "</tr></thead><tbody>";
-
-    for (const row of bodyRows) {
-      const cells = row.split("|").filter((c) => c.trim());
-      table += "<tr>";
-      for (const cell of cells) {
-        table += `<td class="border-2 border-black p-1">${cell.trim()}</td>`;
-      }
-      table += "</tr>";
-    }
-
-    table += "</tbody></table>";
-    return table;
-  });
-
-  // Unordered lists
-  html = html.replace(/^- (.+)$/gm, '<li class="ml-4 list-disc">$1</li>');
-
-  // Paragraphs: double newline splits
-  html = html.replace(/\n\n/g, '</p><p class="my-1">');
-
-  // Wrap in paragraph if not starting with block element
-  if (!html.startsWith("<h") && !html.startsWith("<pre") && !html.startsWith("<table")) {
-    html = `<p class="my-1">${html}</p>`;
-  }
-
-  return html;
-}
-
 export default function DocumentViewer({ document, onSelect, loading }: DocumentViewerProps) {
   const htmlContent = useMemo(() => {
     if (!document) return "";
-    return renderMarkdown(document.content, onSelect);
-  }, [document, onSelect]);
+    // 17-C1: route the wiki viewer through the hardened lib/markdown.ts
+    // renderer (with wikilink support) instead of the local copy that
+    // skipped the 4-layer XSS defenses.
+    return renderMarkdown(document.content, { wikilinks: true });
+  }, [document]);
 
   const handleClick = (e: React.MouseEvent<HTMLDivElement>) => {
     const target = e.target as HTMLElement;

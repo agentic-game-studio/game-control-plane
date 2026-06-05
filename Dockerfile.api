@@ -1,0 +1,89 @@
+# syntax=docker/dockerfile:1.7
+# Multi-stage build: builder installs all deps and compiles, runtime only keeps
+# production deps. The final image runs as a non-root user, exposes a real
+# HEALTHCHECK against the API's /health endpoint, and gets a writable /app/data
+# + /app/workspace layer for the file-based state store.
+
+# -------- builder stage --------
+FROM node:22.12.0-bookworm-slim AS builder
+
+WORKDIR /app
+
+ENV NODE_ENV=development \
+    CI=true
+
+RUN npm install -g pnpm@10.33.0
+
+# Copy the monorepo manifest + lockfile first so dependency installation is
+# cached when only source code changes.
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json tsconfig.base.json ./
+COPY apps/api/package.json ./apps/api/package.json
+COPY apps/web/package.json ./apps/web/package.json
+COPY packages ./packages
+
+RUN pnpm install --frozen-lockfile
+
+# Now copy the rest of the source and build only the API.
+COPY apps ./apps
+
+# pnpm 10 dropped the recursive `...` filter. Run `pnpm generate` (which
+# produces the agent and skill registries used at runtime) then a plain
+# pnpm build for the api workspace package. The api's `build` script is
+# `tsc --noEmit` — type-check only, no dist output, which is fine because
+# the runtime uses tsx on source.
+RUN pnpm generate \
+    && pnpm --filter @game-studio/api build
+
+# pnpm 10's prune no longer accepts --filter. Skip the prune step;
+# the runtime image carries all workspace deps. Slight size penalty
+# for a much simpler build.
+
+# -------- runtime stage --------
+FROM node:22.12.0-bookworm-slim AS runtime
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+
+RUN npm install -g pnpm@10.33.0 \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends wget ca-certificates gosu \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 1001 nodejs 2>/dev/null || true \
+    && useradd --system --uid 1001 --gid nodejs --create-home --shell /bin/bash node 2>/dev/null || true
+
+COPY docker-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# Copy only what the runtime needs from the builder.
+COPY --from=builder --chown=node:nodejs /app/package.json /app/pnpm-lock.yaml /app/pnpm-workspace.yaml /app/turbo.json ./
+COPY --from=builder --chown=node:nodejs /app/apps/api/package.json ./apps/api/package.json
+COPY --from=builder --chown=node:nodejs /app/packages ./packages
+COPY --from=builder --chown=node:nodejs /app/node_modules ./node_modules
+# pnpm 10 isolates each workspace's deps; the api's `tsx` lives in
+# apps/api/node_modules/.bin/tsx. Without this copy, `pnpm --filter
+# @game-studio/api start` (which runs `tsx src/index.ts`) cannot resolve
+# tsx. The api's local node_modules is full of symlinks back to the root
+# .pnpm store which we copied above, so all packages resolve correctly.
+COPY --from=builder --chown=node:nodejs /app/apps/api/node_modules ./apps/api/node_modules
+# The api runs from source via `tsx src/index.ts` — copy the api source
+# tree (src/, tsconfig.json, etc.) into the runtime image. The api's
+# package.json alone is not enough for tsx to resolve the entry file.
+COPY --from=builder --chown=node:nodejs /app/apps/api/src ./apps/api/src
+COPY --from=builder --chown=node:nodejs /app/apps/api/tsconfig.json ./apps/api/tsconfig.json
+
+# Prepare writable directories. /data is the Railway volume mount path
+# (chowned at container start by the entrypoint), /app/{data,workspace,logs}
+# are for local / Docker-only runs. The entrypoint handles both.
+RUN mkdir -p /app/data /app/workspace /app/logs \
+    && chown -R node:nodejs /app
+
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["pnpm", "start:api"]
+
+EXPOSE 3001
+
+# Healthcheck hits /health. config.ts resolves API_PORT ?? PORT; Railway
+# injects PORT at runtime. Use PORT with a 3001 default for plain-Docker runs.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD wget -qO- "http://127.0.0.1:${PORT:-3001}/health" || exit 1

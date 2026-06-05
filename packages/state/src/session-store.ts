@@ -4,6 +4,32 @@ import type { SessionState, Checkpoint, SessionConfig, LogEntry } from "@game-st
 
 const SESSION_STATE_DIR = "production/session-state";
 
+/** Per-session FIFO mutex to serialize read-modify-write cycles and prevent
+ * lost updates when concurrent callers (autonomous loop + chat send + log
+ * stream) all touch the same session. Mirrors the pattern in
+ * `apps/api/src/services/data-store.ts` for `updateData`. The map stores
+ * the *current* lock promise; the next caller takes that as `prev` and
+ * installs its own `lock` as the new current. Comparison in the finally
+ * block uses the same `lock` reference that was set, so a later caller
+ * that has already installed a new lock will not have its entry removed. */
+const sessionLocks = new Map<string, Promise<void>>();
+
+async function withSessionLock<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
+  const prev = sessionLocks.get(sessionId) ?? Promise.resolve();
+  let release: () => void;
+  const lock = new Promise<void>((r) => { release = r; });
+  sessionLocks.set(sessionId, lock);
+  try {
+    await prev;
+    return await fn();
+  } finally {
+    release!();
+    if (sessionLocks.get(sessionId) === lock) {
+      sessionLocks.delete(sessionId);
+    }
+  }
+}
+
 export class SessionStore {
   constructor(private workspaceDir: string) {}
 
@@ -44,7 +70,19 @@ export class SessionStore {
 
   async save(session: SessionState): Promise<void> {
     session.updatedAt = new Date().toISOString();
-    await fs.writeFile(this.sessionPath(session.id), JSON.stringify(session, null, 2), "utf-8");
+    const targetPath = this.sessionPath(session.id);
+    // Atomic write: stage to .tmp then rename. Avoids half-written JSON
+    // corrupting the session if the process is killed mid-write. Also catches
+    // write errors explicitly — without this a failed write would propagate
+    // as an uncaught rejection that crashes the API.
+    const tmpPath = targetPath + ".tmp";
+    try {
+      await fs.writeFile(tmpPath, JSON.stringify(session, null, 2), "utf-8");
+      await fs.rename(tmpPath, targetPath);
+    } catch (writeErr) {
+      await fs.unlink(tmpPath).catch(() => {});
+      throw writeErr;
+    }
   }
 
   async list(): Promise<SessionState[]> {
@@ -70,51 +108,99 @@ export class SessionStore {
   }
 
   async createCheckpoint(sessionId: string, phase: string, activeTask: string): Promise<Checkpoint> {
-    const session = await this.get(sessionId);
-    if (!session) throw new Error(`Session ${sessionId} not found`);
+    return withSessionLock(sessionId, async () => {
+      const session = await this.get(sessionId);
+      if (!session) throw new Error(`Session ${sessionId} not found`);
 
-    const checkpoint: Checkpoint = {
-      id: crypto.randomUUID(),
-      sessionId,
-      timestamp: new Date().toISOString(),
-      phase,
-      activeTask,
-      completedSections: [],
-      decisions: [],
-      agentInvocations: [],
-      openQuestions: [],
-    };
+      const checkpoint: Checkpoint = {
+        id: crypto.randomUUID(),
+        sessionId,
+        timestamp: new Date().toISOString(),
+        phase,
+        activeTask,
+        completedSections: [],
+        decisions: [],
+        agentInvocations: [],
+        openQuestions: [],
+      };
 
-    session.checkpoints.push(checkpoint);
-    session.activeCheckpoint = checkpoint.id;
-    await this.save(session);
+      session.checkpoints.push(checkpoint);
+      session.activeCheckpoint = checkpoint.id;
+      await this.save(session);
 
-    // Also save checkpoint file
-    const cpDir = this.checkpointDir(sessionId);
-    await fs.mkdir(cpDir, { recursive: true });
-    await fs.writeFile(
-      path.join(cpDir, `${checkpoint.id}.json`),
-      JSON.stringify(checkpoint, null, 2),
-      "utf-8"
-    );
+      // Also save checkpoint file
+      const cpDir = this.checkpointDir(sessionId);
+      await fs.mkdir(cpDir, { recursive: true });
+      await fs.writeFile(
+        path.join(cpDir, `${checkpoint.id}.json`),
+        JSON.stringify(checkpoint, null, 2),
+        "utf-8"
+      );
 
-    return checkpoint;
+      return checkpoint;
+    });
   }
 
   async addLog(sessionId: string, entry: Omit<LogEntry, "timestamp">): Promise<void> {
-    const session = await this.get(sessionId);
-    if (!session) return;
-    session.logs.push({ ...entry, timestamp: new Date().toISOString() });
-    // Keep last 1000 log entries
-    if (session.logs.length > 1000) {
-      session.logs = session.logs.slice(-1000);
-    }
-    await this.save(session);
+    // Without this lock, two concurrent addLog calls (e.g. from the
+    // autonomous loop and a chat send) would each read the same baseline,
+    // append their own entry, and one log line would be lost.
+    return withSessionLock(sessionId, async () => {
+      const session = await this.get(sessionId);
+      if (!session) return;
+      session.logs.push({ ...entry, timestamp: new Date().toISOString() });
+      // Keep last 1000 log entries
+      if (session.logs.length > 1000) {
+        session.logs = session.logs.slice(-1000);
+      }
+      await this.save(session);
+    });
   }
 
-  async delete(sessionId: string): Promise<void> {
-    await fs.rm(this.sessionPath(sessionId), { force: true });
-    await fs.rm(this.checkpointDir(sessionId), { recursive: true, force: true });
+  async delete(sessionId: string): Promise<boolean> {
+    // 18-M-delete-returns-bool: return whether anything was
+    // actually removed, so the route handler can 404 on a missing
+    // session instead of returning 200 for a no-op. Previously
+    // returned void, and the route always returned 200 even when
+    // nothing existed — inconsistent with GET /:id which 404s.
+    // Route the delete through withSessionLock so a concurrent
+    // createCheckpoint / addLog running for the same sessionId can't
+    // observe the file deletion mid-flight and orphan-write a .tmp
+    // that's never renamed (the previous free-form delete happened
+    // outside the lock; the lock was only cleared after the file was
+    // already gone, so a contender could pass `await prev`, then
+    // see a missing file and write a stale .tmp that never promotes).
+    // 14-CR-session-store: withSessionLock's `finally` already
+    // removes the entry when the current lock is the tail (line 27
+    // reference equality check). Adding a second `sessionLocks.delete`
+    // here races with a concurrent caller that has just installed a
+    // new lock between release() and this line — that out-of-band
+    // delete would clobber the new lock's entry, leaving the new
+    // caller waiting on `await prev` (a resolved promise) forever
+    // inside withSessionLock. Don't double-clean.
+    let removed = false;
+    await withSessionLock(sessionId, async () => {
+      const sessionFile = this.sessionPath(sessionId);
+      const checkpointDir = this.checkpointDir(sessionId);
+      // fs.access returns success if the path exists and is
+      // visible to us; ENOENT otherwise. We use the access check
+      // (rather than stat-throws) so the exists-and-removed
+      // observation is one syscall. If neither the session file
+      // nor the checkpoint dir existed, removed stays false and
+      // the route handler can 404.
+      try {
+        await fs.access(sessionFile);
+        removed = true;
+      } catch {
+        try {
+          await fs.access(checkpointDir);
+          removed = true;
+        } catch { /* neither existed */ }
+      }
+      await fs.rm(sessionFile, { force: true });
+      await fs.rm(checkpointDir, { recursive: true, force: true });
+    });
+    return removed;
   }
 
   /** Clean up session files older than maxAgeMs. Returns number of sessions removed. */

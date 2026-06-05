@@ -2,6 +2,7 @@
 
 import { useState, useCallback } from "react";
 import { renderMarkdown } from "@/lib/markdown";
+import { optionLetter } from "@/lib/question-options";
 
 interface QuestionOption {
   id: string;
@@ -17,8 +18,6 @@ interface QuestionToolbarProps {
   onAnswer: (questionId: string, selected: string[], customInput?: string) => void;
   disabled?: boolean;
 }
-
-const OPTION_LETTERS = ["A", "B", "C", "D", "E", "F", "G", "H"];
 
 export default function QuestionToolbar({
   questionId,
@@ -86,7 +85,7 @@ export default function QuestionToolbar({
           Quick-select:
         </span>
         {options.map((option, index) => {
-          const letter = OPTION_LETTERS[index] ?? String(index + 1);
+          const letter = optionLetter(index);
           const isSelected = selected.includes(option.id);
 
           // For single-select, show as clickable card

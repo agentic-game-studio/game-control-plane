@@ -28,6 +28,13 @@ export interface GameAsset {
   rawPath?: string;
   /** Relative path to thumbnail preview image (workspace-relative) */
   thumbnailPath?: string;
+  /**
+   * Server-computed signed thumbnail URL (10-L1). Includes an HMAC of
+   * the asset id; the unauthenticated `/:id/thumbnail` route rejects
+   * requests missing a valid signature. Frontends should prefer this
+   * over constructing the URL from `id`.
+   */
+  signedThumbnailUrl?: string;
   /** AI generation metadata (if AI-generated) */
   generatedWith?: AssetGenerationMeta;
 }

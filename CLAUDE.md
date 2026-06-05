@@ -30,8 +30,8 @@ game-control-plane/
 │   └── web/              # Frontend: Next.js 15 (App Router)
 ├── packages/
 │   ├── types/            # Shared TypeScript interfaces (source of truth)
-│   ├── agents/           # 50 agent definitions (3-tier hierarchy)
-│   ├── skills/           # 92 skill definitions (12 team skills)
+│   ├── agents/           # 53 agent definitions (3-tier hierarchy)
+│   ├── skills/           # 94 skill definitions (12 team skills)
 │   ├── config/           # Zod schemas + GDD/ADR templates
 │   └── state/            # File-based session store
 ├── scripts/
@@ -49,11 +49,11 @@ game-control-plane/
 
 ## Architecture
 
-### Agent Hierarchy (50 agents)
+### Agent Hierarchy (53 agents)
 
-- **Tier 1 (Opus → glm-5.1)**: producer (standalone, owns orchestration), creative-director, technical-director
-- **Tier 2 (Sonnet → glm-4.7)**: game-designer, lead-programmer, art-director, audio-director, narrative-director, qa-lead, release-manager, localization-lead
-- **Tier 3 (Sonnet → glm-4.7)**: 38 specialists — systems-designer, gameplay-programmer, godot-specialist, unreal-specialist, unity-specialist, code-reviewer, etc.
+- **Tier 1 (Opus → glm-5.1)**: 5 directors — producer (Board Room orchestrator), autonomous-producer (no-human loop driver), creative-director, technical-director, game-director (top-level vision owner)
+- **Tier 2 (Sonnet → glm-4.7)**: 8 department leads — game-designer, lead-programmer, art-director, audio-director, narrative-director, qa-lead, release-manager, localization-lead
+- **Tier 3 (Sonnet → glm-4.7)**: 40 specialists — systems-designer, gameplay-programmer, godot-specialist, godot-gdscript-specialist, godot-csharp-specialist, unreal-specialist, unity-specialist, code-reviewer, etc.
 
 ### Autonomous Production Mode
 
@@ -316,6 +316,11 @@ Agent thinking/reasoning content is captured and displayed in the UI:
 ```bash
 ZAI_API_KEY=...            # Required — ZAI API key
 ZAI_BASE_URL=https://api.z.ai/api/anthropic
+KIMI_API_KEY=...           # Optional — Kimi / Moonshot alternative
+KIMI_BASE_URL=https://api.kimi.com/coding
+MIROMIND_API_KEY=...       # Optional — MiroMind deep research (pre-GDD market analysis)
+MIROMIND_BASE_URL=https://api.miromind.ai
+MIROMIND_MODEL=mirothinker-1-7-deepresearch-mini
 API_PORT=3001
 API_SECRET=...            # For auth header
 WORKSPACE_DIR=./workspace  # Game development directory (system prompts loaded from .claude/agents/*.md)
@@ -447,8 +452,8 @@ GDD files use 8-section format: Overview, Player Fantasy, Detailed Rules, Formul
 ```bash
 pnpm typecheck         # TypeScript across all packages
 pnpm build             # Turbo build pipeline
-pnpm generate:agents    # Validate 49 agent definitions
-pnpm generate:skills   # Validate 67 skill definitions
+pnpm generate:agents    # Validate 53 agent definitions
+pnpm generate:skills   # Validate 94 skill definitions
 pnpm generate          # Both validations
 pnpm test:e2e          # Playwright E2E test suite (apps/web/e2e/)
 ```

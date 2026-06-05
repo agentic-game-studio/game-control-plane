@@ -10,21 +10,38 @@
  * The agent reads project state to figure out paths and conventions.
  */
 
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
-import { readData } from "./data-store.js";
-import { readTicketsBoard, writeTicketsBoard, updateTicketsBoard } from "./ticket-board.js";
+// 28-L-ticket-gen-async-exists: the previous `existsSync` import
+// was removed; the actual `existsSync` calls were all replaced
+// with `access().then(() => true, () => false)` in this pass.
+// The `fs` import below is `node:fs/promises` (already present
+// at the top of the file) and is reused for the new access checks.
+import { readdir, readFile, access } from "node:fs/promises";
+import { join, resolve, relative, sep, isAbsolute } from "node:path";
+import { newId } from "../utils/ids.js";
+import { readTicketsBoard, updateTicketsBoard } from "./ticket-board.js";
+import { loadConfig } from "../config.js";
+import { logger } from "../utils/logger.js";
 import type { TicketsBoard, Ticket } from "@game-studio/types";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
+// 24-L-config-drift: getWorkspaceDir previously read
+// `process.env.WORKSPACE_DIR` directly and fell back to a hardcoded
+// relative path (`../../../workspace`) when the env var was unset.
+// That drift pattern is exactly what the 23rd/24th passes were
+// scrubbing — services should read the Zod-validated config, not
+// poke at `process.env` and guess at a default. The fallback path
+// is also fragile: it depends on `__dirname` resolving to the API
+// dist location, which is the same assumption `shipthis-service`
+// was wrong about before its 19th-pass fix. Inlining at the call
+// site (two consumers) keeps the lazy loadConfig behavior —
+// loadConfig() is called once per generateTickets/scanProjectState
+// invocation, not at module load, so this module stays usable
+// from `pnpm generate:agents` and tests that don't have a full
+// .env file in place.
 function getWorkspaceDir(): string {
-  const env = process.env.WORKSPACE_DIR;
-  if (env) return env;
-  return join(__dirname, "..", "..", "..", "..", "workspace");
+  return loadConfig().WORKSPACE_DIR;
 }
-
-const WORKSPACE = getWorkspaceDir();
 
 // ─── Genre Detection ──────────────────────────────────────────────────────────
 
@@ -761,45 +778,72 @@ ACCEPTANCE: Player selects units on grid, issues move; enemy takes a basic turn.
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function generateId(prefix: string): string {
-  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  // 11-H13: 128-bit id. Previously this was `Date.now() + 4 base36 chars`,
+  // which collided when a GDD's ingestion produced many tickets in the
+  // same millisecond (e.g. 50 quests from a single breakdown).
+  return newId(prefix);
 }
 
 /**
  * Scan project directory for existing files matching a set of patterns.
  * Returns relative paths of found files.
+ *
+ * 15-CR-async-walk: converted from readdirSync to readdir (async). The
+ * sync version was called once per TICKET_TEMPLATE per generateTickets
+ * invocation, and the autonomous loop invokes generateTickets on every
+ * empty-queue iteration — on a 1000-file project that was 60+ blocking
+ * readdir calls per iteration, freezing WS broadcasts for hundreds of ms
+ * on slow filesystems. Recursive walks are also bounded by a depth cap
+ * so a symlink loop can't make this hang.
  */
-function findProjectFiles(projectPath: string, patterns: string[]): string[] {
+async function findProjectFiles(projectPath: string, patterns: string[]): Promise<string[]> {
   const found: string[] = [];
-  const search = (dir: string, root: string) => {
+  const search = async (dir: string, root: string, depth: number): Promise<void> => {
+    if (depth > 16) return; // 16 levels is plenty for any sane Godot project
+    let entries;
     try {
-      const entries = readdirSync(dir, { withFileTypes: true });
-      for (const entry of entries) {
-        if (entry.name.startsWith(".") || entry.name === "node_modules" || entry.name.toLowerCase() === "addons") continue;
-        const full = join(dir, entry.name);
-        if (entry.isDirectory()) {
-          search(full, root);
-        } else if (patterns.some((p) =>
-          entry.name === p ||                    // exact filename match (e.g. "player.gd")
-          entry.name.endsWith(p) ||              // extension match (e.g. ".gd", ".tscn")
-          full.endsWith(`/${p}`)                 // path suffix match
-        )) {
-          found.push(full.replace(root + "/", ""));
-        }
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.name.startsWith(".") || entry.name === "node_modules" || entry.name.toLowerCase() === "addons") continue;
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await search(full, root, depth + 1);
+      } else if (entry.isFile() && patterns.some((p) =>
+        entry.name === p ||                    // exact filename match (e.g. "player.gd")
+        entry.name.endsWith(p) ||              // extension match (e.g. ".gd", ".tscn")
+        full.endsWith(`/${p}`)                 // path suffix match
+      )) {
+        found.push(full.replace(root + "/", ""));
       }
-    } catch { /* skip */ }
+    }
   };
-  if (existsSync(projectPath)) search(projectPath, projectPath);
+  // 28-L-ticket-gen-async-exists: replace the `existsSync` sync
+  // stat with an async access check. The 15th pass already moved
+  // the recursive `readdirSync` to `readdir` in `search`; this
+  // entry-point stat was missed. generateTickets runs on every
+  // empty-queue autonomous-loop iteration; with 50 templates ×
+  // 3 requireFilesExist checks, the event loop was being
+  // blocked ~150 times per iteration.
+  if (await access(projectPath).then(() => true, () => false)) {
+    await search(projectPath, projectPath, 0);
+  }
   return found;
 }
 
-function anyFileExists(projectPath: string, files: string[]): boolean {
-  // Fast path: exact match
-  if (files.some((f) => existsSync(join(projectPath, f)))) return true;
+async function anyFileExists(projectPath: string, files: string[]): Promise<boolean> {
+  // 28-L-ticket-gen-async-exists: same fix as findProjectFiles.
+  const checks = await Promise.all(
+    files.map((f) => access(join(projectPath, f)).then(() => true, () => false)),
+  );
+  if (checks.some(Boolean)) return true;
   // Fuzzy fallback: match by basename stem (exact or with separator suffix)
   // e.g. "player.gd" matches "player.gd", "player_controller.gd", "player-character.gd"
   // but NOT "player_died.gd", "player_anim.gd" (those aren't the main player script)
   const requiredStems = files.map((f) => (f.split("/").pop() ?? f).replace(/\.\w+$/, "").toLowerCase());
-  const allFiles = findProjectFiles(projectPath, [".gd", ".tscn"]);
+  const allFiles = await findProjectFiles(projectPath, [".gd", ".tscn"]);
   return allFiles.some((found) => {
     const foundStem = (found.split("/").pop() ?? "").replace(/\.\w+$/, "").toLowerCase();
     return requiredStems.some((stem) =>
@@ -817,7 +861,7 @@ function anyFileExists(projectPath: string, files: string[]): boolean {
  * Groups entries by basename stem — entries sharing the same stem are alternatives.
  * Each unique stem group must have at least one match on disk.
  */
-function allRequiredFilesExist(projectPath: string, files: string[]): boolean {
+async function allRequiredFilesExist(projectPath: string, files: string[]): Promise<boolean> {
   // Group by basename stem. Within a stem group, any file is sufficient (OR logic).
   // Across stem groups, ALL groups must be satisfied (AND logic).
   // Example: ["autoloads/game_manager.gd", "scripts/game_manager.gd"] → stem "game_manager", either path works.
@@ -832,11 +876,14 @@ function allRequiredFilesExist(projectPath: string, files: string[]): boolean {
     stemGroups.get(stem)!.push(f);
   }
 
-  const allFiles = findProjectFiles(projectPath, [".gd", ".tscn"]);
+  const allFiles = await findProjectFiles(projectPath, [".gd", ".tscn"]);
 
   for (const [stem, alternatives] of stemGroups) {
-    // Check if any alternative path exists (exact match)
-    const exactMatch = alternatives.some((f) => existsSync(join(projectPath, f)));
+    // 28-L-ticket-gen-async-exists: parallelize the existsSync
+    // checks via fs.access.
+    const exactMatch = (await Promise.all(
+      alternatives.map((f) => access(join(projectPath, f)).then(() => true, () => false)),
+    )).some(Boolean);
     if (exactMatch) continue;
 
     // Fuzzy fallback: check if any file on disk matches this stem
@@ -864,9 +911,20 @@ function ticketExistsByTitle(board: TicketsBoard, title: string): boolean {
 }
 
 function ticketExistsById(board: TicketsBoard, id: string): boolean {
+  // 27-L-ticket-gen-typed-template-id: the previous shape did
+  // `(t as unknown as Record<string, unknown>).templateId` because
+  // templateId is an extension field (the return type of
+  // generateTickets is `Ticket & { templateId?: string }`).
+  // Iterating the raw `Ticket[]` type strips the extension, so the
+  // cast was a way to get back to the field. The narrower fix:
+  // type the iteration variable as the intersection, which is
+  // safe (Ticket & { templateId?: string } is a supertype of
+  // Ticket) and removes the double-cast. A ticket without a
+  // templateId — i.e. one created outside the generator — just
+  // reads undefined and falls through.
   for (const col of board.columns) {
-    for (const t of col.tickets) {
-      if ((t as unknown as Record<string, unknown>).templateId === id) return true;
+    for (const t of col.tickets as Array<Ticket & { templateId?: string }>) {
+      if (t.templateId === id) return true;
     }
   }
   return false;
@@ -880,10 +938,28 @@ function ticketExistsById(board: TicketsBoard, id: string): boolean {
  * Core features (phase 2) only after foundation files exist.
  * Polish (phase 3) only after core features exist.
  */
-export async function generateTickets(projectId: string, workspacePath?: string, projectDescription?: string): Promise<Ticket[]> {
+export async function generateTickets(projectId: string, workspacePath?: string, projectDescription?: string): Promise<Array<Ticket & { phase?: number; templateId?: string }>> {
   const effectivePath = workspacePath ?? projectId;
-  const projectPath = join(WORKSPACE, effectivePath);
-  if (!workspacePath || !existsSync(projectPath)) {
+  const projectPath = join(getWorkspaceDir(), effectivePath);
+  // 29-M-ticket-gen-path-containment: previous shape just joined
+  // the workspace dir with the supplied path and stat'd the
+  // result. `projectId` is a route param / body field and could
+  // carry `..` segments; the join would resolve to a directory
+  // outside WORKSPACE_DIR. Resolve and verify containment before
+  // the file scans below read the directory.
+  const workspaceRoot = resolve(getWorkspaceDir());
+  const resolvedProjectPath = resolve(projectPath);
+  const rel = relative(workspaceRoot, resolvedProjectPath);
+  const isContained = !rel.startsWith(".." + sep) && rel !== ".." && !isAbsolute(rel);
+  if (!isContained) {
+    logger.warn(
+      { projectId, workspacePath, resolvedProjectPath, event: "ticket_gen_path_escape" },
+      "generateTickets: projectPath escapes workspace — refusing",
+    );
+    return [];
+  }
+  // 28-L-ticket-gen-async-exists: same fix as the others.
+  if (!workspacePath || !(await access(resolvedProjectPath).then(() => true, () => false))) {
     return [];
   }
 
@@ -891,7 +967,14 @@ export async function generateTickets(projectId: string, workspacePath?: string,
   const genre = detectGenre(projectDescription ?? "");
 
   const board = await readTicketsBoard(projectId);
-  const newTickets: Ticket[] = [];
+  // 20-L-typed-access: the array elements are built as
+  // `Ticket & { templateId?: string; phase?: number }` (L938) so
+  // the sort callback can read `phase` directly without an `as
+  // unknown as Record<string, unknown>` cast. The intersection
+  // widens the public return type, which is fine because every
+  // element is also a valid Ticket — callers iterate or pass to
+  // addTicketsToBoard which accepts the base shape.
+  const newTickets: Array<Ticket & { phase?: number; templateId?: string }> = [];
 
   for (const template of TICKET_TEMPLATES) {
     if (template.genres && template.genres.length > 0) {
@@ -909,12 +992,12 @@ export async function generateTickets(projectId: string, workspacePath?: string,
     }
 
     // Skip if the files this ticket would create already exist
-    if (template.skipIfFilesExist && anyFileExists(projectPath, template.skipIfFilesExist)) {
+    if (template.skipIfFilesExist && (await anyFileExists(resolvedProjectPath, template.skipIfFilesExist))) {
       continue;
     }
 
     // Skip if required dependency files don't exist yet (all stem groups must be satisfied)
-    if (template.requireFilesExist && !allRequiredFilesExist(projectPath, template.requireFilesExist)) {
+    if (template.requireFilesExist && !(await allRequiredFilesExist(resolvedProjectPath, template.requireFilesExist))) {
       continue;
     }
 
@@ -938,10 +1021,14 @@ export async function generateTickets(projectId: string, workspacePath?: string,
     newTickets.push(ticket);
   }
 
-  // Sort by phase first, then by credits within each phase
+  // Sort by phase first, then by credits within each phase. The
+  // 20-L-typed-access fix dropped the unnecessary `as unknown as
+  // Record<string, unknown>` cast — the sort callback receives
+  // `Ticket & { templateId?: string; phase?: number }` (L938),
+  // so the field is statically typed as `number | undefined`.
   newTickets.sort((a, b) => {
-    const phaseA = (a as unknown as Record<string, unknown>).phase as number ?? 2;
-    const phaseB = (b as unknown as Record<string, unknown>).phase as number ?? 2;
+    const phaseA = a.phase ?? 2;
+    const phaseB = b.phase ?? 2;
     if (phaseA !== phaseB) return phaseA - phaseB;
     return b.credits - a.credits;
   });
@@ -970,11 +1057,11 @@ export async function addTicketsToBoard(projectId: string, tickets: Ticket[]): P
  * scanProjectState — Build a manifest of existing project files for agent context.
  * Called by the autonomous loop to inject into agent prompts.
  */
-export function scanProjectState(projectPath: string): string {
+export async function scanProjectState(projectPath: string): Promise<string> {
   const lines: string[] = [];
   lines.push("=== PROJECT STATE ===");
 
-  if (!existsSync(projectPath)) {
+  if (!(await access(projectPath).then(() => true, () => false))) {
     lines.push("WARNING: Project directory does not exist!");
     lines.push("=== END PROJECT STATE ===");
     return lines.join("\n");
@@ -982,8 +1069,8 @@ export function scanProjectState(projectPath: string): string {
 
   // Check project.godot
   const projectGodot = join(projectPath, "project.godot");
-  if (existsSync(projectGodot)) {
-    const content = readFileSync(projectGodot, "utf8");
+  if (await access(projectGodot).then(() => true, () => false)) {
+    const content = await readFile(projectGodot, "utf8");
     const nameMatch = content.match(/config\/name="([^"]+)"/);
     const versionMatch = content.match(/config\/features=PackedStringArray\("([^"]+)"/);
     const mainSceneMatch = content.match(/run\/main_scene="([^"]+)"/);
@@ -1003,9 +1090,9 @@ export function scanProjectState(projectPath: string): string {
   }
 
   // List all scenes and scripts
-  const scenes = findProjectFiles(projectPath, [".tscn"]);
-  const scripts = findProjectFiles(projectPath, [".gd"]);
-  const assets = findProjectFiles(projectPath, [".png", ".svg", ".wav", ".ogg"]);
+  const scenes = await findProjectFiles(projectPath, [".tscn"]);
+  const scripts = await findProjectFiles(projectPath, [".gd"]);
+  const assets = await findProjectFiles(projectPath, [".png", ".svg", ".wav", ".ogg"]);
 
   if (scenes.length > 0) {
     lines.push(`\nScenes (${scenes.length}):`);

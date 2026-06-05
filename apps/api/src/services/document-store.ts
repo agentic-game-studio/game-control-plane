@@ -1,6 +1,8 @@
 import fs from "node:fs/promises";
 import fsp from "node:fs";
 import path from "node:path";
+import { logger } from "../utils/logger.js";
+import { parseFrontmatter } from "../utils/frontmatter.js";
 import type {
   DocumentCategory,
   CategoryMeta,
@@ -43,33 +45,12 @@ const CATEGORY_META: CategoryMeta[] = [
   { id: "prototype", label: "Prototypes", icon: "science", color: "#6B5B95", directory: "prototypes" },
 ];
 
-/** Parse YAML frontmatter from markdown */
-function parseFrontmatter(content: string): { frontmatter: Record<string, string | string[]>; body: string } {
-  const match = content.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
-  if (!match) return { frontmatter: {}, body: content };
-
-  const raw = match[1];
-  const body = match[2];
-  const result: Record<string, string | string[]> = {};
-
-  for (const line of raw.split("\n")) {
-    const colonIdx = line.indexOf(":");
-    if (colonIdx === -1) continue;
-    const key = line.slice(0, colonIdx).trim();
-    const value = line.slice(colonIdx + 1).trim();
-    if (value.startsWith("[") && value.endsWith("]")) {
-      result[key] = value.slice(1, -1).split(",").map((s) => s.trim());
-    } else {
-      result[key] = value;
-    }
-  }
-
-  return { frontmatter: result, body };
-}
-
-/** Extract [[wikilink]] targets from markdown body */
+/** Extract [[wikilink]] targets from markdown body. Supports the
+ * `[[link|alias]]` form (Obsidian-style) — only the link portion before
+ * the pipe is used as the slug. Without this, `[[foo|bar]]` was being
+ * slugified to `foobar`, corrupting the link graph. */
 function extractWikilinks(body: string): string[] {
-  const matches = body.matchAll(/\[\[([^\]]+)\]\]/g);
+  const matches = body.matchAll(/\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g);
   const links = new Set<string>();
   for (const m of matches) {
     links.add(slugify(m[1]));
@@ -82,14 +63,107 @@ function slugify(text: string): string {
   return text.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
 }
 
+// 12-H19: module-level registry of files THIS process is about to
+// write. Document stores are instantiated per-workspace in routes/
+// documents.ts (global store + per-project store), so a single
+// instance variable would only cover one of them. The LLM Write
+// tool lives in a different module that doesn't (and shouldn't)
+// know which store is currently active. A module-level map is the
+// simplest cross-instance handoff: any store's watcher consults
+// the same registry, and any writer (LLM tool, route handler)
+// registers the path it intends to write.
+//
+// 30-C-recent-self-writes-basename-collision: the registry key is
+// now the absolute path, not the basename. The basename key
+// collided when two files in the same workspace shared a name
+// (e.g. `design/gdd/game.md` and `docs/architecture/game.md`):
+// registering a write to one would suppress the watcher's event
+// for the other for 3s, forcing a stale cache and a wasted
+// /api/documents refetch storm. Path normalisation handles the
+// relative-vs-absolute and trailing-slash variants so callers
+// can pass the path they have.
+const recentSelfWrites = new Map<string, number>();
+const SELF_WRITE_TTL_MS = 3_000;
+
+// 25-L-recent-self-writes-prune: bound the registry. The map
+// grows on every markDocumentSelfWrite call and only shrinks
+// when a watcher actually fires for the path (line ~420). If a
+// writer registers a path that no active watcher observes (e.g.
+// a write to a project dir whose DocumentStore is lazy-init
+// and hasn't yet attached its fs.watch, or an event that
+// fs.watch coalesces away), the entry sits in the map until
+// the next LLM call lands on the same path. Over a long
+// session with hundreds of unique paths, this leaks. Cap to
+// MAX_RECENT_SELF_WRITES and evict the oldest entry on
+// overflow (FIFO). 256 covers the worst-case burst of
+// LLM-driven writes within the 3s TTL window.
+const MAX_RECENT_SELF_WRITES = 256;
+
+/** Normalise an absolute or workspace-relative path to a key the
+ * watcher event's `filename` argument can match. `fs.watch(..., {recursive:true})`
+ * emits `filename` as a path relative to the watched directory. The
+ * Write tool may pass either an absolute path or one relative to
+ * `WORKSPACE_DIR`; resolve both into a single canonical form before
+ * keying. */
+function selfWriteKey(filePath: string): string {
+  const resolved = path.isAbsolute(filePath) ? path.normalize(filePath) : path.resolve(filePath);
+  // Strip a trailing separator and any `.` segments so two callers
+  // with superficially-different paths collide as expected.
+  return path.normalize(resolved).replace(/[\\/]+$/, "");
+}
+
+/**
+ * 12-H19: register that the current process is about to write
+ * `filePath`. Any active DocumentStore's watcher will ignore events
+ * for this path for the next SELF_WRITE_TTL_MS (covering the
+ * write+rename+close cycle plus a small grace window for fs.watch
+ * delivery latency). The key is the absolute path so collisions
+ * between two same-named files in different directories don't
+ * suppress the wrong watcher event.
+ */
+export function markDocumentSelfWrite(filePath: string): void {
+  const key = selfWriteKey(filePath);
+  if (recentSelfWrites.size >= MAX_RECENT_SELF_WRITES) {
+    // Map iteration order is insertion order; the first key
+    // is the oldest. Drop it. set() inserts in O(1).
+    const oldest = recentSelfWrites.keys().next().value;
+    if (oldest !== undefined) recentSelfWrites.delete(oldest);
+  }
+  recentSelfWrites.set(key, Date.now());
+}
+
+/** 12-H19: test/cleanup hook for the self-write registry. */
+export function _clearDocumentSelfWrites(): void {
+  recentSelfWrites.clear();
+}
+
 export class DocumentStore {
   private workspaceDir: string;
   private cache: Map<string, DocumentEntry> | null = null;
   private watcher: fsp.FSWatcher | null = null;
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  // 14-H3-scan-files-race: while scanFiles() is in flight, cache the
+  // promise so a burst of concurrent first-time callers (e.g. a wiki
+  // page load that fans out to listAll / getAllCategories /
+  // getGraph concurrently, plus an SSE-triggered reload) doesn't all
+  // re-scan the workspace independently. The losing scans used to
+  // throw their work away after also having walked every CATEGORY_DIR
+  // twice — wasteful and racy on the cache mutation. setCache()
+  // overwrites this.cache on resolution; the last writer wins, but
+  // the data is identical so it's safe.
+  private scanPromise: Promise<Map<string, DocumentEntry>> | null = null;
 
   constructor(workspaceDir: string) {
     this.workspaceDir = workspaceDir;
+  }
+
+  /** Expose the watched directory so routes can detect overlap
+   * between the global store and per-project stores (which would
+   * otherwise double-broadcast the same `document:updated` event).
+   * Without this accessor, the route layer has no way to filter
+   * the global store's events against active project store dirs. */
+  getWorkspaceDir(): string {
+    return this.workspaceDir;
   }
 
   /** Get category for a file path relative to workspace */
@@ -137,9 +211,18 @@ export class DocumentStore {
           const { frontmatter, body } = parseFrontmatter(content);
           const links = extractWikilinks(body);
 
+          // Frontmatter values are typed `string | string[]`; coerce to
+          // string before using as a title or status. Arrays are joined
+          // with a space so a malformed `tags: [foo, bar]` frontmatter
+          // still produces a renderable title rather than throwing.
+          const pickString = (val: string | string[] | undefined): string | undefined => {
+            if (typeof val === "string") return val;
+            if (Array.isArray(val)) return val.join(" ");
+            return undefined;
+          };
           const title =
-            (frontmatter.title as string) ??
-            (frontmatter.name as string) ??
+            pickString(frontmatter.title) ??
+            pickString(frontmatter.name) ??
             file.replace(".md", "").replace(/[-_]/g, " ");
 
           const stat = await fs.stat(filePath).catch(() => null);
@@ -150,7 +233,7 @@ export class DocumentStore {
             filename: file,
             category,
             path: relPath,
-            status: (frontmatter.status as string) ?? undefined,
+            status: pickString(frontmatter.status),
             links,
             backlinks: [],
             createdAt: stat?.birthtime?.toISOString(),
@@ -175,10 +258,23 @@ export class DocumentStore {
 
   /** Ensure cache is populated */
   private async ensureCache(): Promise<Map<string, DocumentEntry>> {
-    if (!this.cache) {
-      this.cache = await this.scanFiles();
+    if (this.cache) return this.cache;
+    if (!this.scanPromise) {
+      // 14-H3-scan-files-race: coalesce concurrent first-time scans.
+      // On error, clear the in-flight promise so the next caller
+      // retries from scratch — otherwise a transient readdir failure
+      // (e.g. workspace dir briefly missing during a rename) would
+      // poison all future ensureCache() calls.
+      this.scanPromise = this.scanFiles()
+        .then((docs) => {
+          this.cache = docs;
+          return docs;
+        })
+        .finally(() => {
+          this.scanPromise = null;
+        });
     }
-    return this.cache;
+    return this.scanPromise;
   }
 
   /** List all documents */
@@ -196,6 +292,23 @@ export class DocumentStore {
     if (!entry) return null;
 
     const filePath = path.join(this.workspaceDir, entry.path);
+    // Cap document body size. Without this, a single 1GB markdown file
+    // under workspace/ would be loaded into memory by the wiki viewer
+    // and the JSON response would balloon the WS event payload. 2MB is
+    // generous for a markdown design doc and well above what the wiki
+    // UI renders — anything larger is almost certainly a binary that
+    // landed in the wrong directory. Reject with a clear error rather
+    // than truncating, so the user knows to move or split the file.
+    const stat = await fs.stat(filePath).catch(() => null);
+    if (stat && stat.size > 2 * 1024 * 1024) {
+      logger.warn({
+        event: "document_too_large",
+        slug,
+        sizeBytes: stat.size,
+        path: entry.path,
+      }, `Refusing to serve document ${slug} (${stat.size} bytes exceeds 2MB cap)`);
+      return null;
+    }
     let content: string;
     try {
       content = await fs.readFile(filePath, "utf-8");
@@ -308,12 +421,40 @@ export class DocumentStore {
   }
 
   /** Start watching workspace for file changes */
-  startWatching(onChange?: (event: { documentId: string; category: DocumentCategory; title: string }) => void): void {
+  startWatching(onChange?: (event: { documentId: string; category: DocumentCategory; title: string; /** Absolute path of the changed file (workspace-relative path joined onto workspaceDir). Lets callers detect overlap with other stores' watches. */ path: string }) => void): void {
     if (this.watcher) return;
 
     try {
       this.watcher = fsp.watch(this.workspaceDir, { recursive: true }, (eventType, filename) => {
         if (!filename || !filename.endsWith(".md")) return;
+
+        // 12-H19: skip self-writes. fs.watch on the workspace fires
+        // for the very file we just wrote via markDocumentSelfWrite()
+        // — re-broadcasting that change costs every connected client
+        // a wasted /api/documents refetch and triggers a re-render
+        // storm in the wiki UI. Drop the event if the absolute path
+        // was registered within the last SELF_WRITE_TTL_MS. The watcher
+        // receives `filename` as a path relative to workspaceDir, so
+        // resolve it before the lookup.
+        //
+        // 30-C-recent-self-writes-basename-collision: the previous
+        // shape keyed the registry on `path.basename(filename)`,
+        // which collided between two same-named files in different
+        // directories (e.g. design/gdd/game.md vs.
+        // docs/architecture/game.md). An LLM Write to one would
+        // suppress the watcher's event for the other for 3s, leaving
+        // a stale cache. Use the absolute path instead.
+        const selfWriteAt = recentSelfWrites.get(
+          selfWriteKey(path.join(this.workspaceDir, filename)),
+        );
+        if (selfWriteAt !== undefined) {
+          if (Date.now() - selfWriteAt < SELF_WRITE_TTL_MS) {
+            return;
+          }
+          recentSelfWrites.delete(
+            selfWriteKey(path.join(this.workspaceDir, filename)),
+          );
+        }
 
         // Check if file is in a tracked directory (direct or docs/ prefixed)
         const isTracked = Object.keys(CATEGORY_DIRS).some(
@@ -331,7 +472,19 @@ export class DocumentStore {
               const docs = await this.ensureCache();
               const doc = docs.get(slug);
               if (doc) {
-                onChange({ documentId: doc.id, category: doc.category, title: doc.title });
+                // 15-H-document-store-broadcast-dup: emit the absolute
+                // path alongside the metadata so the route layer can
+                // filter the global store's events against active
+                // project store directories (a project whose workspace
+                // is under WORKSPACE_DIR is watched by BOTH stores,
+                // and fs.watch on the parent fires for the child's
+                // changes too).
+                onChange({
+                  documentId: doc.id,
+                  category: doc.category,
+                  title: doc.title,
+                  path: path.join(this.workspaceDir, filename),
+                });
               }
             }
           } catch {
@@ -339,12 +492,53 @@ export class DocumentStore {
           }
         }, 500);
       });
-      // Handle watcher errors (ENOSPC, permission issues, etc.)
-      this.watcher.on("error", () => {
-        // Silently stop watching on error (e.g., ENOSPC — no inotify watches available)
+      // Handle watcher errors (ENOSPC, EPERM when a watched dir is moved
+      // or deleted, etc.). Without the broadcast, a frontend that
+      // relied on live updates would silently drift until the next
+      // /api/documents poll. Callers re-arm by calling startWatching
+      // again — typically on the next /api/documents GET.
+      this.watcher.on("error", (err) => {
+        logger.warn({
+          err: (err as NodeJS.ErrnoException).code ?? (err as Error).message,
+          workspaceDir: this.workspaceDir,
+          event: "document_watcher_error",
+        }, "Document store watcher stopped after error — re-arm by calling startWatching()");
+        if (this.debounceTimer) {
+          clearTimeout(this.debounceTimer);
+          this.debounceTimer = null;
+        }
         this.watcher = null;
+        if (onChange) {
+          // 15-H-document-store-broadcast-dup: include the sentinel
+          // `path` (empty string) so the type matches the onChange
+          // contract. The route layer filters by path === "" (always
+          // pass) for the stopped sentinel.
+          // 18-M-watcher-sentinel-category: the sentinel payload
+          // previously cast "design" to DocumentCategory. "design"
+          // isn't a member of the union (which is gdd | adr | ... | other)
+          // — the `as` cast hid the mismatch and any frontend filter
+          // on category would silently drop the sentinel. The route
+          // layer checks for `title === "__watcher_stopped__"`, so
+          // the category field is informational only; use "other"
+          // (a real union member) to keep consumers consistent.
+          onChange({ documentId: "", category: "other", title: "__watcher_stopped__", path: "" });
+        }
       });
-    } catch {
+    } catch (err) {
+      // 10-H10: `fs.watch` with `recursive: true` is unsupported on Linux
+      // (throws ENOSYS) and Android. On those platforms there's no
+      // cheap way to watch a deep tree, so the watcher is logged as
+      // unavailable and the UI falls back to its existing poll refresh
+      // on /api/documents.
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code === "ENOSYS" || code === "ERR_FEATURE_UNAVAILABLE_ON_PLATFORM") {
+        logger.warn({
+          workspaceDir: this.workspaceDir,
+          code,
+          event: "document_watcher_unsupported",
+        }, "fs.watch recursive unsupported on this platform — document updates will rely on the UI's poll refresh");
+        return;
+      }
       // fs.watch not available or permission denied — non-critical
     }
   }

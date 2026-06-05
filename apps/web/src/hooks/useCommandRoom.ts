@@ -1,15 +1,36 @@
 "use client";
-
+import { createLogger } from "../lib/logger";
 import { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "./useWebSocket";
 import { useProject } from "@/contexts/ProjectContext";
+import { CHAT_CACHE_SAVE_DEBOUNCE_MS, LLM_LOADING_TIMEOUT_MS, QUEUE_DRAIN_DELAY_MS } from "@/lib/timing";
+import { contextFillPercentFromUsage } from "@/lib/chat-context";
 import type { WSEvent, ContextUsage } from "@game-studio/types";
+const logger = createLogger("useCommandRoom");
 
 export interface DiffBlock {
   filePath: string;
   hunks: { lines: string[]; type: "add" | "remove" | "context"; lineNum?: number }[];
 }
+
+// 12-H9: TTL for the API-message dedup window. Must be module-scope
+// (not declared inside the hook) because a hoisted function in the
+// same file (the dedup check) references it at module-evaluation
+// time — declaring it inside the hook puts it in the temporal dead
+// zone for any function that runs before the hook's body executes.
+const RECENT_API_TTL_MS = 2 * 60 * 1000; // 2 minutes
+
+// 29-M-useCommandRoom-constants: hoist the activity-feed and
+// toast-notification slice caps to named constants. The 24/4
+// literals were duplicated at 3 sites (addActivityItem L866,
+// the project-change reset L1227, and the spawnAgent path
+// L1337-1339). A future bump (e.g. activity=50, toasts=8) had
+// to touch every site and stay in sync. The constant also
+// documents the intent — these are UI-display caps, not
+// behavior thresholds.
+const ACTIVITY_FEED_LIMIT = 24;
+const TOAST_NOTIFICATION_LIMIT = 4;
 
 export interface ToolCall {
   name: string;
@@ -157,7 +178,13 @@ function purgeStaleCacheKeys(): void {
     }
     keysToRemove.forEach((k) => localStorage.removeItem(k));
     if (keysToRemove.length > 0) {
-      console.log("[Cache] Purged", keysToRemove.length, "stale keys");
+      // 18-L-consolelog-debug: use the file's pino-style logger
+      // (logger.debug) for consistency with the rest of the
+      // file's logging. The NODE_ENV gate stays — debug-level
+      // messages are still stripped in production.
+      if (process.env.NODE_ENV !== "production") {
+        logger.debug("[Cache] Purged stale keys", { count: keysToRemove.length });
+      }
     }
     localStorage.setItem(CACHE_PURGE_MARKER, "1");
   } catch { /* ignore */ }
@@ -237,12 +264,31 @@ const GREETINGS: Record<string, string> = {
 
 const DEFAULT_GREETING = "Agent spawned and ready. Awaiting your instructions.";
 
+// 18-M-threadtitle-drift: single source of truth for the default
+// board-room title. The previous code had three literals:
+//   L830  useState("Board Room")
+//   L1094 setThreadTitle("BOARD_ROOM")
+//   L1629 if (threadTitle === "Board Room")
+// The init effect overwrites "Board Room" with "BOARD_ROOM" and
+// the spawn-agent renaming heuristic at L1629 only matches the
+// Title-Case form, so on a fresh session the title stays
+// "BOARD_ROOM" forever instead of being renamed to the agent's
+// role.
+const DEFAULT_THREAD_TITLE = "Board Room";
+
 function timestamp(): string {
   return new Date().toISOString();
 }
 
+// 6H-6th: use crypto.randomUUID() for optimistic-message ids. The previous
+// Math.random()-based 6-char id collided on the order of 1 in 36^6 = ~2B
+// — fine for sparse traffic, but under a burst (e.g. an autonomous-loop
+// iteration that emits 10+ progress events) the birthday bound kicks in
+// and the message dedup path would treat two distinct messages as one.
+// UUIDs are globally unique by design and are also slightly faster to
+// generate than the previous string-slice dance.
 function uid(): string {
-  return Math.random().toString(36).slice(2, 8);
+  return crypto.randomUUID();
 }
 
 interface WSHandlerResult {
@@ -356,7 +402,7 @@ function mergeCachedMessagesIntoBackendSession(
   return dedupeSemanticDuplicateMessages(sorted, backendIds);
 }
 
-function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, producerSessionId: string, recentApiMessages?: Set<string>): WSHandlerResult {
+function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, producerSessionId: string, recentApiMessages?: Map<string, number>): WSHandlerResult {
   const messages: WSHandlerResult["messages"] = [];
   switch (event.type) {
     case "agent:spawned": {
@@ -479,6 +525,20 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, prod
       if (recentApiMessages?.has(msgSig)) {
         recentApiMessages.delete(msgSig);
         return { sessions: null, messages };
+      }
+      // 12-H9: lazily drop TTL-expired signatures from the dedup
+      // map. Doing this on the read path (rather than on a timer)
+      // means we never have stale entries; the cost is a single
+      // Map iteration per WS event, which is bounded by the
+      // entries added in the last RECENT_API_TTL_MS (a few hundred
+      // at most for an active session).
+      if (recentApiMessages) {
+        const now = Date.now();
+        for (const [sig, at] of recentApiMessages) {
+          if (now - at > RECENT_API_TTL_MS) {
+            recentApiMessages.delete(sig);
+          }
+        }
       }
       // Deduplicate: skip if last message in session already matches (catches WS-before-API race)
       const lastMsg = session.messages[session.messages.length - 1];
@@ -613,7 +673,18 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, prod
             });
             return { sessions: next, messages };
           }
+          // 11-M9: line was parsed as a tool call, but it's a duplicate
+          // — drop silently. The previous code fell through to the log
+          // handler below and re-appended the same line to the progress
+          // logs, so a duplicate tool call ended up shown twice in the
+          // UI (once as a (collapsed) duplicate tool call, once as a
+          // raw log line).
+          return { sessions: null, messages };
         }
+        // toolMatch succeeded but no progress message exists yet. The
+        // tool call would have nowhere to land; falling through to the
+        // system-message path below is the right behavior, so don't
+        // return here.
       }
 
       // Fallback: append to progress message logs instead of creating system message
@@ -662,12 +733,17 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, prod
         { stage: "verify", label: "Verifying" },
         { stage: "fix", label: "Fixing" },
       ];
-      const steps = stages.map((s) => ({
+      // 6H-6th: compute the current-stage index once instead of twice per
+      // stage. The previous `stages.findIndex(...) > stages.findIndex(...)`
+      // was O(N²) in the number of stages; with N=5 it's a micro-issue, but
+      // a constant lookup is also clearer about the intent.
+      const currentStageIdx = stages.findIndex((x) => x.stage === stage);
+      const steps = stages.map((s, sIdx) => ({
         stage: s.stage,
         label: s.label,
         ticketId: s.stage === stage ? ticketId : undefined,
         agentRole: s.stage === stage ? agentRole : undefined,
-        status: stages.findIndex((x) => x.stage === stage) > stages.findIndex((x) => x.stage === s.stage)
+        status: currentStageIdx > sIdx
           ? "completed" as const
           : s.stage === stage ? "active" as const : "pending" as const,
       }));
@@ -774,7 +850,7 @@ export function useCommandRoom() {
   const [allSessionProjectIds, setAllSessionProjectIds] = useState<Map<string, string | null>>(new Map());
   const [currentSession, setCurrentSession] = useState("");
   const [threadId, setThreadId] = useState("");
-  const [threadTitle, setThreadTitle] = useState("Board Room");
+  const [threadTitle, setThreadTitle] = useState(DEFAULT_THREAD_TITLE);
   const [initialized, setInitialized] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [messageQueue, setMessageQueue] = useState<QueuedMessage[]>([]);
@@ -784,13 +860,77 @@ export function useCommandRoom() {
   const [compactingSessionId, setCompactingSessionId] = useState<string | null>(null);
   const [activityFeed, setActivityFeed] = useState<ActivityItem[]>([]);
   const [toastNotifications, setToastNotifications] = useState<ActivityItem[]>([]);
+
+  // Q9-11: surface console.error paths to the user. Many error handlers
+  // logged to console but the UI never saw them — operators staring at a
+  // clean screen with no idea their API call failed. This helper pushes
+  // a sticky toast so a critical error stays visible until dismissed.
+  const pushToast = useCallback(
+    (kind: ActivityItem["kind"], title: string, detail: string) => {
+      const entry: ActivityItem = {
+        id: uid(),
+        kind,
+        title,
+        detail,
+        timestamp: timestamp(),
+      };
+      setActivityFeed((prev) => [entry, ...prev].slice(0, ACTIVITY_FEED_LIMIT));
+      setToastNotifications((prev) => [entry, ...prev].slice(0, TOAST_NOTIFICATION_LIMIT));
+    },
+    [],
+  );
   const lastSpawnedRef = useRef<string | null>(null);
   const activityLogRef = useRef<string[]>([]);
   const addSessionMessageRef = useRef<(role: string, msg: Omit<ChatMessage, "id" | "timestamp">) => void | undefined>(undefined);
-  const recentApiMessagesRef = useRef<Set<string>>(new Set());
+  // 11-H11: buffer messages for sessions that don't exist yet in the
+  // local map. The WS handler can fire `chat:message` events for a
+  // session the UI hasn't yet seen (e.g. a sub-agent was just
+  // spawned by another tab, or a producer session was created in
+  // the background). Without this buffer, the event is silently
+  // dropped and the UI shows the session "spinning" forever even
+  // though the backend has produced output. We keep the most
+  // recent 50 events per session so the buffer doesn't grow without
+  // bound, and we drain it on the next setAllSessions that adds
+  // the session.
+  const pendingMessagesBySessionRef = useRef<Map<string, Array<Omit<ChatMessage, "id" | "timestamp">>>>(new Map());
+  const MAX_PENDING_MESSAGES = 50;
+  // 12-H9: signature-based dedup with a TTL. The previous version
+  // capped at 100 signatures and trimmed to 50 when full, which is
+  // fine for short sessions but loses dedup state for long ones
+  // (a 200-message session evicts its early signatures, and an
+  // out-of-order WS event for an early message then gets
+  // re-applied as a duplicate). Track each signature's last-seen
+  // timestamp and drop entries older than 2 minutes — well past
+  // the WS round-trip + reconnection window, but bounded so the
+  // map doesn't grow forever on a session that runs for hours.
+  const recentApiMessagesRef = useRef<Map<string, number>>(new Map());
   // Ref for latest sessions to flush cache on unmount / navigation
   const latestSessionsRef = useRef<Map<string, AgentSession>>(new Map());
   const latestSubagentsRef = useRef<Map<string, SubagentInfo>>(new Map());
+  // 11-H12: track the 5-minute safety timeout from executeCommand so
+  // we can clear it on unmount. Without this, navigating away while
+  // a request is in flight leaves the timer scheduled, and it fires
+  // after teardown — calling setIsLoading on a dead component and
+  // posting a system message into a session the user already left.
+  const loadingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 11-M10: AbortController for the in-flight chat POST so /stop can
+  // actually cancel it. The backend already cancels the LLM fetch
+  // when /api/autonomous/stop fires, but the chat message fetch on
+  // the frontend was fire-and-forget — clicking Stop just queued
+  // a /stop request alongside the in-flight POST, and the chat
+  // request kept running until completion. Wire signal through
+  // apiFetch and call abort() on /stop.
+  const chatAbortControllerRef = useRef<AbortController | null>(null);
+  // 12-H4: guard against rapid tab-switch thrash. Without this,
+  // double-clicking two tabs within ~50ms (mouse jitter, trackpad
+  // gesture) fires two setCurrentSession calls and triggers two
+  // re-renders. Effects keyed on `currentSession` then re-run for the
+  // intermediate value (the first tab), so the user briefly sees
+  // tab-A's messages while the URL/state points to tab-B. The state
+  // eventually settles to B, but the visual flicker on slow renders
+  // (loading a large session, scrolling) is confusing. Coalesce rapid
+  // changes with a microtask + last-write-wins check.
+  const lastSelectAtRef = useRef<{ id: string; at: number }>({ id: "", at: 0 });
   // F2: Ref for currentSession to avoid stale closures in async callbacks
   const currentSessionRef = useRef(currentSession);
   currentSessionRef.current = currentSession;
@@ -806,8 +946,27 @@ export function useCommandRoom() {
   isLoadingRef.current = isLoading;
   const messageQueueRef = useRef(messageQueue);
   messageQueueRef.current = messageQueue;
+  // Refs for cache-flush values on unmount. These are read by the
+  // `[]`-deps unmount-only effect (see the second localStorage save effect
+  // below) which captures stale state on first render; the refs let the
+  // cleanup see the latest values.
+  const currentProjectIdRef = useRef(currentProjectId);
+  currentProjectIdRef.current = currentProjectId;
+  const threadIdRef = useRef(threadId);
+  threadIdRef.current = threadId;
+  const threadTitleRef = useRef(threadTitle);
+  threadTitleRef.current = threadTitle;
   // Ref for executeCommand to avoid stale closures when dequeuing
   const executeCommandRef = useRef<(input: string, images?: string[], targetSessionId?: string) => void>(() => {});
+  // Refs for queue-drain timers so we can cancel them on unmount. The three
+  // setTimeouts at lines 2069, 2123, 2142 all schedule a recursive
+  // executeCommand call 100ms after the previous response/error. Without
+  // tracking them, navigating away mid-queue leaves dangling timers that
+  // will call apiFetch on an unmounted component.
+  const queueDrainTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Local-storage save timer — debounced 500ms. The save itself runs in the
+  // effect, the ref just lets us clear and reschedule from multiple sites.
+  const cacheSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Filter sessions visible for the active project. The producer session
   // for the current project plus any specialist sessions tagged with
@@ -834,6 +993,19 @@ export function useCommandRoom() {
   subagentsRef.current = subagents;
 
   // Flush cache immediately on page unload to avoid losing recent messages
+  // 25-H-beforeunload-rebind: previously this effect listed
+  // `sessions, currentSession, threadId, threadTitle` in its deps
+  // array. Every WS event updates `sessions`, so the effect
+  // re-bound the beforeunload handler on every event — and the
+  // handler captured `currentSession, threadId, threadTitle`
+  // from closure rather than from refs. On a fast page leave
+  // (e.g. tab close during a heavy chat burst), the closure
+  // could be stale relative to the latest state, and the
+  // add/removeEventListener churn on every event was wasted
+  // work. Drop those deps and read all volatile state from
+  // the parallel refs set in the render body — same pattern
+  // as the unmount-flush effect below. The handler is now
+  // bound exactly once per project change.
   useEffect(() => {
     if (!currentProjectId) return;
     const handler = () => {
@@ -842,9 +1014,9 @@ export function useCommandRoom() {
         version: CACHE_VERSION,
         sessions: serializeForCache(sess),
         subagents: subagentsForProjectParents(latestSubagentsRef.current, new Set(sess.keys())),
-        currentSession,
-        threadId,
-        threadTitle,
+        currentSession: currentSessionRef.current,
+        threadId: threadIdRef.current,
+        threadTitle: threadTitleRef.current,
         isLoading: isLoadingRef.current,
         messageQueue: messageQueueRef.current,
         cachedAt: new Date().toISOString(),
@@ -852,7 +1024,7 @@ export function useCommandRoom() {
     };
     window.addEventListener("beforeunload", handler);
     return () => window.removeEventListener("beforeunload", handler);
-  }, [currentProjectId, sessions, currentSession, threadId, threadTitle]);
+  }, [currentProjectId]);
 
   // Fetch all sessions and ensure the producer session for the current
   // project exists (lazy-create via the dedicated endpoint).
@@ -891,11 +1063,19 @@ export function useCommandRoom() {
     }
 
     let cancelled = false;
+    // 28-H-commandroom-init-abort: route the initial fetches through
+    // a per-call AbortController and abort on unmount or when
+    // currentProjectId changes (the existing cleanup). The previous
+    // `cancelled` flag only blocked the post-await setState — the
+    // network call ran to completion. On a quick project switch, the
+    // stale projectId's producer-session response was still in flight
+    // and could land after the new project's data, clobbering state.
+    const initController = new AbortController();
     const init = async () => {
       try {
         const [allResp, producerSession] = await Promise.all([
-          apiFetch<{ sessions: BackendSession[]; currentSessionId: string }>("/api/chat/sessions"),
-          apiFetch<BackendSession>(`/api/chat/sessions/producer/${currentProjectId}`),
+          apiFetch<{ sessions: BackendSession[]; currentSessionId: string }>("/api/chat/sessions", { signal: initController.signal }),
+          apiFetch<BackendSession>(`/api/chat/sessions/producer/${currentProjectId}`, { signal: initController.signal }),
         ]);
         if (cancelled) return;
 
@@ -916,7 +1096,7 @@ export function useCommandRoom() {
           const cachedMap = deserializeFromCache(cachedForMerge.sessions);
           for (const [id, backendSession] of sessionMap) {
             const cachedSession = cachedMap.get(id);
-            if (cachedSession && backendSession.status !== "done" && backendSession.status !== "completed") {
+            if (cachedSession && backendSession.status !== "completed") {
               const mergedMessages = mergeCachedMessagesIntoBackendSession(
                 backendSession.messages,
                 cachedSession.messages
@@ -933,8 +1113,30 @@ export function useCommandRoom() {
             ? cachedForMerge.currentSession
             : producerSession.id;
         setCurrentSession(restoredTab);
-        setThreadId(`#${Math.floor(Math.random() * 9000 + 1000)}`);
-        setThreadTitle("BOARD_ROOM");
+        // 10-C3: only randomize threadId/threadTitle if the cache didn't
+        // already provide them. The previous code unconditionally overwrote
+        // the cached values on every page load, so the user saw
+        // "ID: #4321" change to "ID: #7891" on every refresh even though
+        // the cache was being read. The cache itself stores the random id
+        // on first-time setup, so restoring it here gives stable identity
+        // across reloads.
+        if (cachedForMerge?.threadId) {
+          setThreadId(cachedForMerge.threadId);
+        } else {
+          // 11-H15: use crypto.getRandomValues for thread id. The
+          // previous `Math.random() * 9000 + 1000` collided on the
+          // order of ~1 in 9000; with many threads in a session the
+          // user would see two with the same number. crypto is
+          // available in all modern browsers and in Node 19+.
+          const buf = new Uint32Array(1);
+          crypto.getRandomValues(buf);
+          setThreadId(`#${1000 + (buf[0]! % 9000)}`);
+        }
+        if (cachedForMerge?.threadTitle) {
+          setThreadTitle(cachedForMerge.threadTitle);
+        } else {
+          setThreadTitle(DEFAULT_THREAD_TITLE);
+        }
 
         if (cachedForMerge?.subagents?.length) {
           const allowedParents = new Set(sessionMap.keys());
@@ -958,7 +1160,7 @@ export function useCommandRoom() {
         }
       } catch (error) {
         if (cancelled) return;
-        console.error("Failed to fetch chat sessions:", error);
+        logger.error("Failed to fetch chat sessions", { err: error });
         // If API fails and we have no cached data, we're already initialized with empty state
       } finally {
         if (!cancelled) setInitialized(true);
@@ -968,14 +1170,26 @@ export function useCommandRoom() {
     init();
     return () => {
       cancelled = true;
+      // 28-H-commandroom-init-abort: abort in-flight fetches so
+      // navigating away or switching project before the response
+      // arrives doesn't waste the round-trip or risk a stale
+      // state-update race.
+      initController.abort();
     };
   }, [currentProjectId]);
 
-  // Debounced cache save — serialize all messages including progress with toolCalls + logs
+  // Debounced cache save — serialize all messages including progress with toolCalls + logs.
+  // We debounce so a stream of WS events doesn't trigger a synchronous
+  // localStorage write per message. The previous implementation also did a
+  // full sync write in the cleanup, which ran on every dep change — that's
+  // the same write the debounce was trying to avoid, so the cleanup now only
+  // clears the pending timer. The final save on unmount/navigation is done
+  // in a separate `[]`-deps effect below.
   useEffect(() => {
     if (!currentProjectId || !initialized) return;
 
-    const timeout = setTimeout(() => {
+    if (cacheSaveTimerRef.current) clearTimeout(cacheSaveTimerRef.current);
+    cacheSaveTimerRef.current = setTimeout(() => {
       saveCache(currentProjectId, {
         version: CACHE_VERSION,
         sessions: serializeForCache(sessions),
@@ -987,44 +1201,127 @@ export function useCommandRoom() {
         messageQueue,
         cachedAt: new Date().toISOString(),
       });
-    }, 500);
+    }, CHAT_CACHE_SAVE_DEBOUNCE_MS);
 
     return () => {
-      clearTimeout(timeout);
-      // Flush latest state on unmount / navigation (Next.js client-side nav
-      // doesn't fire beforeunload, so we save via ref in cleanup)
+      if (cacheSaveTimerRef.current) {
+        clearTimeout(cacheSaveTimerRef.current);
+        cacheSaveTimerRef.current = null;
+      }
+    };
+  }, [sessions, subagents, currentSession, threadId, threadTitle, currentProjectId, initialized, isLoading, messageQueue]);
+
+  // Unmount-only flush. Reads the latest values from refs (set in
+  // parallel with the state, see lines around 805) so we always save the
+  // freshest data even if the cleanup fires before the debounced effect had
+  // a chance to run.
+  useEffect(() => {
+    return () => {
+      const projectId = currentProjectIdRef.current;
+      if (!projectId) return;
       const sess = latestSessionsRef.current;
-      saveCache(currentProjectId, {
+      saveCache(projectId, {
         version: CACHE_VERSION,
         sessions: serializeForCache(sess),
         subagents: subagentsForProjectParents(latestSubagentsRef.current, new Set(sess.keys())),
         currentSession: currentSessionRef.current,
-        threadId,
-        threadTitle,
-        isLoading,
-        messageQueue,
+        threadId: threadIdRef.current,
+        threadTitle: threadTitleRef.current,
+        isLoading: isLoadingRef.current,
+        messageQueue: messageQueueRef.current,
         cachedAt: new Date().toISOString(),
       });
     };
-  }, [sessions, subagents, currentSession, threadId, threadTitle, currentProjectId, initialized, isLoading, messageQueue]);
+  }, []);
 
   useEffect(() => {
     setActivityFeed([]);
     setToastNotifications([]);
   }, [currentProjectId]);
 
+  // Cancel any pending queue-drain or cache-save timer on unmount. The
+  // queue-drain timer would otherwise fire executeCommand on an unmounted
+  // component if the user navigates away within 100ms of a response. The
+  // cache-save timer is a no-op on its own (the debounced effect re-runs
+  // when deps change), but clearing it avoids a stale write right before
+  // teardown.
+  useEffect(() => {
+    return () => {
+      if (queueDrainTimerRef.current) {
+        clearTimeout(queueDrainTimerRef.current);
+        queueDrainTimerRef.current = null;
+      }
+      if (cacheSaveTimerRef.current) {
+        clearTimeout(cacheSaveTimerRef.current);
+        cacheSaveTimerRef.current = null;
+      }
+      // 11-H12: clear the 5-minute safety timeout so it doesn't
+      // fire after the component unmounts.
+      if (loadingTimeoutRef.current) {
+        clearTimeout(loadingTimeoutRef.current);
+        loadingTimeoutRef.current = null;
+      }
+    };
+  }, []);
+
   const addSessionMessage = useCallback((sessionRole: string, msg: Omit<ChatMessage, "id" | "timestamp">) => {
     setAllSessions((prev) => {
-      const session = prev.get(sessionRole);
-      if (!session) return prev;
-
-      // Deduplicate: skip if same type+sender+content already exists as the last message
-      const lastMsg = session.messages[session.messages.length - 1];
-      if (lastMsg && lastMsg.type === msg.type && lastMsg.sender === msg.sender && (lastMsg.content ?? "").trim() === (msg.content ?? "").trim()) {
+      let session = prev.get(sessionRole);
+      if (!session) {
+        // 11-H11: buffer for sessions that don't exist locally yet.
+        // The next setAllSessions that includes this session will
+        // drain the buffer (see below).
+        // 12-C5: cap the number of distinct buffered sessions. If
+        // many never-materializing sessions accumulate (server bug,
+        // network reorder, etc.), the map otherwise grows unbounded.
+        // FIFO-evict the oldest key on overflow.
+        const MAX_PENDING_SESSIONS = 20;
+        const pendingMap = pendingMessagesBySessionRef.current;
+        if (!pendingMap.has(sessionRole) && pendingMap.size >= MAX_PENDING_SESSIONS) {
+          const oldestKey = pendingMap.keys().next().value;
+          if (oldestKey !== undefined) pendingMap.delete(oldestKey);
+        }
+        const pending = pendingMap.get(sessionRole) ?? [];
+        pending.push(msg);
+        if (pending.length > MAX_PENDING_MESSAGES) pending.shift();
+        pendingMap.set(sessionRole, pending);
         return prev;
       }
 
       const next = new Map(prev);
+
+      // 11-H11: drain any messages that were buffered while this
+      // session was unborn. We append them before the new message
+      // (and after the dedupe check would have considered them
+      // already, but since they were never inserted we just push
+      // them all in order). Cap to MAX_PENDING_MESSAGES in case the
+      // buffer grew.
+      const pending = pendingMessagesBySessionRef.current.get(sessionRole);
+      if (pending && pending.length > 0) {
+        pendingMessagesBySessionRef.current.delete(sessionRole);
+        // Apply each buffered message in order (no dedupe — they're
+        // sequential events from the server that arrived out of
+        // order with respect to the local session list).
+        for (const buffered of pending) {
+          const sess = next.get(sessionRole)!;
+          const shouldCleanProgress = buffered.type !== "progress" && buffered.type !== "system";
+          next.set(sessionRole, {
+            ...sess,
+            messages: [
+              ...(shouldCleanProgress ? sess.messages.filter((m) => m.type !== "progress") : sess.messages),
+              { ...buffered, id: uid(), timestamp: timestamp() },
+            ],
+          });
+        }
+        session = next.get(sessionRole)!;
+      }
+
+      // Deduplicate: skip if same type+sender+content already exists as the last message
+      const lastMsg = session.messages[session.messages.length - 1];
+      if (lastMsg && lastMsg.type === msg.type && lastMsg.sender === msg.sender && (lastMsg.content ?? "").trim() === (msg.content ?? "").trim()) {
+        return next;
+      }
+
       const shouldCleanProgress = msg.type !== "progress" && msg.type !== "system";
       next.set(sessionRole, {
         ...session,
@@ -1048,9 +1345,9 @@ export function useCommandRoom() {
         timestamp: timestamp(),
         ...item,
       };
-      setActivityFeed((prev) => [entry, ...prev].slice(0, 24));
+      setActivityFeed((prev) => [entry, ...prev].slice(0, ACTIVITY_FEED_LIMIT));
       if (toast) {
-        setToastNotifications((prev) => [entry, ...prev].slice(0, 4));
+        setToastNotifications((prev) => [entry, ...prev].slice(0, TOAST_NOTIFICATION_LIMIT));
       }
     };
 
@@ -1294,21 +1591,36 @@ export function useCommandRoom() {
       });
     }
 
+    // 12-C5: clear the pending-message buffer for any session that is
+    // explicitly deleted by the server. The buffer is keyed by sessionId
+    // and addSessionMessage uses it to stash events that arrive before
+    // the local session exists; without this cleanup, a session that
+    // gets deleted before its create event was ever applied leaks the
+    // buffered messages forever.
+    if (event.type === "chat:session:deleted") {
+      pendingMessagesBySessionRef.current.delete(event.sessionId);
+    }
+
     setAllSessions((prevSessions) => {
       const updated = handleWSEvent(event, prevSessions, producerSessionIdRef.current, recentApiMessagesRef.current);
-      // Process any messages that were generated by the handler
-      updated.messages.forEach(({ sessionRole, msg }) => {
-        const session = prevSessions.get(sessionRole);
+      // Build a single new map instead of reassigning the prevSessions
+      // parameter — reassigning the React updater argument is an anti-pattern
+      // (Strict Mode invokes the updater twice in dev) and on a fast event
+      // stream can lose intermediate messages. Start from the handler's
+      // result if it produced one; otherwise from prevSessions.
+      let next = updated.sessions ?? prevSessions;
+      for (const { sessionRole, msg } of updated.messages) {
+        const session = next.get(sessionRole);
         if (session) {
-          const next = new Map(prevSessions);
-          next.set(sessionRole, {
+          const merged = new Map(next);
+          merged.set(sessionRole, {
             ...session,
             messages: [...session.messages, { ...msg, id: uid(), timestamp: timestamp() }],
           });
-          prevSessions = next;
+          next = merged;
         }
-      });
-      return updated.sessions ?? prevSessions;
+      }
+      return next;
     });
   }, []);
 
@@ -1316,7 +1628,12 @@ export function useCommandRoom() {
 
   const spawnAgent = useCallback(async (role: string, task?: string) => {
     const r = role.toLowerCase().trim();
-    const projectId = currentProjectId;
+    // 17-H4: read from the ref, not the React-state closure. The
+    // previous version captured `currentProjectId` from the outer
+    // render, so a project switch between render and click left
+    // spawnAgent pointed at the previous project (and wrote
+    // `allSessionProjectIds` for that stale id).
+    const projectId = currentProjectIdRef.current;
 
     if (!projectId) {
       addSessionMessage(producerSessionIdRef.current, {
@@ -1358,7 +1675,20 @@ export function useCommandRoom() {
     // arrives over the WebSocket. We do NOT add it locally here, so it
     // survives page navigation.
 
-    if (threadTitle === "Board Room") {
+    // 25-H-stale-thread-title: read from the ref so a
+    // re-creation of spawnAgent between the user's first
+    // spawn (which set the title) and a second spawn
+    // (which checks the default-title guard) still sees
+    // the updated title. Without this, a user who spawns
+    // "creative-director" then "game-designer" would have
+    // the second spawn overwrite the first session's
+    // custom title back to a generic "Session: game-designer"
+    // because the closure-captured threadTitle at
+    // spawnAgent's last re-creation was still
+    // DEFAULT_THREAD_TITLE. The executeCommand deps don't
+    // include threadTitle (same reason as the projectId
+    // ref above), so the closure is necessarily stale.
+    if (threadTitleRef.current === DEFAULT_THREAD_TITLE) {
       setThreadTitle(`Session: ${r.replace(/-/g, " ")}`);
     }
 
@@ -1397,14 +1727,21 @@ export function useCommandRoom() {
         showActions: false,
       });
     } catch (error) {
-      console.error("Failed to spawn agent via API:", error);
+      logger.error("Failed to spawn agent via API", { err: error });
       addSessionMessage(producerSessionIdRef.current, {
         type: "system",
         sender: "SYSTEM",
         content: `Failed to spawn ${r}: ${error instanceof Error ? error.message : "Unknown error"}`,
       });
     }
-  }, [addSessionMessage, threadTitle, currentProjectId]);
+  // 28-L-commandroom-spawnagent-deps: previous shape listed
+  // `currentProjectId` in the deps array, but the body reads
+  // `currentProjectIdRef.current` (the ref pattern is the whole
+  // point — see the 17-H4 comment at L1620-1624). Listing the
+  // state in the deps caused this callback (and every child that
+  // receives it) to re-render on every project switch, even
+  // though its behavior is unchanged. Drop currentProjectId.
+  }, [addSessionMessage, threadTitle]);
 
   // Approve agent — send approval via API and wait for response
   const approveAgent = useCallback(async (role: string) => {
@@ -1430,14 +1767,27 @@ export function useCommandRoom() {
       return next;
     });
 
-    // Call API to approve
-    apiFetch<{ invocationId: string; status: string }>("/api/chat/approve", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ invocationId: role }),
-    }).catch((error) => {
-      console.error("Failed to approve agent via API:", error);
-    });
+    // 11-M12: await the approve call before sending the follow-up
+    // message. The previous code fire-and-forget'd the approve and
+    // immediately sent the messages POST, so a slow approve could lose
+    // its race with the message — the server would reject the message
+    // as "agent not approved yet." Surface failures via toast as
+    // before, but bail before sending the message if approve fails.
+    try {
+      await apiFetch<{ invocationId: string; status: string }>("/api/chat/approve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ invocationId: role }),
+      });
+    } catch (error) {
+      logger.error("Failed to approve agent via API", { err: error });
+      pushToast(
+        "failed",
+        "Approval failed",
+        error instanceof Error ? error.message : "Unknown error",
+      );
+      return;
+    }
 
     // Now send a message to the agent session to continue
     try {
@@ -1509,7 +1859,7 @@ export function useCommandRoom() {
         });
       }
     } catch (error) {
-      console.error("Failed to continue agent task:", error);
+      logger.error("Failed to continue agent task", { err: error });
       setAllSessions((prev) => {
         const session = prev.get(role);
         if (!session) return prev;
@@ -1552,7 +1902,14 @@ export function useCommandRoom() {
 
       switch (cmd) {
         case "clear": {
-          const targetSession = currentSession;
+          // 6F-6th: read the active session / project from refs, not state.
+          // The useCallback deps for executeCommand don't include
+          // `currentSession` or `currentProjectId`, so a state read here
+          // captures the value at the time of the last callback re-creation.
+          // If the user switches tabs and the closure isn't re-created in
+          // time, /clear hits the wrong session or skips the localStorage
+          // cache wipe.
+          const targetSession = currentSessionRef.current;
           // Clear backend first
           apiFetch(`/api/chat/sessions/${targetSession}/clear`, {
             method: "POST",
@@ -1560,7 +1917,16 @@ export function useCommandRoom() {
           }).catch((err) => {
             // Silently ignore if session already gone
             if (err instanceof Error && err.message.includes("Session not found")) return;
-            console.error("Failed to clear session:", err);
+            logger.error("Failed to clear session", { err: err });
+            // Q9-11: surface non-stale-clear failures. "Session not found"
+            // is the expected race (cleared between fetch and delete), but
+            // any other error means the backend rejected our request and
+            // the session will reappear on refresh.
+            pushToast(
+              "failed",
+              "Clear session failed",
+              err instanceof Error ? err.message : "Unknown error",
+            );
           });
 
           setAllSessions((prev) => {
@@ -1572,8 +1938,9 @@ export function useCommandRoom() {
             return next;
           });
           // Clear localStorage cache when chat is cleared
-          if (currentProjectId) {
-            clearCache(currentProjectId);
+          const projectId = currentProjectIdRef.current;
+          if (projectId) {
+            clearCache(projectId);
           }
           addSessionMessage(targetSession, { type: "system", sender: "SYSTEM", content: "Chat cleared." });
           return;
@@ -1624,12 +1991,6 @@ Session:
 Workflows:
   /ralphloop <task>    — Run research→plan→code→verify loop
 
-Production:
-  /plan [query]        — Create execution plan
-  /sprint              — Summarize current sprint
-  /verify [ticket]     — Run auto-verification
-  /inject <text>       — Inject context into producer
-
 Utilities:
   /diff                — Show recent changes
   /help                — Show this message
@@ -1653,7 +2014,14 @@ Also: spawn <agent>, approve, done <agent>`,
           addSessionMessage(producerSessionIdRef.current, { type: "user", sender: "DIRECTOR", content: trimmed });
           const usage = contextUsageMap.get(producerSessionIdRef.current);
           if (usage) {
-            const pct = Math.round((usage.lastInputTokens / usage.contextWindowTokens) * 100);
+            // 15-L-usecommandroom-context-percent: previously computed
+            // `Math.round((usage.lastInputTokens / usage.contextWindowTokens) * 100)`
+            // inline — same formula as the shared
+            // `contextFillPercentFromUsage()` helper, but missing the
+            // `Math.min(100, ...)` clamp and the null-guard. Use the
+            // helper so the /cost and /context messages report the
+            // same value the context bar displays.
+            const pct = contextFillPercentFromUsage(usage);
             addSessionMessage(producerSessionIdRef.current, {
               type: "agent",
               sender: "producer",
@@ -1703,7 +2071,11 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
           const usage = contextUsageMapRef.current.get(producerSessionIdRef.current);
           const pressure = contextPressureRef.current.get(producerSessionIdRef.current);
           if (usage) {
-            const pct = Math.round((usage.lastInputTokens / usage.contextWindowTokens) * 100);
+            // 15-L-usecommandroom-context-percent: use the shared
+            // helper (clamps to 100, null-guards contextWindowTokens)
+            // instead of the inline round. Matches the cost command
+            // and the context bar in ProgressSummary.
+            const pct = contextFillPercentFromUsage(usage);
             const pressurePct = pressure ?? 0;
             const filled = Math.round(pressurePct / 5);
             const pressureBar = "█".repeat(filled) + "░".repeat(20 - filled);
@@ -1728,11 +2100,23 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
           const sess = sessionsRef.current;
           const subs = subagentsRef.current;
           let tree = "Agent Hierarchy\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n";
-          const producer = [...sess.values()].find((s) => isProducerSession(s.role));
+          // 19-L-tree-singlepass: partition the sessions map into
+          // producer + delegated agents in one iteration. The previous
+          // shape did two `[...sess.values()]` spreads (one for `.find`,
+          // one for `.filter`) — each spread allocates a fresh array of
+          // every session in the map and runs the predicate per element.
+          // On a /tree command with 50 active sessions that's 100
+          // predicate calls + 2 array allocations to produce 2 results.
+          // Walk the map once and bucket by session id.
+          let producer: AgentSession | undefined;
+          const agents: AgentSession[] = [];
+          for (const [id, s] of sess) {
+            if (isProducerSession(id)) producer = s;
+            else agents.push(s);
+          }
           if (producer) {
             tree += `📋 ${producer.role.toUpperCase()} (${producer.status})\n`;
           }
-          const agents = [...sess.values()].filter((s) => !isProducerSession(s.role));
           if (agents.length > 0) {
             tree += "\nActive Sessions:\n";
             for (const a of agents) {
@@ -1758,7 +2142,17 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
           return;
         }
         case "autonomous": {
-          const pid = currentProjectId;
+          // 25-H-stale-project-ref: read currentProjectId from the
+          // ref so a project switch that lands between render and
+          // command execution uses the new id, not the one captured
+          // at the time executeCommand was last recreated. The
+          // surrounding executeCommand callback's deps don't include
+          // currentProjectId (it shouldn't — that would rebuild the
+          // callback on every project switch and break the WS
+          // handler bindings); the ref pattern is the canonical
+          // workaround already used in this file at lines 1884 and
+          // 1999.
+          const pid = currentProjectIdRef.current;
           if (!pid) {
             addSessionMessage(producerSessionIdRef.current, { type: "system", sender: "SYSTEM", content: "No project selected." });
             return;
@@ -1766,6 +2160,13 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
           const sid = producerSessionIdRef.current;
           if (args.trim() === "stop") {
             addSessionMessage(sid, { type: "user", sender: "DIRECTOR", content: trimmed });
+            // 11-M10: abort any in-flight chat POST so the user sees
+            // an immediate "stopped" state instead of waiting for
+            // the LLM round-trip to complete.
+            if (chatAbortControllerRef.current) {
+              chatAbortControllerRef.current.abort();
+              chatAbortControllerRef.current = null;
+            }
             apiFetch<{ success: boolean; data?: { status: string } }>("/api/autonomous/stop", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
@@ -1825,7 +2226,11 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
         }
         case "mcp": {
           addSessionMessage(producerSessionIdRef.current, { type: "user", sender: "DIRECTOR", content: trimmed });
-          const pid = currentProjectId;
+          // 25-H-stale-project-ref: see the /autonomous case above —
+          // the same stale-closure pattern. Use the ref so a
+          // mid-flight project switch routes the /mcp health check
+          // to the new project.
+          const pid = currentProjectIdRef.current;
           if (!pid) {
             addSessionMessage(producerSessionIdRef.current, { type: "system", sender: "SYSTEM", content: "No project selected." });
             return;
@@ -2040,11 +2445,22 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
 
     // If already processing, queue the message instead of sending immediately
     if (isLoadingRef.current) {
-      setMessageQueue((prev) => [...prev, { input: trimmed, images, targetSessionId }]);
+      // 11-M24: compute the post-add length from the same updater that
+      // mutates the queue. Reading `messageQueueRef.current.length` here
+      // races a second rapid Enter press — both calls would see the
+      // pre-add ref and report the same `+1` count, undercounting the
+      // queue. The updater callback runs after the latest state, so the
+      // length it sees is the actual new total.
+      let queuedCount = 0;
+      setMessageQueue((prev) => {
+        const next = [...prev, { input: trimmed, images, targetSessionId }];
+        queuedCount = next.length;
+        return next;
+      });
       addSessionMessage(session, {
         type: "system",
         sender: "SYSTEM",
-        content: `Queued (${messageQueueRef.current.length + 1}): "${trimmed.slice(0, 40)}${trimmed.length > 40 ? "..." : ""}"`,
+        content: `Queued (${queuedCount}): "${trimmed.slice(0, 40)}${trimmed.length > 40 ? "..." : ""}"`,
       });
       return;
     }
@@ -2054,7 +2470,13 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
     setIsLoading(true);
 
     // Safety timeout — unlock input after 5 minutes even if LLM loop hangs
-    const loadingTimeout = setTimeout(() => {
+    // 11-H12: store the timer in a ref so the unmount cleanup can
+    // clear it. Without this, navigating away while a request is in
+    // flight leaves the timer scheduled, and it fires after teardown
+    // — calling setIsLoading on a dead component and posting a system
+    // message into a session the user already left.
+    loadingTimeoutRef.current = setTimeout(() => {
+      loadingTimeoutRef.current = null;
       setIsLoading(false);
       addSessionMessage(session, {
         type: "system",
@@ -2066,16 +2488,25 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
       if (queue.length > 0) {
         const [next, ...rest] = queue;
         setMessageQueue(rest);
-        setTimeout(() => executeCommandRef.current(next.input, next.images, next.targetSessionId), 100);
+        if (queueDrainTimerRef.current) clearTimeout(queueDrainTimerRef.current);
+        queueDrainTimerRef.current = setTimeout(
+          () => executeCommandRef.current(next.input, next.images, next.targetSessionId),
+          QUEUE_DRAIN_DELAY_MS,
+        );
       }
-    }, 5 * 60 * 1000);
+    }, LLM_LOADING_TIMEOUT_MS);
 
     // Call real API for current session
+    // 11-M10: create a fresh AbortController and thread its signal
+    // through apiFetch so /stop can cancel this in-flight request.
+    const chatAbort = new AbortController();
+    chatAbortControllerRef.current = chatAbort;
     apiFetch<{ userMessage: ChatMessage; assistantMessage?: ChatMessage; errorMessage?: ChatMessage }>(
       `/api/chat/sessions/${session}/messages`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: chatAbort.signal,
         body: JSON.stringify({
           type: "user",
           sender: "DIRECTOR",
@@ -2085,19 +2516,30 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
       }
     )
       .then((result) => {
-        clearTimeout(loadingTimeout);
+        // 11-H12: clear via ref so the timeout ref is also nulled out
+        // (otherwise an in-flight response + a fresh request would race
+        // on the same ref).
+        if (loadingTimeoutRef.current) {
+          clearTimeout(loadingTimeoutRef.current);
+          loadingTimeoutRef.current = null;
+        }
+        // 11-M10: clear the abort controller on success
+        if (chatAbortControllerRef.current === chatAbort) {
+          chatAbortControllerRef.current = null;
+        }
         setIsLoading(false);
         if (result.assistantMessage) {
           const msgType = result.assistantMessage.type as ChatMessage["type"];
           const msgSender = result.assistantMessage.sender;
           const msgContent = result.assistantMessage.content;
-          // Track signature for WebSocket deduplication
-          recentApiMessagesRef.current.add(`${msgType}:${msgSender}:${msgContent.trim()}`);
-          // F3: Cap at 100 entries, trim to 50 when exceeded
-          if (recentApiMessagesRef.current.size > 100) {
-            const entries = [...recentApiMessagesRef.current];
-            recentApiMessagesRef.current = new Set(entries.slice(-50));
-          }
+          // 12-H9: track signature with timestamp. The dedup map is
+          // a Map<sig, lastSeenAt>; WS handler drops signatures older
+          // than RECENT_API_TTL_MS on the read path, so the map
+          // self-bounds without an explicit cap.
+          recentApiMessagesRef.current.set(
+            `${msgType}:${msgSender}:${msgContent.trim()}`,
+            Date.now(),
+          );
           addSessionMessage(session, {
             type: msgType,
             sender: msgSender,
@@ -2120,14 +2562,35 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
         if (queue.length > 0) {
           const [next, ...rest] = queue;
           setMessageQueue(rest);
-          setTimeout(() => executeCommandRef.current(next.input, next.images, next.targetSessionId), 100);
+          if (queueDrainTimerRef.current) clearTimeout(queueDrainTimerRef.current);
+          queueDrainTimerRef.current = setTimeout(
+            () => executeCommandRef.current(next.input, next.images, next.targetSessionId),
+            100,
+          );
         }
       })
       .catch((error) => {
-        clearTimeout(loadingTimeout);
+        // 11-H12: see success path
+        if (loadingTimeoutRef.current) {
+          clearTimeout(loadingTimeoutRef.current);
+          loadingTimeoutRef.current = null;
+        }
+        // 11-M10: clear the abort controller on error too. The
+        // AbortError thrown when /stop aborts is treated like a normal
+        // error by the catch; we don't surface it as "Failed to get
+        // response" because the user intentionally cancelled.
+        if (chatAbortControllerRef.current === chatAbort) {
+          chatAbortControllerRef.current = null;
+        }
+        if (chatAbort.signal.aborted) {
+          // User-initiated stop — clear loading and return without
+          // posting the "Failed to get response" system message.
+          setIsLoading(false);
+          return;
+        }
         setIsLoading(false);
         if (!(error instanceof Error && error.message.includes("Session not found"))) {
-          console.error("Failed to send message:", error);
+          logger.error("Failed to send message", { err: error });
         }
         addSessionMessage(session, {
           type: "system",
@@ -2139,10 +2602,14 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
         if (queue.length > 0) {
           const [next, ...rest] = queue;
           setMessageQueue(rest);
-          setTimeout(() => executeCommandRef.current(next.input, next.images, next.targetSessionId), 100);
+          if (queueDrainTimerRef.current) clearTimeout(queueDrainTimerRef.current);
+          queueDrainTimerRef.current = setTimeout(
+            () => executeCommandRef.current(next.input, next.images, next.targetSessionId),
+            100,
+          );
         }
       });
-  }, [addSessionMessage, spawnAgent, approveAgent, currentSession]);
+  }, [addSessionMessage, spawnAgent, approveAgent]);
 
   // Keep ref updated for queue processing
   executeCommandRef.current = executeCommand;
@@ -2154,11 +2621,30 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
   }, []);
 
   const closeSession = useCallback((role: string) => {
+    // 10-M8: refuse to fire a DELETE for an empty role. The previous
+    // behavior built a URL `/api/chat/sessions/` (with the missing id
+    // segment) and issued a DELETE anyway — some Express routers match
+    // that as the "delete all sessions" or just 404. The local Map.delete
+    // is a no-op for "" so the UI didn't visibly break, but the stray
+    // request was visible in the network tab and could 500 on a
+    // misconfigured router. Drop the call entirely if role is empty.
+    if (!role || typeof role !== "string") {
+      logger.warn("closeSession called with empty/non-string role — ignoring");
+      return;
+    }
     // Delete from backend so it doesn't reappear on refresh
-    apiFetch(`/api/chat/sessions/${role}`, { method: "DELETE" }).catch((err) => {
+    apiFetch(`/api/chat/sessions/${encodeURIComponent(role)}`, { method: "DELETE" }).catch((err) => {
       // Silently ignore if session already gone — stale cache or already closed
       if (err instanceof Error && err.message.includes("Session not found")) return;
-      console.error("Failed to delete session:", err);
+      logger.error("Failed to delete session", { err: err });
+      // Q9-11: surface the non-stale-delete failure. Closing a tab while
+      // the delete is in flight is fine; a backend rejection means the
+      // session is still on disk and will resurface on next refresh.
+      pushToast(
+        "failed",
+        "Delete session failed",
+        err instanceof Error ? err.message : "Unknown error",
+      );
     });
     setAllSessions((prev) => {
       const next = new Map(prev);
@@ -2196,8 +2682,22 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
         );
         return { success: true, summary: "Already closed" };
       }
-      console.error("Failed to close consultation:", err);
-      throw err;
+      logger.error("Failed to close consultation", { err: err });
+      // Q9-11: surface — the caller (button onClick) propagates this as
+      // a thrown error with no UI feedback. Toast so the user knows the
+      // close didn't actually happen.
+      pushToast(
+        "failed",
+        "Close consultation failed",
+        err instanceof Error ? err.message : "Unknown error",
+      );
+      // 12-C2: do NOT re-throw. Both call sites (handleCloseSession and
+      // the consultation banner button) invoke closeConsultation without
+      // an await/catch — re-throwing surfaces as an unhandled promise
+      // rejection that crashes the React error boundary. The toast above
+      // already tells the user. Return a failure shape so callers can
+      // opt-in to checking it later if needed.
+      return { success: false, summary: undefined };
     }
   }, []);
 
@@ -2220,12 +2720,20 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
   }, [subagents, sessions]);
 
   const producerUIState = useMemo<ProducerUIState>(() => {
-    const activeDelegatedSessions = [...sessions.entries()].filter(
-      ([id, session]) => !isProducerSession(id) && session.status === "active"
-    ).length;
-    const activeDelegatedSubagents = [...visibleSubagents.values()].filter(
-      (subagent) => subagent.status === "active"
-    ).length;
+    // 19-L-count-noalloc: count without materializing a throwaway
+    // array. The previous shape built a full [...entries()] / [...
+    // values()] spread, ran `.filter` over it, then discarded the
+    // array to keep the count. The producer UI panel re-renders on
+    // every WS event, so this work was running dozens of times per
+    // second on a busy session. Just increment a counter.
+    let activeDelegatedSessions = 0;
+    for (const [id, session] of sessions) {
+      if (!isProducerSession(id) && session.status === "active") activeDelegatedSessions++;
+    }
+    let activeDelegatedSubagents = 0;
+    for (const subagent of visibleSubagents.values()) {
+      if (subagent.status === "active") activeDelegatedSubagents++;
+    }
     const producerThinking = currentSession === producerSessionId && isLoading;
 
     if (producerThinking) {
@@ -2265,7 +2773,12 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
   }, [sessions, visibleSubagents, currentSession, producerSessionId, isLoading]);
 
   const compactSession = useCallback(async (sessionId: string) => {
-    console.log("[Compact] Requested for sessionId:", sessionId, "producerRef:", producerSessionIdRef.current);
+    if (process.env.NODE_ENV !== "production") {
+      // 18-L-consolelog-debug: use the file's pino-style logger
+      // (logger.debug) for consistency. The NODE_ENV gate stays so
+      // dev-only signal is stripped in production.
+      logger.debug("[Compact] Requested", { sessionId, producerRef: producerSessionIdRef.current });
+    }
     setCompactingSessionId(sessionId);
     addSessionMessage(producerSessionIdRef.current, {
       type: "system",
@@ -2313,7 +2826,25 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
     totalProgress,
     executeCommand,
     requestProducerAction,
-    selectSession: setCurrentSession,
+    // 12-H4: wrap the raw setter with a coalescing guard. See
+    // lastSelectAtRef above for the rationale. We don't *block* the
+    // call — the latest click still wins — but we suppress the
+    // intermediate setCurrentSession when two clicks land within
+    // 50ms. React's automatic batching would already coalesce
+    // synchronous calls, but click events that straddle an
+    // async boundary (e.g., a fetch resolving between the two clicks)
+    // can produce two distinct render cycles.
+    selectSession: (id: string) => {
+      const now = Date.now();
+      const last = lastSelectAtRef.current;
+      if (last.id === id && now - last.at < 50) {
+        // Same tab clicked twice in <50ms — likely a double-click
+        // misfire. Ignore the second call entirely.
+        return;
+      }
+      lastSelectAtRef.current = { id, at: now };
+      setCurrentSession(id);
+    },
     approveAgent,
     closeSession,
     closeConsultation,

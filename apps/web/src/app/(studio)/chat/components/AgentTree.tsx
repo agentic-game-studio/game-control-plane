@@ -136,7 +136,7 @@ function filterActiveTree(nodes: AgentTreeNode[], activeRoles: string[]): AgentT
 function BackgroundTaskCard({ id, session, onSelect, onClose }: { id: string; session: AgentSession; onSelect?: (sessionId: string) => void; onClose?: (sessionId: string) => void }) {
   const icon = getAgentIcon(session.role);
   const label = session.role.replace(/-/g, "_").toUpperCase();
-  const isDone = session.status === "done";
+  const isDone = session.status === "completed";
   const isActive = session.status === "active";
 
   return (

@@ -540,7 +540,7 @@ export const skillsByPhase: Record<string, SkillDefinition[]> = {
           order: 2,
           name: "Genre Analysis",
           description: "Compare against established genres and identify differentiation",
-          agents: ["game-designer"],
+          agents: ["game-designer", "market-researcher"],
         },
         {
           order: 3,
@@ -880,6 +880,12 @@ export const skillsByPhase: Record<string, SkillDefinition[]> = {
       userInvocable: true,
     },
     {
+      name: "art-bible",
+      description: "Create or update the project's Art Bible — palette, typography, character style guide, UI conventions. Referenced by art-director agent.",
+      phases: [],
+      userInvocable: true,
+    },
+    {
       name: "content-audit",
       description: "Audit GDD-specified content counts against implemented content",
       phases: [],
@@ -888,6 +894,12 @@ export const skillsByPhase: Record<string, SkillDefinition[]> = {
     {
       name: "scope-check",
       description: "Analyze feature or sprint scope against original plan",
+      phases: [],
+      userInvocable: true,
+    },
+    {
+      name: "security-audit",
+      description: "Audit game code and infrastructure for security vulnerabilities — input validation, auth flows, secret handling, dependency CVEs. Referenced by security-engineer agent.",
       phases: [],
       userInvocable: true,
     },
@@ -915,8 +927,8 @@ export const skillsByPhase: Record<string, SkillDefinition[]> = {
         {
           order: 1,
           name: "CD Phase Gate",
-          description: "Creative director review",
-          agents: ["creative-director"],
+          description: "Creative director review with market research context",
+          agents: ["creative-director", "market-researcher"],
           gates: ["CD-PHASE-GATE"],
         },
         {
@@ -1158,7 +1170,6 @@ export const skillsByPhase: Record<string, SkillDefinition[]> = {
         },
       ],
       userInvocable: true,
-      gates: ["AUTONOMOUS-MODE"],
     },
     {
       name: "gdd-to-tickets",

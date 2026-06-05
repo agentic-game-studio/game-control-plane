@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { useWebSocket } from "./useWebSocket";
 import { apiFetch } from "@/lib/api";
 import type { WSEvent, AutonomousRunMetrics } from "@game-studio/types";
@@ -44,6 +44,13 @@ export interface LoopStatus {
   completedCount: number;
   failedCount: number;
   lastError: string | null;
+}
+
+/** Deep research phase status surfaced via MiroMind WebSocket events */
+export interface ResearchStatus {
+  phase: "idle" | "started" | "completed";
+  concept?: string;
+  sections?: number;
 }
 
 export interface LoopRunSummary {
@@ -96,6 +103,15 @@ export function useAutonomousLoop() {
   });
   const [metrics, setMetrics] = useState<AutonomousRunMetrics | null>(null);
   const [milestone, setMilestone] = useState<string | null>(null);
+  const [researchStatus, setResearchStatus] = useState<ResearchStatus>({ phase: "idle" });
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const onWSEvent = useCallback((event: WSEvent) => {
     switch (event.type) {
@@ -106,6 +122,17 @@ export function useAutonomousLoop() {
       case "autonomous:milestone":
         setMilestone(event.milestone);
         break;
+
+      // 25-C-stale-milestone: clear the milestone string on every
+      // terminal transition so the UI doesn't show "Phase 1 complete"
+      // forever after the loop ends. The `autonomous:milestone` case
+      // above sets the state on every milestone event; without an
+      // explicit clear in the terminal cases (completed / stopped /
+      // error), the last milestone string persists across
+      // re-renders and into a subsequent loop's "idle" state. The
+      // user sees a stale milestone caption until the next
+      // `autonomous:milestone` event lands, which may never happen
+      // for a loop that exits cleanly.
 
       case "autonomous:metrics":
         setMetrics(event.metrics);
@@ -151,6 +178,7 @@ export function useAutonomousLoop() {
           running: false,
           lastError: event.error,
         }));
+        setMilestone(null);
         break;
 
       case "autonomous:completed":
@@ -163,6 +191,7 @@ export function useAutonomousLoop() {
           currentTicketId: null,
           currentAgentRole: null,
         }));
+        setMilestone(null);
         break;
 
       case "autonomous:stopped":
@@ -174,6 +203,23 @@ export function useAutonomousLoop() {
           currentTicketId: null,
           currentAgentRole: null,
         }));
+        setMilestone(null);
+        break;
+
+      case "autonomous:research":
+        setResearchStatus({
+          phase: event.phase,
+          concept: event.concept,
+          sections: event.sections,
+        });
+        break;
+
+      case "research:completed":
+        setResearchStatus({
+          phase: "completed",
+          concept: event.concept,
+          sections: event.sections,
+        });
         break;
     }
   }, []);
@@ -186,6 +232,7 @@ export function useAutonomousLoop() {
       const res = await apiFetch<LoopState | { status: "not_found" }>(
         `/api/autonomous/status?sessionId=${encodeURIComponent(sessionId)}`
       );
+      if (!mountedRef.current) return;
       setStatus(mapStateToStatus(res));
     } catch {
       /* ignore — loop may not have been started */
@@ -197,6 +244,20 @@ export function useAutonomousLoop() {
       method: "POST",
       body: JSON.stringify({ sessionId, projectId }),
     });
+    // 28-H-autonomous-start-unmount: previous shape returned
+    // `result.sessionId` even on unmount, causing the caller
+    // (`AutonomousControlBar.handleStart` → `onLoopStarted?.(id)`
+    // → `selectSession(id)`) to think the start succeeded and
+    // run side effects (tab switch, history refresh) on an
+    // unmounted chat page. The fix: throw a clear cancellation
+    // sentinel so the caller can early-return without selecting
+    // a session. The `if (!mountedRef.current) return result.sessionId`
+    // was placed after the `await` so the unmount case was
+    // already established — the bug is that returning a value
+    // was indistinguishable from a real success.
+    if (!mountedRef.current) {
+      throw new Error("Autonomous start cancelled: component unmounted");
+    }
     const loopSessionId = result.sessionId;
     // Immediately poll to sync UI state with freshly started loop
     await pollStatus(loopSessionId);
@@ -223,5 +284,5 @@ export function useAutonomousLoop() {
     }));
   }, []);
 
-  return { status, metrics, milestone, connected, startLoop, stopLoop, getHistory, pollStatus };
+  return { status, metrics, milestone, researchStatus, connected, startLoop, stopLoop, getHistory, pollStatus };
 }

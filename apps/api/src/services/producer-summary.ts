@@ -5,11 +5,47 @@
 
 import { createHash } from "node:crypto";
 import type { ProducerSummaryFact, ProducerSummarySnapshot } from "@game-studio/types";
+import { logger } from "../utils/logger.js";
+import { newId } from "../utils/ids.js";
 
 export const MAX_RECENT_FACTS = 30;
 export const EMIT_COOLDOWN_MS = 45_000;
 
+// 16-M-ingest-fact-fire-and-forget: ingestProducerSummaryFact can throw
+// (await mod.persistChatStore can hit EIO/ENOSPC/EROFS; dynamic import
+// can fail under rare module-graph races). Callers fire-and-forget
+// through `void ingestProducerSummaryFact(...)` — without this helper,
+// a transient write error became an unhandled rejection, which the
+// index.ts unhandledRejection handler routes to fatalExit → process
+// exit. The in-memory summary is a UX nicety; a lost fact is
+// preferable to taking down the whole API.
+export function safeIngestProducerSummaryFact(
+  projectId: string,
+  fact: ProducerSummaryFact,
+): void {
+  ingestProducerSummaryFact(projectId, fact).catch((err) => {
+    logger.warn(
+      { err: err instanceof Error ? err.message : String(err), projectId, event: "producer_summary_fact_ingest_failed" },
+      "Failed to ingest producer summary fact — continuing",
+    );
+  });
+}
+
 const pendingEmitTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+// 18-H-prod-sum-rmw: per-project serialization chain for the
+// producer-summary ingest path. The in-memory RMW on
+// `session.producerSummary` is synchronous (no `await` between the
+// read, push, and write) so it can't lose data in-process. But the
+// next line, `await mod.persistChatStore()`, is a yield point. Two
+// concurrent facts can both complete the RMW and then interleave
+// on the persist: CallA writes snapshot-with-fact1, CallB writes
+// snapshot-with-fact1+fact2 to disk first, then CallA's write
+// overwrites it with snapshot-with-fact1 only. Process restart
+// would then load the older snapshot and lose fact2. Serialize the
+// persist+emit behind a per-project promise chain so the disk
+// state always reflects the most recent RMW.
+const producerSummaryPersistChains = new Map<string, Promise<unknown>>();
 
 export function emptyProducerSummarySnapshot(): ProducerSummarySnapshot {
   return {
@@ -18,6 +54,7 @@ export function emptyProducerSummarySnapshot(): ProducerSummarySnapshot {
     lastEmittedAt: null,
     lastEmittedContentHash: null,
     autonomousHint: null,
+    droppedFactCount: 0,
   };
 }
 
@@ -25,19 +62,31 @@ export function pushProducerSummaryFact(
   snap: ProducerSummarySnapshot,
   fact: ProducerSummaryFact,
 ): ProducerSummarySnapshot {
-  const recentFacts = [...snap.recentFacts, fact].slice(-MAX_RECENT_FACTS);
-  let autonomousHint = snap.autonomousHint;
-  if (
-    fact.kind.startsWith("autonomous_") &&
-    fact.kind !== "autonomous_loop_completed" &&
-    fact.kind !== "autonomous_loop_stopped"
-  ) {
-    autonomousHint = formatAutonomousOneLiner(fact);
-  }
-  if (fact.kind === "autonomous_loop_completed" || fact.kind === "autonomous_loop_stopped") {
-    autonomousHint = formatAutonomousOneLiner(fact);
-  }
-  return { ...snap, recentFacts, autonomousHint };
+  // 30-M-producer-summary-truncation: the previous shape silently
+  // truncated the in-memory facts ring with no signal to the
+  // consumer. Capture the drop count on the snapshot so any future
+  // API consumer that surfaces `recentFacts` knows how much
+  // history has been lost. The dropped count is monotonic and
+  // persisted with the snapshot, so a session that rehydrates
+  // keeps its tally.
+  const next = [...snap.recentFacts, fact];
+  const overflow = Math.max(0, next.length - MAX_RECENT_FACTS);
+  const recentFacts = next.slice(-MAX_RECENT_FACTS);
+  // 29-M-producer-summary-merge: previous shape had two `if`
+  // branches both calling formatAutonomousOneLiner with
+  // overlapping conditions — the first excluded the loop-completed/
+  // stopped kinds, the second handled only those two. The union
+  // is simply "any autonomous_* fact gets a one-liner", so fold
+  // them into a single check.
+  const autonomousHint = fact.kind.startsWith("autonomous_")
+    ? formatAutonomousOneLiner(fact)
+    : snap.autonomousHint;
+  return {
+    ...snap,
+    recentFacts,
+    autonomousHint,
+    droppedFactCount: (snap.droppedFactCount ?? 0) + overflow,
+  };
 }
 
 function formatAutonomousOneLiner(fact: ProducerSummaryFact): string | null {
@@ -177,16 +226,74 @@ function scheduleEmit(projectId: string, delayMs: number): void {
     pendingEmitTimers.delete(projectId);
     void flushEmitProducerUpdate(projectId);
   }, Math.max(0, delayMs));
+  // unref() so a pending debounced emit can't keep the process alive
+  // during shutdown. The setInterval timers in this codebase (rate
+  // limiter, heartbeat, etc.) all unref for the same reason.
+  t.unref();
   pendingEmitTimers.set(projectId, t);
 }
 
+/** Cancel any pending emit for a project. Called from project-delete
+ *  paths so a deleted project can't fire an emit against a torn-down
+ *  state — the callback would import chat.js and broadcast to a dead
+ *  project. */
+export async function clearProjectProducerSummary(projectId: string): Promise<void> {
+  const t = pendingEmitTimers.get(projectId);
+  if (t) {
+    clearTimeout(t);
+    pendingEmitTimers.delete(projectId);
+  }
+  // 20-M-chain-leak: the persist chain Map previously survived project
+  // deletion. Once the project is gone, no more ingest calls land on
+  // its entry, so the chain's tail resolves to a settled Promise and
+  // is GC-able as a value — but the *key* persisted for the lifetime
+  // of the process. With UUID project IDs and a long-lived API, every
+  // deleted project left a permanent Map entry (one Promise reference
+  // each, ~100 bytes). Drop the chain entry so the Map shrinks back
+  // to the active-project count.
+  //
+  // 31-CR-prod-sum-clear-drops-inflight: the previous synchronous
+  // delete-then-return could race a fact ingest that's mid-chain.
+  // The chain's in-flight tail is the *previous* ingest's
+  // `nextTail` — the caller that installed it has already
+  // `await nextTail`-ed, so the work continues running after
+  // clearProjectProducerSummary returns. That work calls
+  // `flushEmitProducerUpdate(projectId)`, which dynamically imports
+  // chat.js and walks `resolveActiveProducerSession(projectId)` —
+  // by the time the import resolves (module-graph races) the
+  // project may be partially torn down. The fix: await the
+  // in-flight tail so any work-in-progress completes against
+  // the still-live session *before* the caller finishes the
+  // project-delete teardown. The chain's `.catch(() => undefined)`
+  // wrapper means this `await` never throws.
+  const tail = producerSummaryPersistChains.get(projectId);
+  if (tail) {
+    try { await tail; } catch { /* swallowed by chain's own catch */ }
+  }
+  producerSummaryPersistChains.delete(projectId);
+}
+
 async function flushEmitProducerUpdate(projectId: string): Promise<void> {
+  // 30-M-producer-summary-dynamic-import: dynamic import is
+  // intentional. producer-summary.ts is imported by both
+  // verification-service.ts and quest-bridge.ts at server boot,
+  // and chat.ts imports verification-service.ts — so a static
+  // `import { chatStoreReady } from "../routes/chat.js"` would
+  // close a circular ESM graph and break module evaluation. The
+  // 25-M pass removed a similar dynamic import for ids.js (no
+  // circular dep there) but kept this one for chat.js because
+  // the cycle is real. The await is cheap (Node caches the
+  // resolved module after the first call) and the cost is paid
+  // only on the emit path, not the ingest path.
   const mod = await import("../routes/chat.js");
   await mod.chatStoreReady;
-  const sid = mod.producerSessionId(projectId);
-  const session = mod.chatStore.sessions[sid] as
-    | { producerSummary?: ProducerSummarySnapshot }
-    | undefined;
+  // 17-M-prod-sum-compacted: walk the compaction chain so a producer_update
+  // never lands on a session the UI isn't displaying. Without this, an emit
+  // that fires after /compact writes to the base (compacted) session whose
+  // id is what producerSessionId returns, and the message is silently lost.
+  const session = mod.resolveActiveProducerSession(projectId) as
+    | { id: string; producerSummary?: ProducerSummarySnapshot }
+    | null;
   if (!session?.producerSummary) return;
 
   const snap = session.producerSummary;
@@ -206,8 +313,19 @@ async function flushEmitProducerUpdate(projectId: string): Promise<void> {
   snap.lastEmittedAt = now;
   snap.lastEmittedContentHash = h;
 
-  await mod.appendMessage(sid, {
-    id: `producer-update-${now}`,
+  // 17-L-msg-id-collision: use the same `newId("msg")` helper as the
+  // rest of chat.ts instead of `producer-update-${now}`. Two emits
+  // landing in the same millisecond would produce identical ids, and
+  // the frontend dedupes on `msg.id` so the second emit would be
+  // silently dropped.
+  // 25-M-dynamic-import-cleanup: `newId` is now statically imported
+  // at the top of this file. The previous dynamic import was a
+  // leftover — ids.js is a leaf utility with no circular-dep
+  // concern, and the dynamic import was being paid on every
+  // emit (~once per cooldown interval during long producer
+  // sessions).
+  await mod.appendMessage(session.id, {
+    id: newId("msg"),
     type: "producer_update",
     sender: "Producer",
     content: md,
@@ -226,18 +344,40 @@ export async function ingestProducerSummaryFact(
   if (!projectId) return;
   const mod = await import("../routes/chat.js");
   await mod.chatStoreReady;
-  const sid = mod.producerSessionId(projectId);
-  const session = mod.chatStore.sessions[sid] as
+  // 17-M-prod-sum-compacted: facts must be written to the LIVE session,
+  // not the (frozen) compacted base. The summary snapshot is per-session
+  // — if a project is compacted mid-flow, the fact would otherwise be
+  // captured only on the dead base and a subsequent emit (which now uses
+  // resolveActiveProducerSession) would emit an empty summary because the
+  // new generation has no producerSummary field.
+  const session = mod.resolveActiveProducerSession(projectId) as
     | { producerSummary?: ProducerSummarySnapshot }
-    | undefined;
+    | null;
   if (!session) return;
 
   if (!session.producerSummary) {
     session.producerSummary = emptyProducerSummarySnapshot();
   }
   session.producerSummary = pushProducerSummaryFact(session.producerSummary, fact);
-  await mod.persistChatStore();
-  await flushEmitProducerUpdate(projectId);
+  // 18-H-prod-sum-rmw: serialize the persist+emit behind the per-project
+  // chain. The previous tail's promise resolves into this fact's
+  // work; the new tail is what the next caller awaits. Errors are
+  // caught so a failure in one fact's persist doesn't poison the
+  // chain for all subsequent facts (the snapshot was already
+  // mutated synchronously above — we still try to persist, but a
+  // disk-full here shouldn't strand later ingests).
+  const previousTail = producerSummaryPersistChains.get(projectId) ?? Promise.resolve();
+  const nextTail = previousTail
+    .catch(() => undefined)
+    .then(async () => {
+      await mod.persistChatStore();
+      await flushEmitProducerUpdate(projectId);
+    });
+  producerSummaryPersistChains.set(
+    projectId,
+    nextTail.catch(() => undefined),
+  );
+  await nextTail;
 }
 
 /**

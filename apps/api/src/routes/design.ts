@@ -1,5 +1,6 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
+import { newId } from "../utils/ids.js";
 
 export const designRouter: Router = Router();
 
@@ -16,7 +17,7 @@ designRouter.post("/gdds", (req: Request, res: Response) => {
     return;
   }
   const gdd = {
-    id: crypto.randomUUID(),
+    id: newId("gdd"),
     name,
     category: category ?? "general",
     status: "draft",
@@ -39,7 +40,7 @@ designRouter.post("/adrs", (req: Request, res: Response) => {
     return;
   }
   const adr = {
-    id: crypto.randomUUID(),
+    id: newId("adr"),
     title,
     status: "proposed",
     createdAt: new Date().toISOString(),
