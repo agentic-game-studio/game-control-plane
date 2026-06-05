@@ -1503,10 +1503,11 @@ export const GAME_STUDIO_TOOLS: LLMTool[] = [
   {
     name: "DeepResearch",
     description:
-      "Perform deep research on a topic using MiroMind's specialised deep research model. " +
-      "Use for market analysis, genre trends, competitive landscape evaluation, target audience profiling, " +
-      "technical feasibility assessment, and GDD recommendations. " +
-      "Returns a structured research report with cited examples and actionable insights. " +
+      "Perform deep multi-turn research using MiroMind's specialised deep research model. " +
+      "The research runs in multiple turns: broad analysis → deep-dive on gaps → (optional) synthesis. " +
+      "Returns a structured research report with numbered citations and a consolidated sources section. " +
+      "Use for market analysis, genre trends, competitive landscape evaluation, target audience " +
+      "profiling, technical feasibility assessment, and GDD recommendations. " +
       "Best used during pre-production / GDD creation phase, or when the producer needs data-driven decisions. " +
       "Requires MIROMIND_API_KEY to be configured in .env.",
     input_schema: {
@@ -1514,6 +1515,7 @@ export const GAME_STUDIO_TOOLS: LLMTool[] = [
       properties: {
         topic: { type: "string", description: "The research topic or question. Be specific (e.g., 'Market viability of a roguelike deckbuilder for mobile in 2025')" },
         context: { type: "string", description: "Additional context — project description, target platforms, genre, target audience hints (optional)" },
+        requireCitations: { type: "boolean", description: "Request numbered citations with sources appended to output (default: true). Set false for quick lookups." },
       },
       required: ["topic"],
     },
