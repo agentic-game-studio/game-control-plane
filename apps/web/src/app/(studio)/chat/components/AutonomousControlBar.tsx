@@ -18,7 +18,7 @@ export default function AutonomousControlBar({
   producerSessionId,
   onLoopStarted,
 }: AutonomousControlBarProps) {
-  const { status, metrics, milestone, connected, startLoop, stopLoop, pollStatus } = useAutonomousLoop();
+  const { status, metrics, milestone, researchStatus, connected, startLoop, stopLoop, pollStatus } = useAutonomousLoop();
 
   // Poll status on mount if a session was already running
   useEffect(() => {
@@ -61,10 +61,26 @@ export default function AutonomousControlBar({
           <span className="font-[var(--font-terminal)] text-[9px] text-[#4a4a6a] leading-tight">
             {status.completedCount > 0 || status.failedCount > 0
               ? `Last run: ${status.completedCount} done, ${status.failedCount} failed`
-              : "Idle — seed tickets then start"}
+              : researchStatus.phase !== "idle"
+                ? researchStatus.phase === "started"
+                  ? "Deep Research running..."
+                  : `Research: ${researchStatus.sections ?? "?"} sections ready`
+                : "Idle — seed tickets then start"}
           </span>
         </div>
         <div className="flex items-center gap-2 shrink-0">
+          {researchStatus.phase === "started" && (
+            <span className="flex items-center gap-1 font-[var(--font-terminal)] text-[9px] text-[#f39c12]">
+              <span className="w-2 h-2 bg-[#f39c12] rounded-full animate-pulse" />
+              Researching
+            </span>
+          )}
+          {researchStatus.phase === "completed" && (
+            <span className="flex items-center gap-1 font-[var(--font-terminal)] text-[9px] text-[#2ECC71]">
+              <span className="material-symbols-outlined text-xs">check_circle</span>
+              {researchStatus.sections ?? "?"} sections
+            </span>
+          )}
           <button
             onClick={handleStart}
             disabled={!producerSessionId}
@@ -121,6 +137,11 @@ export default function AutonomousControlBar({
           {milestone && (
             <span className="font-[var(--font-terminal)] text-[9px] text-[#737688]">
               {milestone}
+            </span>
+          )}
+          {researchStatus.phase === "started" && (
+            <span className="font-[var(--font-terminal)] text-[9px] text-[#f39c12]">
+              Deep Research running...
             </span>
           )}
           {metrics && (

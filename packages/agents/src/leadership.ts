@@ -13,7 +13,7 @@ export const leadershipAgents: Partial<Record<AgentRole, AgentDefinition>> = {
     // autonomous-producer is a sibling of producer at tier 1 — it has no
     // manager; humans supervise it directly.
     reportsTo: [],
-    delegates: ["godot-specialist", "gameplay-programmer", "godot-scaffolder", "qa-tester", "art-director", "game-designer", "writer"],
+    delegates: ["godot-specialist", "gameplay-programmer", "godot-scaffolder", "qa-tester", "art-director", "game-designer", "writer", "market-researcher"],
   },
   "creative-director": {
     name: "creative-director",
@@ -29,7 +29,7 @@ export const leadershipAgents: Partial<Record<AgentRole, AgentDefinition>> = {
     // UI's hierarchy view also showed every tier-1 as a peer of the
     // game-director even when one was a direct subordinate.
     reportsTo: ["game-director"],
-    delegates: ["game-designer", "art-director", "audio-director", "narrative-director"],
+    delegates: ["game-designer", "art-director", "audio-director", "narrative-director", "market-researcher"],
   },
   "technical-director": {
     name: "technical-director",
@@ -53,7 +53,7 @@ export const leadershipAgents: Partial<Record<AgentRole, AgentDefinition>> = {
     skills: ["brainstorm", "design-system", "design-review", "gate-check", "project-stage-detect", "team-combat", "team-narrative", "team-ui", "team-level", "sprint-plan", "create-epics", "create-stories", "milestone-review", "retrospective", "scope-check", "estimate", "bug-triage", "autonomous-production-loop", "setup-godot-project", "compose-scene", "automated-playtest", "export-godot-project"],
     memory: "project",
     reportsTo: ["game-director"],
-    delegates: ["creative-director", "technical-director", "game-designer", "lead-programmer", "art-director", "audio-director", "narrative-director", "qa-lead", "release-manager", "prototyper"],
+    delegates: ["creative-director", "technical-director", "game-designer", "lead-programmer", "art-director", "audio-director", "narrative-director", "qa-lead", "release-manager", "prototyper", "market-researcher"],
   },
   "game-director": {
     name: "game-director",

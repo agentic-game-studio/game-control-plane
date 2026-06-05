@@ -74,7 +74,10 @@ export type WSEvent =
   | { type: "build:created"; build: GameBuild }
   | { type: "build:updated"; build: GameBuild }
   // Run metrics
-  | { type: "autonomous:metrics"; sessionId: string; metrics: AutonomousRunMetrics };
+  | { type: "autonomous:metrics"; sessionId: string; metrics: AutonomousRunMetrics }
+  // Deep research events (MiroMind)
+  | { type: "autonomous:research"; phase: "started" | "completed"; projectId: string; concept?: string; sections?: number }
+  | { type: "research:completed"; projectId: string; concept?: string; sections: number };
 
 /** API request/response types */
 export interface ApiResponse<T = unknown> {

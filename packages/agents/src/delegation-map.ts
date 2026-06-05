@@ -10,6 +10,7 @@ export const delegationMap: Record<AgentRole, AgentRole[]> = {
     "art-director",
     "audio-director",
     "narrative-director",
+    "market-researcher",
   ],
   "technical-director": [
     "lead-programmer",
@@ -28,6 +29,7 @@ export const delegationMap: Record<AgentRole, AgentRole[]> = {
     "qa-lead",
     "release-manager",
     "prototyper",
+    "market-researcher",
   ],
   "game-director": ["creative-director", "technical-director", "producer"],
   "game-designer": ["systems-designer", "level-designer", "economy-designer"],
@@ -96,6 +98,7 @@ export const delegationMap: Record<AgentRole, AgentRole[]> = {
     "art-director",
     "game-designer",
     "writer",
+    "market-researcher",
   ],
   "godot-scaffolder": [],
   "godot-gdscript-specialist": ["code-reviewer"],
@@ -111,4 +114,5 @@ export const delegationMap: Record<AgentRole, AgentRole[]> = {
   "ue-replication-specialist": [],
   "ue-umg-specialist": [],
   "code-reviewer": [],
+  "market-researcher": [],
 };

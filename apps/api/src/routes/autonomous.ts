@@ -1523,6 +1523,41 @@ autonomousRouter.post("/start", async (req: Request, res: Response) => {
     await saveLoopState(existing);
   }
 
+  // Preflight deep research: run MiroMind market/competitive/audience analysis
+  // before GDD ingestion. Fire-and-forget so it doesn't block loop start.
+  try {
+    const { isDeepResearchAvailable, runDeepResearch } = await import("../services/deep-research-service.js");
+    if (isDeepResearchAvailable() && readyProjectContext.description) {
+      const researchDir = join(resolveProjectWorkspace(readyProjectContext.workspacePath), "design");
+      const researchMdExists = existsSync(join(researchDir, "RESEARCH.md"));
+      if (!researchMdExists) {
+        logger.info({ projectId, concept: readyProjectContext.description.slice(0, 80), event: "autonomous_preflight_research_start" }, "Preflight deep research starting");
+        broadcast({
+          type: "autonomous:research",
+          phase: "started",
+          projectId,
+          concept: readyProjectContext.description.slice(0, 80),
+        });
+        // Fire and forget — research runs in background, results available for subsequent iterations
+        void runDeepResearch(projectId, readyProjectContext.description, {
+          projectDescription: readyProjectContext.description,
+        }).then((report) => {
+          logger.info({ projectId, sections: report.sections.length, event: "autonomous_preflight_research_done" }, "Preflight deep research completed");
+          broadcast({
+            type: "autonomous:research",
+            phase: "completed",
+            projectId,
+            sections: report.sections.length,
+          });
+        }).catch((err) => {
+          logger.warn({ projectId, err: err instanceof Error ? err.message : String(err), event: "autonomous_preflight_research_failed" }, "Preflight deep research failed — continuing without it");
+        });
+      }
+    }
+  } catch {
+    // deep-research-service may not exist or fail to import — non-fatal
+  }
+
   // Auto-ingest GDD tickets on start
   void ingestGDD(sessionId, projectId, { broadcast: true }).then((gddResult) => {
     if (gddResult.created > 0) {

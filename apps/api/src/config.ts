@@ -10,6 +10,10 @@ const envSchema = z
     // Z.ai provider (optional if KIMI_API_KEY is set)
     ZAI_API_KEY: z.string().optional().default(""),
     ZAI_BASE_URL: z.string().url().default("https://api.z.ai/api/anthropic"),
+    // MiroMind deep research provider (optional)
+    MIROMIND_API_KEY: z.string().optional().default(""),
+    MIROMIND_BASE_URL: z.string().url().default("https://api.miromind.ai"),
+    MIROMIND_MODEL: z.string().default("mirothinker-1-7-deepresearch-mini"),
     API_PORT: z.coerce.number().default(3001),
     API_SECRET: z.string().min(16, "API_SECRET must be at least 16 characters — set it in .env"),
     CORS_ORIGIN: z.string().default("http://localhost:3000"),
@@ -105,6 +109,9 @@ export function loadConfig() {
     KIMI_BASE_URL: process.env.KIMI_BASE_URL,
     ZAI_API_KEY: process.env.ZAI_API_KEY ?? "",
     ZAI_BASE_URL: process.env.ZAI_BASE_URL,
+    MIROMIND_API_KEY: process.env.MIROMIND_API_KEY ?? "",
+    MIROMIND_BASE_URL: process.env.MIROMIND_BASE_URL,
+    MIROMIND_MODEL: process.env.MIROMIND_MODEL,
     API_PORT: process.env.API_PORT ?? process.env.PORT,
     API_SECRET: process.env.API_SECRET,
     CORS_ORIGIN: process.env.CORS_ORIGIN,

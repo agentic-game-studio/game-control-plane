@@ -316,6 +316,11 @@ Agent thinking/reasoning content is captured and displayed in the UI:
 ```bash
 ZAI_API_KEY=...            # Required — ZAI API key
 ZAI_BASE_URL=https://api.z.ai/api/anthropic
+KIMI_API_KEY=...           # Optional — Kimi / Moonshot alternative
+KIMI_BASE_URL=https://api.kimi.com/coding
+MIROMIND_API_KEY=...       # Optional — MiroMind deep research (pre-GDD market analysis)
+MIROMIND_BASE_URL=https://api.miromind.ai
+MIROMIND_MODEL=mirothinker-1-7-deepresearch-mini
 API_PORT=3001
 API_SECRET=...            # For auth header
 WORKSPACE_DIR=./workspace  # Game development directory (system prompts loaded from .claude/agents/*.md)

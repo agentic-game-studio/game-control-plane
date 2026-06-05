@@ -63,4 +63,5 @@ export const agentTiers: Record<AgentRole, { tier: 1 | 2 | 3; model: ModelTier }
   "ue-umg-specialist": { tier: 3, model: "sonnet" },
   // Code review
   "code-reviewer": { tier: 3, model: "sonnet" },
+  "market-researcher": { tier: 3, model: "haiku" },
 };

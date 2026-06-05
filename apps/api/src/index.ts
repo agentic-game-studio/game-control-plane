@@ -20,6 +20,7 @@ import { settingsRouter } from "./routes/settings.js";
 import { autonomousRouter, abortAllLoops, recoverStaleLoopStates } from "./routes/autonomous.js";
 import { gddRouter } from "./routes/gdd.js";
 import { buildsRouter } from "./routes/builds.js";
+import { researchRouter } from "./routes/research.js";
 import { errorHandler } from "./middleware/error-handler.js";
 import { authMiddleware } from "./middleware/auth.js";
 import { broadcast, wss, sseClients } from "./services/websocket.js";
@@ -342,6 +343,8 @@ app.use("/api/gdd", gddRouter);
 // were missed.
 app.use("/api/builds", rateLimiter);
 app.use("/api/builds", buildsRouter);
+app.use("/api/research/analyze", rateLimiter);
+app.use("/api/research", researchRouter);
 app.use("/api/assets", assetsRouter);
 app.use("/api/settings", settingsRouter);
 

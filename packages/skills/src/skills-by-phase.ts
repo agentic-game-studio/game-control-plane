@@ -540,7 +540,7 @@ export const skillsByPhase: Record<string, SkillDefinition[]> = {
           order: 2,
           name: "Genre Analysis",
           description: "Compare against established genres and identify differentiation",
-          agents: ["game-designer"],
+          agents: ["game-designer", "market-researcher"],
         },
         {
           order: 3,
@@ -927,8 +927,8 @@ export const skillsByPhase: Record<string, SkillDefinition[]> = {
         {
           order: 1,
           name: "CD Phase Gate",
-          description: "Creative director review",
-          agents: ["creative-director"],
+          description: "Creative director review with market research context",
+          agents: ["creative-director", "market-researcher"],
           gates: ["CD-PHASE-GATE"],
         },
         {

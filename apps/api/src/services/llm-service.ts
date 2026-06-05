@@ -1650,6 +1650,26 @@ loop_offset=0
         return `ShipThis export initiated.\n${result.output.slice(-800)}`;
       }
 
+      case "DeepResearch": {
+        const topic = input.topic as string;
+        const context = input.context as string | undefined;
+        if (!topic) return "Error: topic is required";
+
+        broadcastLogEntry(sessionId, "info", `[${agentRole}] DeepResearch: ${topic.slice(0, 80)}`, agentRole);
+
+        try {
+          const { runTargetedResearch, isDeepResearchAvailable } = await import("./deep-research-service.js");
+          if (!isDeepResearchAvailable()) {
+            return "Error: DeepResearch tool is not available. MIROMIND_API_KEY must be configured in .env.";
+          }
+          const findings = await runTargetedResearch(topic, context);
+          return `Deep Research Results for "${topic}":\n\n${findings}`;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return `Error: DeepResearch failed: ${msg}`;
+        }
+      }
+
       default:
         // Check if this is a Godot MCP tool and route to the MCP service
         if (isGodotMCPTool(name)) {

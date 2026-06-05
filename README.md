@@ -2,7 +2,7 @@
 
 > **NO RULES. JUST CREATE.**
 
-End-to-end AI-native game production — from a single prompt to a **playable, tested, exportable** Godot game. Not a demo chatbot: a **53-agent studio** with skills, director gates, Kanban quest tracking, autonomous loops, asset generation, and release pipelines.
+End-to-end AI-native game production — from a single prompt to a **playable, tested, exportable** Godot game. Not a demo chatbot: a **54-agent studio** with skills, director gates, Kanban quest tracking, autonomous loops, deep research, asset generation, and release pipelines.
 
 ---
 
@@ -44,8 +44,9 @@ Feature completeness for evaluators — each item maps to runnable code:
 | Capability | Status | Entry points |
 |------------|--------|--------------|
 | Multi-agent orchestration (LLM + tools) | ✅ | `apps/api/src/services/llm-service.ts` |
-| 53 agents, 94 skills (validated registries) | ✅ | `packages/agents/`, `packages/skills/` |
+| 54 agents, 94 skills (validated registries) | ✅ | `packages/agents/`, `packages/skills/` |
 | Producer chat + slash commands | ✅ | `apps/web/src/app/(studio)/chat/` |
+| Deep research via MiroMind (market, competitor, audience analysis) | ✅ | `apps/api/src/services/deep-research-service.ts`, `apps/api/src/llm/miromind-client.ts` |
 | Autonomous production loop | ✅ | `apps/api/src/routes/autonomous.ts` |
 | GDD → Kanban ticket ingest | ✅ | `apps/api/src/services/gdd-ingest-service.ts` |
 | Genre-aware ticket generator (platformer, RPG, racing, …) | ✅ | `apps/api/src/services/ticket-generator.ts` |
@@ -76,6 +77,7 @@ The API uses an **Anthropic-compatible** client. Set **at least one** of `ZAI_AP
 |----------|----------|----------------|-------------|
 | **Z.ai (default)** | `ZAI_API_KEY`, `ZAI_BASE_URL` | `glm-5.1`, `glm-4.7`, `glm-4.7-flash` | Default tier mapping in `apps/api/src/config/model-mapping.ts` |
 | **Kimi (optional)** | `KIMI_API_KEY`, `KIMI_BASE_URL` | `kimi-for-coding`, `kimi-k2.6`, `kimi-k2.5`, `kimi-k2-turbo-preview` | UCWS / Moonshot sponsor path; same tool loop, different endpoint |
+| **MiroMind (deep research)** | `MIROMIND_API_KEY`, `MIROMIND_BASE_URL`, `MIROMIND_MODEL` | `mirothinker-1-7-deepresearch-mini` | Pre-GDD deep research: market analysis, competitive landscape, audience profiling, GDD recommendations. Optional — game production works without it. |
 
 **Agent tiers → models** (via `getModelForTier`):
 
@@ -104,9 +106,18 @@ cp .env.example .env
 # API_SECRET + NEXT_PUBLIC_API_KEY (same value, ≥16 chars)
 ```
 
+**With MiroMind deep research (optional, recommended):**
+
+```bash
+# Add to .env alongside your LLM provider key:
+MIROMIND_API_KEY=your_miromind_key
+# Deep research auto-runs at autonomous loop start. Manual trigger:
+# POST /api/research/analyze { "projectId": "...", "concept": "2D platformer" }
+```
+
 ```bash
 pnpm install
-pnpm generate          # validate 53 agents + 94 skills
+pnpm generate          # validate 54 agents + 94 skills
 pnpm typecheck
 
 # API → http://localhost:3001
@@ -120,9 +131,10 @@ pnpm --filter @game-studio/web dev
 
 1. **Dashboard** — create a Godot project  
 2. **Comms** — tell the Producer: *“Build a 2D platformer with coins and patrol enemies”*  
-3. **Quests** — watch tickets move Available → Processing → Verify → Archived  
-4. **Autonomous** — start the loop for hands-off production (optional)  
-5. **Builds** — export and inspect smoke-test status  
+3. **Research** — deep research auto-runs pre-GDD (market, genre, audience analysis via MiroMind)  
+4. **Quests** — watch tickets move Available → Processing → Verify → Archived  
+5. **Autonomous** — start the loop for hands-off production (optional)  
+6. **Builds** — export and inspect smoke-test status  
 
 Extended setup (Godot MCP, FLUX assets, ShipThis CLI): [CLAUDE.md](CLAUDE.md)
 
@@ -132,32 +144,66 @@ Extended setup (Godot MCP, FLUX assets, ShipThis CLI): [CLAUDE.md](CLAUDE.md)
 
 ```mermaid
 flowchart TB
+  subgraph User["User"]
+    Prompt["Game Concept Prompt"]
+  end
+
+  subgraph Research["MiroMind Deep Research"]
+    Market["Market Analysis"]
+    Genre["Genre Fit"]
+    Audience["Audience Profiling"]
+    Competitor["Competitive Landscape"]
+    Recs["GDD Recommendations"]
+  end
+
   subgraph UI["Studio Web UI (Next.js 15)"]
-    Chat[Producer / Agent Chat]
-    Kanban[Quest Board]
-    Builds[Builds Dashboard]
-    Assets[Asset Inventory]
+    Chat["Producer Chat"]
+    Kanban["Kanban Board"]
+    Dashboard["Dashboard + Builds"]
+    Assets["Asset Inventory"]
   end
 
   subgraph API["Control Plane API (Express)"]
-    LLM[LLM Service + Tool Loop]
-    Auto[Autonomous Loop]
-    Gates[Director Gates]
-    QA[QA Gate Chain]
-    Quest[Quest Bridge]
+    LLM["LLM Service + Tool Loop"]
+    Auto["Autonomous Loop"]
+    Gates["Director Gates (18)"]
+    QA["QA Gate Chain"]
+    Quest["Quest Bridge"]
+    ResearchAPI["Research API"]
   end
 
   subgraph Registry["Shared Packages"]
-    Agents[53 Agents]
-    Skills[94 Skills]
-    Types[TypeScript Contracts]
+    Agents["54 Agents"]
+    Skills["94 Skills"]
+    Types["TypeScript Types"]
   end
 
   subgraph Output["workspace/ (per project)"]
-    GDD[design/gdd/]
-    Godot[Godot Project]
-    Art[assets/]
+    GDD["design/gdd/"]
+    ResearchMD["design/RESEARCH.md"]
+    Godot["Godot Project"]
+    Art["assets/"]
   end
+
+  subgraph Providers["LLM Providers"]
+    ZAI["Z.ai (GLM)"]
+    Kimi["Kimi (Moonshot)"]
+    Miro["MiroMind"]
+  end
+
+  Prompt --> Research
+  Prompt --> Auto
+
+  Research --> Market & Genre & Audience & Competitor & Recs
+  Market & Genre & Audience & Competitor & Recs --> ResearchMD
+  ResearchMD --> GDD
+
+  Auto --> ResearchAPI
+  ResearchAPI --> Miro
+  Miro --> ResearchMD
+
+  Auto --> GDD
+  GDD --> Auto
 
   Chat --> LLM
   Auto --> LLM
@@ -170,19 +216,26 @@ flowchart TB
   QA --> Godot
   LLM --> Godot
   LLM --> Art
-  Builds --> Godot
+  Gates --> LLM
+
+  ZAI --> LLM
+  Kimi --> LLM
+
   Types --> API
   Types --> UI
-  GDD --> Auto
+
+  Dashboard --> Builds
+  Builds --> Godot
 ```
 
 ### Autonomous production pipeline
 
 ```
 User prompt
+  → Deep Research (MiroMind — market, genre, competitor, audience, GDD recs)
   → GDD ingest + genre-aware tickets
   → assign agent per ticket area
-  → LLM tool loop (Read/Write/Task/GenerateAsset/…)
+  → LLM tool loop (Read/Write/Task/DeepResearch/GenerateAsset/…)
   → boot + GUT + smoke + regression QA
   → LLM verifier (code-reviewer, qa-tester, …)
   → milestone director gates (CD / TD / Producer / QA / Art)
@@ -195,7 +248,8 @@ User prompt
 |------|----------------------|---------------------------|-------|
 | 1 | glm-5.1 | kimi-for-coding | Producer, creative-director, technical-director, autonomous-producer |
 | 2 | glm-4.7 | kimi-k2.6 | game-designer, lead-programmer, art-director, qa-lead, … |
-| 3 | glm-4.7 | kimi-k2.5 / kimi-k2-turbo-preview | godot-specialist, gameplay-programmer, code-reviewer, … |
+| 3 | glm-4.7 | kimi-k2.5 / kimi-k2-turbo-preview | godot-specialist, gameplay-programmer, code-reviewer, market-researcher, … |
+| Deep Research | mirothinker-1-7-deepresearch-mini | (dedicated provider) | market-researcher — pre-GDD analysis via MiroMind API |
 
 Routing is configured in `apps/api/src/config/model-mapping.ts` (`MODEL_MAPPING` / `KIMI_MODEL_MAPPING`).
 
@@ -212,7 +266,7 @@ Structured for **automated repo evaluation** — typed monorepo, validated regis
 | Package | Role |
 |---------|------|
 | `@game-studio/types` | Single source of truth for agents, skills, tickets, WebSocket events |
-| `@game-studio/agents` | 51 agent defs + tier mapping + delegation graph |
+| `@game-studio/agents` | 54 agent defs + tier mapping + delegation graph |
 | `@game-studio/skills` | 94 skills incl. 13 Godot production skills + 12 team workflows |
 | `@game-studio/api` | Express API, LLM orchestration, autonomous loop, MCP bridge |
 | `@game-studio/web` | Next.js 15 App Router studio UI |
@@ -234,7 +288,7 @@ pnpm --filter @game-studio/web test:e2e   # Playwright (chat, dashboard, consult
 
 ### Design decisions (authenticity signals)
 
-- **Tool execution on backend** — LLM never pretends to run tools; `callLLMWithTools()` executes Read/Write/Bash/Task and returns results  
+- **Tool execution on backend** — LLM never pretends to run tools; `callLLMWithTools()` executes Read/Write/Bash/Task/DeepResearch and returns results  
 - **Quest Bridge** — agent work is traceable on Kanban, not hidden in chat logs  
 - **Executable QA** — tickets require Godot boot/GUT/smoke evidence, not self-reported “done”  
 - **Director gates** — LLM reviewers with parsed PASS/BLOCKED verdicts at milestones  
@@ -259,6 +313,7 @@ The **credit ledger**, **webhook notifications**, and **multi-project dashboard*
 ### Global scalability
 
 - **Dual LLM providers** — Anthropic-compatible client switches on model id: GLM via `ZAI_API_KEY`, Kimi via `KIMI_API_KEY` (256k context on `kimi-for-coding` / `kimi-k2.6`)  
+- **Deep research via MiroMind** — `mirothinker-1-7-deepresearch-mini` powers pre-GDD market analysis, competitive landscape evaluation, audience profiling, and GDD recommendations. The `market-researcher` agent + `DeepResearch` tool give every agent research capability.
 - **Multi-engine agent defs** — Godot (production), Unreal, Unity, Phaser, Three.js specialists ready for expansion  
 - **Localization skill + tickets** — `localize` workflow, translation CSV pipeline in ticket templates  
 - **Cloud release path** — ShipThis CLI integration for Android/iOS export (`team-release` → build + smoke)  
@@ -269,7 +324,8 @@ The **credit ledger**, **webhook notifications**, and **multi-project dashboard*
 | | Copilot / Cursor | Game Studio Control Plane |
 |--|------------------|---------------------------|
 | Unit of work | File / chat turn | **Quest ticket + milestone** |
-| Team model | Single assistant | **53-role studio hierarchy** |
+| Team model | Single assistant | **54-role studio hierarchy** |
+| Research | None — agent guesses | **MiroMind deep research** — market, genre, audience, GDD recs |
 | Verification | User runs tests | **Automated QA + AI verifier + director gates** |
 | Output | Code snippets | **Playable game + assets + export artifact** |
 
@@ -281,18 +337,18 @@ The **credit ledger**, **webhook notifications**, and **multi-project dashboard*
 game-control-plane/
 ├── apps/
 │   ├── api/                 # Orchestration backend
-│   │   ├── src/routes/      # REST + autonomous + builds + chat
-│   │   ├── src/services/    # LLM, QA, gates, quest-bridge, MCP
-│   │   └── src/llm/         # Z.ai client, tool loop, retries
+│   │   ├── src/routes/      # REST + autonomous + builds + chat + research
+│   │   ├── src/services/    # LLM, QA, gates, quest-bridge, MCP, deep-research
+│   │   └── src/llm/         # Z.ai client, MiroMind client, tool loop, retries
 │   └── web/                 # Studio UI (dashboard, chat, quests, assets, builds, wiki)
 ├── packages/
-│   ├── agents/              # Agent registry (51)
-│   ├── skills/              # Skill + team-skill registry (92)
+│   ├── agents/              # Agent registry (54 agents)
+│   ├── skills/              # Skill + team-skill registry (94 skills)
 │   ├── types/               # Shared interfaces
 │   ├── config/              # Zod schemas, GDD/ADR templates
 │   └── state/               # Session store
 ├── scripts/asset-pipeline/  # Local AI asset generation (FLUX, rembg)
-├── workspace/               # Game output (gitignored; GDD, Godot projects, assets)
+├── workspace/               # Game output (gitignored; GDD, RESEARCH.md, Godot projects, assets)
 └── .github/workflows/ci.yml
 ```
 
@@ -311,6 +367,9 @@ pnpm generate && pnpm typecheck && pnpm test
 | `ZAI_BASE_URL` | Z.ai endpoint (default `https://api.z.ai/api/anthropic`) |
 | `KIMI_API_KEY` | Kimi / Moonshot provider (optional if `ZAI_API_KEY` is set) |
 | `KIMI_BASE_URL` | Kimi endpoint (default `https://api.kimi.com/coding`) |
+| `MIROMIND_API_KEY` | MiroMind deep research provider (optional) |
+| `MIROMIND_BASE_URL` | MiroMind endpoint (default `https://api.miromind.ai`) |
+| `MIROMIND_MODEL` | MiroMind model (default `mirothinker-1-7-deepresearch-mini`) |
 | `DEFAULT_MODEL` | Fallback model id — `glm-5.1` or `kimi-for-coding`, etc. |
 | `API_SECRET` | API + WebSocket auth (≥16 chars) |
 | `NEXT_PUBLIC_API_KEY` | Must match `API_SECRET` for browser → API calls |

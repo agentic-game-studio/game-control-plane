@@ -263,4 +263,16 @@ export const specialistAgents: Partial<Record<AgentRole, AgentDefinition>> = {
     memory: "project",
     reportsTo: ["producer"],
   },
+  "market-researcher": {
+    name: "market-researcher",
+    description: "Deep research specialist powered by MiroMind. Conducts market analysis, competitive landscape evaluation, genre trend analysis, target audience profiling, and technical feasibility assessments. Provides data-driven recommendations to inform GDD creation and scope decisions. Uses the DeepResearch tool for external research queries.",
+    tier: 3,
+    model: "haiku",
+    tools: ["Read", "Write", "Edit", "DeepResearch"],
+    maxTurns: 15,
+    skills: ["brainstorm", "gate-check"],
+    memory: "project",
+    reportsTo: ["creative-director", "producer"],
+    delegates: [],
+  },
 };

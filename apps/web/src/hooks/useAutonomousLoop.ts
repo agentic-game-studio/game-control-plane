@@ -46,6 +46,13 @@ export interface LoopStatus {
   lastError: string | null;
 }
 
+/** Deep research phase status surfaced via MiroMind WebSocket events */
+export interface ResearchStatus {
+  phase: "idle" | "started" | "completed";
+  concept?: string;
+  sections?: number;
+}
+
 export interface LoopRunSummary {
   sessionId: string;
   startedAt: string;
@@ -96,6 +103,7 @@ export function useAutonomousLoop() {
   });
   const [metrics, setMetrics] = useState<AutonomousRunMetrics | null>(null);
   const [milestone, setMilestone] = useState<string | null>(null);
+  const [researchStatus, setResearchStatus] = useState<ResearchStatus>({ phase: "idle" });
   const mountedRef = useRef(true);
 
   useEffect(() => {
@@ -197,6 +205,22 @@ export function useAutonomousLoop() {
         }));
         setMilestone(null);
         break;
+
+      case "autonomous:research":
+        setResearchStatus({
+          phase: event.phase,
+          concept: event.concept,
+          sections: event.sections,
+        });
+        break;
+
+      case "research:completed":
+        setResearchStatus({
+          phase: "completed",
+          concept: event.concept,
+          sections: event.sections,
+        });
+        break;
     }
   }, []);
 
@@ -260,5 +284,5 @@ export function useAutonomousLoop() {
     }));
   }, []);
 
-  return { status, metrics, milestone, connected, startLoop, stopLoop, getHistory, pollStatus };
+  return { status, metrics, milestone, researchStatus, connected, startLoop, stopLoop, getHistory, pollStatus };
 }

@@ -1500,6 +1500,24 @@ export const GAME_STUDIO_TOOLS: LLMTool[] = [
       required: ["platform"],
     },
   },
+  {
+    name: "DeepResearch",
+    description:
+      "Perform deep research on a topic using MiroMind's specialised deep research model. " +
+      "Use for market analysis, genre trends, competitive landscape evaluation, target audience profiling, " +
+      "technical feasibility assessment, and GDD recommendations. " +
+      "Returns a structured research report with cited examples and actionable insights. " +
+      "Best used during pre-production / GDD creation phase, or when the producer needs data-driven decisions. " +
+      "Requires MIROMIND_API_KEY to be configured in .env.",
+    input_schema: {
+      type: "object",
+      properties: {
+        topic: { type: "string", description: "The research topic or question. Be specific (e.g., 'Market viability of a roguelike deckbuilder for mobile in 2025')" },
+        context: { type: "string", description: "Additional context — project description, target platforms, genre, target audience hints (optional)" },
+      },
+      required: ["topic"],
+    },
+  },
 ];
 
 /** Pre-load agent prompts on module init */

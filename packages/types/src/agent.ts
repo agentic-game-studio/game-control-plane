@@ -67,7 +67,8 @@ export type AgentRole =
   | "ue-replication-specialist"
   | "ue-umg-specialist"
   // Code review
-  | "code-reviewer";
+  | "code-reviewer"
+  | "market-researcher";
 
 /**
  * Compile-time array of every AgentRole literal. Derived from the
@@ -108,6 +109,8 @@ type AgentRoleTuple = [
   "ue-blueprint-specialist", "ue-replication-specialist", "ue-umg-specialist",
   // Code review
   "code-reviewer",
+  // Research
+  "market-researcher",
 ];
 
 export const AGENT_ROLES = [
@@ -134,6 +137,8 @@ export const AGENT_ROLES = [
   "ue-blueprint-specialist", "ue-replication-specialist", "ue-umg-specialist",
   // Code review
   "code-reviewer",
+  // Research
+  "market-researcher",
 ] as const satisfies AgentRoleTuple;
 
 export function isAgentRole(value: unknown): value is AgentRole {
@@ -149,7 +154,8 @@ export type AgentTool =
   | "Bash"
   | "Task"
   | "AskUserQuestion"
-  | "GodotCLI";
+  | "GodotCLI"
+  | "DeepResearch";
 
 export interface AgentDefinition {
   name: AgentRole;
