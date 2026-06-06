@@ -377,6 +377,7 @@ pnpm generate && pnpm typecheck && pnpm test
 | `MIROMIND_API_KEY` | MiroMind deep research provider (optional) |
 | `MIROMIND_BASE_URL` | MiroMind endpoint (default `https://api.miromind.ai`) |
 | `MIROMIND_MODEL` | MiroMind model (default `mirothinker-1-7-deepresearch-mini`) |
+| `MIROMIND_RESEARCH_TURNS` | Research turns per angle — 1 (fast), 2 (default), 3 (synthesis) |
 | `DEFAULT_MODEL` | Fallback model id — `glm-5.1` or `kimi-for-coding`, etc. |
 | `API_SECRET` | API + WebSocket auth (≥16 chars) |
 | `NEXT_PUBLIC_API_KEY` | Must match `API_SECRET` for browser → API calls |
