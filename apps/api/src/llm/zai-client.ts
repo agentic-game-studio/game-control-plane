@@ -14,6 +14,7 @@ import { logger } from "../utils/logger.js";
 import { broadcast } from "../services/websocket.js";
 import { CHARS_PER_TOKEN_ESTIMATE, getModelForTier, getModelContextWindow } from "../config/model-mapping.js";
 import { createHash } from "node:crypto";
+import fs from "node:fs/promises";
 
 /** Simple async semaphore for ZAI API concurrency control.
  *
@@ -1127,13 +1128,55 @@ Use "Now implementing..." to indicate you're continuing work rather than startin
     }
 
     messages.push({ role: "assistant", content: response.content, tool_calls: response.tool_calls });
-    // Cap total tool results to prevent context explosion from many/large results
+
+    // Extract screen images from tool results for multimodal LLM input (Kimi k2.6).
+    // When GenerateGameScreen returns an image path, read the file and embed it
+    // as an ImageContent block so the coding LLM can "see" the mockup.
+    const IMAGE_PATH_RE = /__SCREEN_IMAGE_PATH__:(.+?)__\/SCREEN_IMAGE_PATH__/;
+    const imageContents: Array<TextContent | ImageContent> = [];
+    const cleanedResults: string[] = [];
+
+    for (const tr of toolResults) {
+      let cleaned = tr;
+      const imagePathMatch = tr.match(IMAGE_PATH_RE);
+      if (imagePathMatch) {
+        try {
+          const imagePath = imagePathMatch[1].trim();
+          const imageBuffer = await fs.readFile(imagePath);
+          const base64 = imageBuffer.toString("base64");
+          imageContents.push({
+            type: "image",
+            source: {
+              type: "base64",
+              media_type: "image/png",
+              data: base64,
+            },
+          });
+          cleaned = cleaned.replace(imagePathMatch[0], "[Game screen mockup image embedded for multimodal processing]");
+        } catch (readErr) {
+          logger.warn({ err: String(readErr), event: "screen_image_read_failed" },
+            "Failed to read game screen image for multimodal embedding");
+        }
+      }
+      cleanedResults.push(cleaned);
+    }
+
     const MAX_TOTAL_TOOL_RESULTS = 60_000;
-    let toolContent = toolResults.join("\n\n");
+    let toolContent = cleanedResults.join("\n\n");
     if (toolContent.length > MAX_TOTAL_TOOL_RESULTS) {
       toolContent = toolContent.slice(0, MAX_TOTAL_TOOL_RESULTS) + "\n\n[... additional tool results truncated]";
     }
-    messages.push({ role: "user", content: toolContent });
+
+    if (imageContents.length > 0) {
+      const contentBlocks: Array<TextContent | ImageContent> = [
+        { type: "text", text: toolContent },
+        ...imageContents,
+        { type: "text", text: "\n\n[Above is the game screen mockup image. Use it as visual reference to generate the GDScript code that implements this screen in Godot. Match the layout, UI elements, and visual style shown in the image.]" },
+      ];
+      messages.push({ role: "user", content: contentBlocks });
+    } else {
+      messages.push({ role: "user", content: toolContent });
+    }
 
     // Context management: prune if approaching token limit
     const currentTokens = estimateMessageTokens(messages);
@@ -1308,12 +1351,13 @@ export const GAME_STUDIO_TOOLS: LLMTool[] = [
   {
     name: "GenerateAsset",
     description:
-      "Generate a 2D game asset image using AI (mflux/FLUX2 Klein on Apple Silicon). " +
+      "Generate a 2D game asset image using AI. Supports two backends: " +
+      "GPT Image 2 (high-quality, fast, requires OPENAI_API_KEY) and mflux/FLUX2 Klein (local, Apple Silicon, no API key). " +
+      "Auto-selects GPT Image 2 when OPENAI_API_KEY is available, falls back to mflux otherwise. " +
       "The pipeline: AI image generation -> background removal -> post-processing -> Godot-ready PNG. " +
       "Returns the file path and auto-registers in the asset inventory. " +
       "Use for: UI icons, character sprites, props, textures, VFX sprites. " +
-      "For MVPs and prototypes, prefer quick pixel-art placeholder/concept assets through this Python pipeline before committing to final art direction. " +
-      "For sprite sheets, set spriteSheet=true with cols/rows.",
+      "For HUD/UI elements, use category='ui'. For sprite sheets, set spriteSheet=true with cols/rows.",
     input_schema: {
       type: "object",
       properties: {
@@ -1321,11 +1365,12 @@ export const GAME_STUDIO_TOOLS: LLMTool[] = [
         name: { type: "string", description: "Asset name, slug-safe (e.g. 'health-potion')" },
         type: { type: "string", description: "Asset type: 2d, 3d, vfx, audio, texture (default: 2d)" },
         category: { type: "string", description: "Category: prop, character, env, weapon, ui, tex, sfx, music (default: prop)" },
+        generator: { type: "string", description: "Image generator backend: 'gpt-image-2' or 'mflux'. Auto-detected when omitted (GPT Image 2 preferred when OPENAI_API_KEY is set)." },
         width: { type: "number", description: "Image width in pixels (default: 512)" },
         height: { type: "number", description: "Image height in pixels (default: 512)" },
-        steps: { type: "number", description: "Generation steps, higher=more quality (default: 4)" },
+        steps: { type: "number", description: "Generation steps, higher=more quality (default: 4, mflux only)" },
         seed: { type: "number", description: "Random seed for reproducibility (optional)" },
-        removeBg: { type: "boolean", description: "Remove background for transparent PNG (default: true)" },
+        removeBg: { type: "boolean", description: "Remove background for transparent PNG (default: true, mflux only)" },
         negativePrompt: { type: "string", description: "What to avoid in generation (optional)" },
         gridSize: { type: "number", description: "Pad to grid tile size e.g. 128 for 128x128 (optional)" },
         spriteSheet: { type: "boolean", description: "Enable sprite-sheet auto-slicing (default: false)" },
@@ -1335,6 +1380,66 @@ export const GAME_STUDIO_TOOLS: LLMTool[] = [
         presetsFile: { type: "string", description: "YAML presets filename for batch generation (e.g. 'presets.yaml')" },
       },
       required: ["prompt", "name"],
+    },
+  },
+  {
+    name: "GenerateGameScreen",
+    description:
+      "Generate a full game screen mockup / concept art using GPT Image 2. " +
+      "The generated image is saved as an asset (type='screenshot') and can be used as visual reference " +
+      "for Kimi k2.6 (multimodal) to read the screen design and generate the corresponding GDScript code. " +
+      "Workflow: GenerateGameScreen -> LLM reads the mockup image -> LLM codes the scene in Godot. " +
+      "Use for: main menu, HUD overlay, level design mockup, character select, inventory screen, game-over screen, settings panel. " +
+      "Requires OPENAI_API_KEY. Returns file path + base64 image for multimodal coding.",
+    input_schema: {
+      type: "object",
+      properties: {
+        prompt: {
+          type: "string",
+          description: "Detailed description of the game screen. Include: screen purpose, UI element layout, " +
+            "visual style (pixel art / hand-drawn / realistic), color scheme, game genre context, " +
+            "specific components (e.g. 'health bar top-left, score top-right, mini-map bottom-right, " +
+            "action buttons bottom-center'). Be specific about positioning.",
+        },
+        name: { type: "string", description: "Screen name, slug-safe (e.g. 'main-menu', 'level-1-hud', 'combat-hud')" },
+        style: { type: "string", description: "Art style: pixel-art, hand-drawn, realistic, flat-vector (default: pixel-art)" },
+        size: { type: "string", description: "Output size: 1024x1024, 1536x1024 (landscape), 1024x1536 (portrait), 1440x1440 (default: 1536x1024)" },
+        tags: { type: "array", items: { type: "string" }, description: "Tags for asset inventory (e.g. ['ui', 'reference', 'main-menu'])" },
+      },
+      required: ["prompt", "name"],
+    },
+  },
+  {
+    name: "GenerateHUD",
+    description:
+      "Generate individual HUD / UI elements for a game screen using GPT Image 2. " +
+      "Each element is generated as a separate PNG asset with transparent background. " +
+      "All elements are registered in the asset inventory under the 'ui' category and tagged with the screen name. " +
+      "Use for: health bars, coin/currency icons, ability cooldown icons, score displays, minimap frames, " +
+      "dialog box backgrounds, button skins, inventory slot icons. " +
+      "Use after GenerateGameScreen to produce the individual UI elements needed to implement that screen. " +
+      "Requires OPENAI_API_KEY.",
+    input_schema: {
+      type: "object",
+      properties: {
+        screenName: { type: "string", description: "Name of the game screen this HUD belongs to (e.g. 'combat-hud', 'main-menu')" },
+        elements: {
+          type: "array",
+          description: "Array of HUD elements to generate",
+          items: {
+            type: "object",
+            properties: {
+              name: { type: "string", description: "Element name, slug-safe (e.g. 'health-bar', 'coin-icon')" },
+              prompt: { type: "string", description: "Specific prompt describing this UI element. Include style, size hints, and visual details." },
+              width: { type: "number", description: "Width in pixels (default: 256)" },
+              height: { type: "number", description: "Height in pixels (default: 256)" },
+            },
+            required: ["name", "prompt"],
+          },
+        },
+        style: { type: "string", description: "Art style hint applied to all elements: pixel-art, hand-drawn, realistic, flat-vector (default: pixel-art)" },
+      },
+      required: ["screenName", "elements"],
     },
   },
   {

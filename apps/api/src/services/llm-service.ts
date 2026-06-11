@@ -99,6 +99,7 @@ import { consumeCreditsForAgent } from "./credit-service.js";
 import { escapeRegExp } from "../utils/regex.js";
 import { logger } from "../utils/logger.js";
 import { newId } from "../utils/ids.js";
+import { generateImage, isOpenAIAvailable } from "../llm/openai-image-client.js";
 import { toolIterationProgressPct } from "../utils/progress.js";
 
 // 10-M5: hoist the static Godot-binary allowlist to module scope. The
@@ -954,15 +955,116 @@ async function executeTool(
 
         broadcastLogEntry(sessionId, "info", `[${agentRole}] Generating asset: ${assetName}`, agentRole);
 
-        // Resolve Python binary with pipeline dependencies (Pillow, rembg, etc.)
-        const PYTHON_BIN = resolvePipelinePython();
-
-        // 17-C2: see REPO_SCRIPTS_DIR — ship the asset pipeline from the
-        // app's read-only source tree, not the user-writable workspace.
-        const scriptDir = path.join(REPO_SCRIPTS_DIR, "asset-pipeline");
         const outputDir = projectContext?.workspacePath
           ? path.join(resolveProjectWorkspace(projectContext.workspacePath), "assets")
           : path.join(loadConfig().WORKSPACE_DIR, "assets");
+
+        const requestedGenerator = input.generator as string | undefined;
+        const useGPTImage2 =
+          (requestedGenerator === "gpt-image-2" || (!requestedGenerator && isOpenAIAvailable())) &&
+          !input.presetsFile; // batch presets always use mflux
+
+        if (useGPTImage2) {
+          try {
+            const slug = assetName.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/_+$/, "");
+            const category = (input.category as string) ?? "prop";
+            const width = (input.width as number) ?? 512;
+            const height = (input.height as number) ?? 512;
+            const size = `${width}x${height}`;
+
+            const results = await generateImage(enrichedPrompt, {
+              size,
+              n: 1,
+              quality: "standard",
+              responseFormat: "b64_json",
+            });
+
+            const result = results[0];
+            if (!result?.b64Json) return "Error: GPT Image 2 returned no image data";
+
+            const rawDir = path.join(outputDir, "raw");
+            await fs.mkdir(rawDir, { recursive: true });
+            const rawPath = path.join(rawDir, `${slug}.png`);
+            await fs.writeFile(rawPath, Buffer.from(result.b64Json, "base64"));
+
+            let finalPath = rawPath;
+            const categoryDir = path.join(outputDir, category);
+            await fs.mkdir(categoryDir, { recursive: true });
+            finalPath = path.join(categoryDir, `${slug}.png`);
+            await fs.copyFile(rawPath, finalPath);
+
+            let thumbnailPath: string | undefined;
+            try {
+              const imageBuffer = await fs.readFile(rawPath);
+              const base64 = imageBuffer.toString("base64");
+              // Simple thumbnail: just reference the raw path; the frontend
+              // thumbnail-serving route handles display resizing.
+              thumbnailPath = path.relative(workspaceDir, rawPath);
+            } catch {
+              // thumbnail is optional
+            }
+
+            const stat = await fs.stat(finalPath).catch(() => ({ size: 0 }));
+            const entry: Record<string, unknown> = {
+              id: `asset-${Date.now()}-${slug}`,
+              filename: `${slug}.png`,
+              type: (input.type as string) ?? "2d",
+              category,
+              sizeBytes: stat.size,
+              tags: (input.tags as string[]) ?? [],
+              generatedWith: {
+                tool: "gpt-image-2",
+                model: "gpt-image-2",
+                prompt: enrichedPrompt,
+                width,
+                height,
+                steps: 1,
+                generator: "gpt-image-2",
+              },
+              path: path.relative(workspaceDir, finalPath),
+              rawPath: path.relative(workspaceDir, rawPath),
+              thumbnailPath: thumbnailPath,
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+            };
+
+            const newAsset: GameAsset = {
+              id: entry.id as string,
+              filename: entry.filename as string,
+              type: entry.type as GameAsset["type"],
+              category: entry.category as GameAsset["category"],
+              sizeBytes: entry.sizeBytes as number,
+              tags: entry.tags as string[],
+              path: entry.path as string,
+              rawPath: entry.rawPath as string,
+              thumbnailPath: entry.thumbnailPath as string | undefined,
+              generatedWith: entry.generatedWith as AssetGenerationMeta,
+              createdAt: entry.createdAt as string,
+              updatedAt: entry.updatedAt as string,
+            };
+
+            await updateData<AssetsData>("assets.json", (data) => {
+              if (!data.assets.some((a) => a.id === newAsset.id)) {
+                data.assets.push(newAsset);
+              }
+              return data;
+            });
+
+            broadcastEvent({ type: "asset:created", asset: newAsset, projectId: projectContext?.projectId ?? null } as WSEvent);
+            broadcastEvent({ type: "asset:generated", asset: newAsset, projectId: projectContext?.projectId ?? null } as WSEvent);
+
+            broadcastLogEntry(sessionId, "info", `[${agentRole}] Asset generated (GPT Image 2): ${assetName}`, agentRole);
+            return `Asset generation complete (GPT Image 2).\nGenerated: ${newAsset.filename} (${newAsset.type}/${newAsset.category})\nPath: ${newAsset.path}`;
+          } catch (genError: unknown) {
+            const msg = genError instanceof Error ? genError.message : String(genError);
+            return `Error: GPT Image 2 asset generation failed: ${msg}`;
+          }
+        }
+
+        // mflux/FLUX2 path
+        const PYTHON_BIN = resolvePipelinePython();
+
+        const scriptDir = path.join(REPO_SCRIPTS_DIR, "asset-pipeline");
 
         const genArgs = [
           path.join(scriptDir, "asset-pipeline.py"),
@@ -1022,14 +1124,6 @@ async function executeTool(
             const entries = isBatch ? manifest : manifest.length > 0 ? [manifest[manifest.length - 1]] : [];
 
             if (entries.length > 0) {
-              // 14-CR-llm-assets: route the manifest→inventory write
-              // through updateData so the per-file mutex serializes
-              // concurrent asset registrations. The previous
-              // readData+writeData pair was lock-free, so a parallel
-              // RunAssetPipeline call (the autonomous loop spawns
-              // multiple concurrently) could see the same baseline,
-              // each push its own entries, and last-writer-wins drop
-              // the earlier batch.
               const registered: string[] = [];
               const newAssets: GameAsset[] = [];
               for (const entry of entries) {
@@ -1062,8 +1156,6 @@ async function executeTool(
               });
 
               for (const newAsset of newAssets) {
-                // 10-L5: forward the projectId so the studio hook can
-                // filter out events for projects it isn't viewing.
                 if (!registered.includes(newAsset.filename)) continue;
                 broadcastEvent({ type: "asset:created", asset: newAsset, projectId: projectContext?.projectId ?? null } as WSEvent);
                 broadcastEvent({ type: "asset:generated", asset: newAsset, projectId: projectContext?.projectId ?? null } as WSEvent);
@@ -1086,6 +1178,205 @@ async function executeTool(
           const err = genError as { message?: string; stderr?: string };
           return `Error: Asset generation failed: ${err.stderr || err.message}`;
         }
+      }
+
+      case "GenerateGameScreen": {
+        const screenPrompt = input.prompt as string;
+        const screenName = input.name as string;
+        if (!screenPrompt || !screenName) return "Error: prompt and name are required";
+
+        if (!isOpenAIAvailable()) {
+          return "Error: GenerateGameScreen requires OPENAI_API_KEY to be configured. GPT Image 2 is needed for game screen mockup generation.";
+        }
+
+        broadcastLogEntry(sessionId, "info", `[${agentRole}] Generating game screen mockup: ${screenName}`, agentRole);
+
+        const slug = screenName.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/_+$/, "");
+        const style = (input.style as string | undefined) ?? "pixel-art";
+        const size = (input.size as string | undefined) ?? "1536x1024";
+
+        const enrichedPrompt = `[Game Screen Mockup — ${style} style] ${screenPrompt}
+Generate a full game screen layout with clear UI zones. Use ${style} art style.`;
+
+        try {
+          const results = await generateImage(enrichedPrompt, {
+            size,
+            n: 1,
+            quality: "hd",
+            responseFormat: "b64_json",
+          });
+
+          const result = results[0];
+          if (!result?.b64Json) return "Error: GPT Image 2 returned no image data";
+
+          const outputDir = projectContext?.workspacePath
+            ? path.join(resolveProjectWorkspace(projectContext.workspacePath), "assets")
+            : path.join(loadConfig().WORKSPACE_DIR, "assets");
+
+          const screensDir = path.join(outputDir, "screens");
+          await fs.mkdir(screensDir, { recursive: true });
+          const filePath = path.join(screensDir, `${slug}.png`);
+          await fs.writeFile(filePath, Buffer.from(result.b64Json, "base64"));
+
+          let thumbnailPath: string | undefined;
+          try {
+            thumbnailPath = path.relative(workspaceDir, filePath);
+          } catch {
+            // thumbnail is optional
+          }
+
+          const stat = await fs.stat(filePath).catch(() => ({ size: 0 }));
+          const assetTags = [...((input.tags as string[]) ?? []), "screen-mockup", style];
+
+          const newAsset: GameAsset = {
+            id: `asset-${Date.now()}-${slug}`,
+            filename: `${slug}.png`,
+            type: "screenshot",
+            category: "ui",
+            sizeBytes: stat.size,
+            tags: assetTags,
+            path: path.relative(workspaceDir, filePath),
+            rawPath: path.relative(workspaceDir, filePath),
+            thumbnailPath: thumbnailPath,
+            generatedWith: {
+              tool: "gpt-image-2",
+              model: "gpt-image-2",
+              prompt: enrichedPrompt,
+              width: 1536,
+              height: 1024,
+              steps: 1,
+              generator: "gpt-image-2",
+            },
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          };
+
+          await updateData<AssetsData>("assets.json", (data) => {
+            if (!data.assets.some((a) => a.id === newAsset.id)) {
+              data.assets.push(newAsset);
+            }
+            return data;
+          });
+
+          broadcastEvent({ type: "asset:created", asset: newAsset, projectId: projectContext?.projectId ?? null } as WSEvent);
+          broadcastEvent({ type: "asset:generated", asset: newAsset, projectId: projectContext?.projectId ?? null } as WSEvent);
+
+          broadcastLogEntry(sessionId, "info", `[${agentRole}] Game screen mockup generated: ${screenName}`, agentRole);
+
+          return `Game screen mockup generated (GPT Image 2).
+Screen: ${screenName}
+Style: ${style} | Size: ${size}
+Path: ${newAsset.path}
+
+__SCREEN_IMAGE_PATH__:${filePath}__/SCREEN_IMAGE_PATH__
+
+The image has been saved and registered. The next agent should read this screen mockup and generate the corresponding GDScript implementation for Godot. Use the file path above to reference the image.`;
+        } catch (genError: unknown) {
+          const msg = genError instanceof Error ? genError.message : String(genError);
+          return `Error: GenerateGameScreen failed: ${msg}`;
+        }
+      }
+
+      case "GenerateHUD": {
+        const screenName = input.screenName as string;
+        const elements = input.elements as Array<{ name: string; prompt: string; width?: number; height?: number }> | undefined;
+        if (!screenName || !elements?.length) return "Error: screenName and elements are required";
+
+        if (!isOpenAIAvailable()) {
+          return "Error: GenerateHUD requires OPENAI_API_KEY to be configured. GPT Image 2 is needed for HUD element generation.";
+        }
+
+        broadcastLogEntry(sessionId, "info", `[${agentRole}] Generating HUD elements for: ${screenName} (${elements.length} items)`, agentRole);
+
+        const style = (input.style as string | undefined) ?? "pixel-art";
+        const outputDir = projectContext?.workspacePath
+          ? path.join(resolveProjectWorkspace(projectContext.workspacePath), "assets")
+          : path.join(loadConfig().WORKSPACE_DIR, "assets");
+
+        const generated: string[] = [];
+        const errors: string[] = [];
+
+        for (const element of elements) {
+          const elemSlug = element.name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/_+$/, "");
+          const elemWidth = element.width ?? 256;
+          const elemHeight = element.height ?? 256;
+
+          const elemPrompt = `[HUD UI Element — ${style} style, game UI, transparent background preferred]
+${element.prompt}
+Make this a clean game UI element in ${style} style, suitable for a game HUD overlay.
+The element should be centered with transparent/alpha background where possible.`;
+
+          try {
+            const results = await generateImage(elemPrompt, {
+              size: `${elemWidth}x${elemHeight}`,
+              n: 1,
+              quality: "standard",
+              responseFormat: "b64_json",
+            });
+
+            const result = results[0];
+            if (!result?.b64Json) {
+              errors.push(`${element.name}: no image data returned`);
+              continue;
+            }
+
+            const uiDir = path.join(outputDir, "ui");
+            await fs.mkdir(uiDir, { recursive: true });
+            const filePath = path.join(uiDir, `${elemSlug}.png`);
+            await fs.writeFile(filePath, Buffer.from(result.b64Json, "base64"));
+
+            const stat = await fs.stat(filePath).catch(() => ({ size: 0 }));
+            const assetTags = ["hud", screenName, style, "ui-element"];
+
+            const newAsset: GameAsset = {
+              id: `asset-${Date.now()}-${elemSlug}`,
+              filename: `${elemSlug}.png`,
+              type: "2d",
+              category: "ui",
+              sizeBytes: stat.size,
+              tags: assetTags,
+              path: path.relative(workspaceDir, filePath),
+              rawPath: path.relative(workspaceDir, filePath),
+              generatedWith: {
+                tool: "gpt-image-2",
+                model: "gpt-image-2",
+                prompt: elemPrompt,
+                width: elemWidth,
+                height: elemHeight,
+                steps: 1,
+                generator: "gpt-image-2",
+              },
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+            };
+
+            await updateData<AssetsData>("assets.json", (data) => {
+              if (!data.assets.some((a) => a.id === newAsset.id)) {
+                data.assets.push(newAsset);
+              }
+              return data;
+            });
+
+            broadcastEvent({ type: "asset:created", asset: newAsset, projectId: projectContext?.projectId ?? null } as WSEvent);
+            broadcastEvent({ type: "asset:generated", asset: newAsset, projectId: projectContext?.projectId ?? null } as WSEvent);
+
+            generated.push(element.name);
+          } catch (genError: unknown) {
+            const msg = genError instanceof Error ? genError.message : String(genError);
+            errors.push(`${element.name}: ${msg}`);
+          }
+        }
+
+        broadcastLogEntry(sessionId, "info", `[${agentRole}] HUD generation complete for ${screenName}: ${generated.length}/${elements.length}`, agentRole);
+
+        const summary = `HUD generation complete for screen "${screenName}" (GPT Image 2).
+Style: ${style}
+Generated: ${generated.length}/${elements.length} elements
+${generated.length > 0 ? `Success: ${generated.join(", ")}` : ""}
+${errors.length > 0 ? `\nErrors: ${errors.join("; ")}` : ""}
+All elements registered in asset inventory under category 'ui'.`;
+
+        return summary;
       }
 
       case "TilemapSplit": {

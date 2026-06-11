@@ -11,6 +11,7 @@ const TYPE_ICONS: Record<AssetType, string> = {
   vfx: "auto_awesome",
   audio: "music_note",
   texture: "texture",
+  screenshot: "monitor",
 };
 
 const TYPE_LABELS: Record<AssetType, string> = {
@@ -19,6 +20,7 @@ const TYPE_LABELS: Record<AssetType, string> = {
   vfx: "VFX",
   audio: "AUDIO",
   texture: "TEX",
+  screenshot: "SCREEN",
 };
 
 const CATEGORY_COLORS: Record<AssetCategory, string> = {

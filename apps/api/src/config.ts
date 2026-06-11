@@ -10,6 +10,10 @@ const envSchema = z
     // Z.ai provider (optional if KIMI_API_KEY is set)
     ZAI_API_KEY: z.string().optional().default(""),
     ZAI_BASE_URL: z.string().url().default("https://api.z.ai/api/anthropic"),
+    // OpenAI image generation provider (optional)
+    OPENAI_API_KEY: z.string().optional().default(""),
+    OPENAI_BASE_URL: z.string().url().default("https://api.openai.com"),
+    OPENAI_IMAGE_MODEL: z.string().default("gpt-image-2"),
     // MiroMind deep research provider (optional)
     MIROMIND_API_KEY: z.string().optional().default(""),
     MIROMIND_BASE_URL: z.string().url().default("https://api.miromind.ai"),
@@ -110,6 +114,9 @@ export function loadConfig() {
     KIMI_BASE_URL: process.env.KIMI_BASE_URL,
     ZAI_API_KEY: process.env.ZAI_API_KEY ?? "",
     ZAI_BASE_URL: process.env.ZAI_BASE_URL,
+    OPENAI_API_KEY: process.env.OPENAI_API_KEY ?? "",
+    OPENAI_BASE_URL: process.env.OPENAI_BASE_URL,
+    OPENAI_IMAGE_MODEL: process.env.OPENAI_IMAGE_MODEL,
     MIROMIND_API_KEY: process.env.MIROMIND_API_KEY ?? "",
     MIROMIND_BASE_URL: process.env.MIROMIND_BASE_URL,
     MIROMIND_MODEL: process.env.MIROMIND_MODEL,

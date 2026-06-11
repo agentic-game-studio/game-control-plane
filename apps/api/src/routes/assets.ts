@@ -21,6 +21,7 @@ import type {
 } from "@game-studio/types";
 import type { WSEvent } from "@game-studio/types";
 import { loadConfig, resolvePipelinePython, SUBPROCESS_MAX_BUFFER } from "../config.js";
+import { isOpenAIAvailable, generateImage } from "../llm/openai-image-client.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -70,8 +71,9 @@ function inferCategory(filename: string): GameAsset["category"] {
 interface GenerateAssetRequest {
   prompt: string;
   name: string;
-  type?: "2d" | "3d" | "vfx" | "audio" | "texture";
+  type?: "2d" | "3d" | "vfx" | "audio" | "texture" | "screenshot";
   category?: "prop" | "character" | "env" | "weapon" | "ui" | "tex" | "sfx" | "music";
+  generator?: "mflux" | "gpt-image-2";
   width?: number;
   height?: number;
   steps?: number;
@@ -125,7 +127,7 @@ function manifestEntryToGameAsset(entry: Record<string, unknown>): GameAsset {
   // Validate the discriminator fields before casting — an unknown type or
   // category string would otherwise leak through as an un-castable value
   // and crash downstream code (e.g. `assets.filter(a => a.type === "2d")`).
-  const VALID_TYPES: GameAsset["type"][] = ["3d", "2d", "vfx", "audio", "texture"];
+  const VALID_TYPES: GameAsset["type"][] = ["3d", "2d", "vfx", "audio", "texture", "screenshot"];
   const VALID_CATEGORIES: GameAsset["category"][] = [
     "prop", "character", "env", "weapon", "ui", "tex", "sfx", "music",
   ];
@@ -991,6 +993,96 @@ assetsRouter.post("/generate", async (req: Request, res: Response) => {
       });
     }
     return;
+  }
+
+  // GPT Image 2 code path — auto-detect when OPENAI_API_KEY is set
+  const useGPTImage2 =
+    (body.generator === "gpt-image-2" || (!body.generator && isOpenAIAvailable())) &&
+    !body.presetsFile;
+
+  if (useGPTImage2) {
+    try {
+      const slug = body.name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/_+$/, "");
+      const category = body.category ?? "prop";
+      const width = Math.min(Math.max(Number(body.width) || 512, 64), 4096);
+      const height = Math.min(Math.max(Number(body.height) || 512, 64), 4096);
+      const size = `${width}x${height}`;
+
+      const results = await generateImage(body.prompt, {
+        size,
+        n: 1,
+        quality: "standard",
+        responseFormat: "b64_json",
+      });
+
+      const result = results[0];
+      if (!result?.b64Json) {
+        res.status(500).json({ success: false, error: "GPT Image 2 returned no image data" });
+        return;
+      }
+
+      const rawDir = path.join(projectAssetsDir, "raw");
+      await fs.mkdir(rawDir, { recursive: true });
+      const rawPath = path.join(rawDir, `${slug}.png`);
+      await fs.writeFile(rawPath, Buffer.from(result.b64Json, "base64"));
+
+      const categoryDir = path.join(projectAssetsDir, category);
+      await fs.mkdir(categoryDir, { recursive: true });
+      const finalPath = path.join(categoryDir, `${slug}.png`);
+      await fs.copyFile(rawPath, finalPath);
+
+      const newAsset: GameAsset = {
+        id: `asset-${Date.now()}-${slug}`,
+        filename: `${slug}.png`,
+        type: (body.type as GameAsset["type"]) ?? "2d",
+        category: category as GameAsset["category"],
+        sizeBytes: (await fs.stat(finalPath).catch(() => ({ size: 0 }))).size,
+        tags: body.tags ?? [],
+        path: path.relative(projectDir, finalPath),
+        rawPath: path.relative(projectDir, rawPath),
+        generatedWith: {
+          tool: "gpt-image-2",
+          model: "gpt-image-2",
+          prompt: body.prompt,
+          width,
+          height,
+          steps: 1,
+          generator: "gpt-image-2",
+        },
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      await updateData<AssetsData>("assets.json", (data) => {
+        if (!data.assets.some((a) => a.id === newAsset.id)) {
+          data.assets.push(newAsset);
+        }
+        return data;
+      });
+
+      broadcastEvent({
+        type: "asset:created",
+        asset: newAsset,
+        projectId: body.workspacePath ? (req.body as { projectId?: string })?.projectId ?? null : null,
+      } as WSEvent);
+
+      res.json({
+        success: true,
+        data: {
+          asset: newAsset,
+          log: `GPT Image 2 generated: ${slug}.png (${width}x${height})`,
+        },
+      });
+      return;
+    } catch (error: unknown) {
+      const err = error as { message?: string };
+      res.status(500).json({
+        success: false,
+        error: "GPT Image 2 generation failed",
+        details: err.message || "Unknown error",
+      });
+      return;
+    }
   }
 
   // Single asset generation

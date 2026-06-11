@@ -1,5 +1,8 @@
-export type AssetType = "3d" | "2d" | "vfx" | "audio" | "texture";
+export type AssetType = "3d" | "2d" | "vfx" | "audio" | "texture" | "screenshot";
 export type AssetCategory = "prop" | "character" | "env" | "weapon" | "ui" | "tex" | "sfx" | "music";
+
+/** Supported image generation backends */
+export type AssetGenerator = "mflux" | "gpt-image-2";
 
 /** Generation metadata preserved from the AI pipeline */
 export interface AssetGenerationMeta {
@@ -11,6 +14,8 @@ export interface AssetGenerationMeta {
   steps: number;
   seed?: number | null;
   negativePrompt?: string | null;
+  /** Which image generator was used (mflux or gpt-image-2) */
+  generator?: AssetGenerator;
 }
 
 export interface GameAsset {
