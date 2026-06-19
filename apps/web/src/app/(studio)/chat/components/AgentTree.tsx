@@ -19,13 +19,6 @@ interface AgentTreeProps {
   onSelectSubagent?: (subagent: SubagentInfo) => void;
 }
 
-function getSessionCredits(sessionId: string, usageLog?: UsageLogEntry[]): number {
-  if (!usageLog) return 0;
-  return usageLog
-    .filter((entry) => entry.sessionId === sessionId)
-    .reduce((sum, entry) => sum + entry.creditsUsed, 0);
-}
-
 /* ─── Hierarchy Tree ─── */
 
 function TreeNode({ node, activeRoles }: { node: AgentTreeNode; activeRoles: string[] }) {
@@ -252,6 +245,20 @@ export default function AgentTree({ sessions, subagents, currentSession, totalPr
     entries.filter(([, s]) => s.role !== "producer"),
     [entries]);
 
+  // Aggregate credits per session once per render instead of filtering
+  // the full usage log for every task card. usageLog is capped at 500
+  // entries on the backend, but getSessionCredits ran a filter+reduce
+  // over it on each card + each in-flight row.
+  const creditsBySession = useMemo(() => {
+    const map = new Map<string, number>();
+    if (!usageLog) return map;
+    for (const entry of usageLog) {
+      if (!entry.sessionId) continue;
+      map.set(entry.sessionId, (map.get(entry.sessionId) ?? 0) + entry.creditsUsed);
+    }
+    return map;
+  }, [usageLog]);
+
   const activeBackgroundTasks = useMemo(() =>
     backgroundTasks.filter(([, s]) => s.status === "active"),
     [backgroundTasks]);
@@ -351,7 +358,7 @@ export default function AgentTree({ sessions, subagents, currentSession, totalPr
               </div>
               <div className="px-3 py-2 space-y-2">
                 {activeBackgroundTasks.slice(0, 3).map(([id, session]) => {
-                  const credits = getSessionCredits(id, usageLog);
+                  const credits = creditsBySession.get(id) ?? 0;
                   return (
                     <button
                       key={id}
@@ -408,7 +415,7 @@ export default function AgentTree({ sessions, subagents, currentSession, totalPr
                   key={id}
                   id={id}
                   session={session}
-                  creditsUsed={getSessionCredits(id, usageLog)}
+                  creditsUsed={creditsBySession.get(id) ?? 0}
                   onSelect={onSelectSession}
                   onClose={onCloseSession}
                 />

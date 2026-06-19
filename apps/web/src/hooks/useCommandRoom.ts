@@ -940,6 +940,13 @@ export function useCommandRoom() {
   currentSessionRef.current = currentSession;
   const producerSessionIdRef = useRef(producerSessionId);
   producerSessionIdRef.current = producerSessionId;
+  // 32-H-persona-rollback: track the persisted persona so switchPersona
+  // can roll back its optimistic update if the API call fails. Without
+  // this ref, a failed switch leaves the UI showing a persona the
+  // backend never accepted, so the next LLM call uses the wrong system
+  // prompt while the header claims otherwise.
+  const currentPersonaRef = useRef(currentPersona);
+  currentPersonaRef.current = currentPersona;
   const sessionsRef = useRef<Map<string, AgentSession>>(new Map());
   const subagentsRef = useRef<Map<string, SubagentInfo>>(new Map());
   const contextUsageMapRef = useRef(contextUsageMap);
@@ -2716,6 +2723,7 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
 
   const switchPersona = useCallback(async (persona: AgentRole) => {
     if (!currentProjectId || !producerSessionId) return;
+    const previous = currentPersonaRef.current;
     setCurrentPersona(persona);
     try {
       await apiFetch(`/api/chat/sessions/${encodeURIComponent(producerSessionId)}/persona`, {
@@ -2726,6 +2734,9 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
     } catch (err) {
       logger.error("Failed to switch persona", { err });
       pushToast("failed", "Persona switch failed", err instanceof Error ? err.message : String(err));
+      // Roll back the optimistic update so the header matches the
+      // backend's still-persisted persona.
+      setCurrentPersona(previous);
     }
   }, [currentProjectId, producerSessionId, pushToast]);
 
