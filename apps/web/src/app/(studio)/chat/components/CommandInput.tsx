@@ -39,6 +39,7 @@ export const COMMANDS = [
   { cmd: "/mcp", desc: "Check Godot MCP status" },
   { cmd: "/export", desc: "Export session as markdown" },
   { cmd: "/ralphloop", desc: "Run research→plan→code→verify loop" },
+  { cmd: "/concept", desc: "Start a /concept pipeline (MiroMind research → creative-director pillars)" },
 ];
 
 interface PendingImage {

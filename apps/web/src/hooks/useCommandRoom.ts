@@ -718,6 +718,129 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, prod
       }});
       return { sessions: null, messages };
     }
+    case "pipeline:started": {
+      const target = sessions.has(event.sessionId) ? event.sessionId : producerSessionId;
+      if (!target) return { sessions: null, messages };
+      return {
+        sessions: null,
+        messages: [{
+          sessionRole: target,
+          msg: {
+          type: "system",
+          sender: "producer",
+          content: `▶ Pipeline started — skill: ${event.skillName}${event.lifecyclePhase ? ` (phase: ${event.lifecyclePhase})` : ""}, gateMode: ${event.gateMode}, runId: ${event.runId}`,
+          },
+        }],
+      };
+    }
+    case "pipeline:phase:started": {
+      const target = sessions.has(event.sessionId) ? event.sessionId : producerSessionId;
+      if (!target) return { sessions: null, messages };
+      return {
+        sessions: null,
+        messages: [{
+          sessionRole: target,
+          msg: {
+            type: "progress",
+            sender: "producer",
+            content: `Phase ${event.phaseIndex + 1} starting — ${event.phaseName}`,
+          },
+        }],
+      };
+    }
+    case "pipeline:phase:completed": {
+      const target = sessions.has(event.sessionId) ? event.sessionId : producerSessionId;
+      if (!target) return { sessions: null, messages };
+      const agentSummary = (event.agentResults ?? [])
+        .map((r) => `${r.agent}${r.ok ? " ✓" : " ✗"}`)
+        .join(", ");
+      return {
+        sessions: null,
+        messages: [{
+          sessionRole: target,
+          msg: {
+            type: "progress",
+            sender: "producer",
+            content: `Phase ${event.phaseIndex + 1} complete — ${event.phaseName}${agentSummary ? ` (${agentSummary})` : ""}`,
+          },
+        }],
+      };
+    }
+    case "pipeline:gate:pending": {
+      const target = sessions.has(event.sessionId) ? event.sessionId : producerSessionId;
+      if (!target) return { sessions: null, messages };
+      return {
+        sessions: null,
+        messages: [{
+          sessionRole: target,
+          msg: {
+            type: "question",
+            sender: "producer",
+            content: `⏸ Pipeline paused at gate ${event.gateId} (phase ${event.phaseIndex + 1}). Review the verdict and run \`/advance <runId>\` to continue, or \`/stop <runId>\` to cancel.`,
+          },
+        }],
+      };
+    }
+    case "pipeline:gate:verdict": {
+      const target = sessions.has(event.sessionId) ? event.sessionId : producerSessionId;
+      if (!target) return { sessions: null, messages };
+      return {
+        sessions: null,
+        messages: [{
+          sessionRole: target,
+          msg: {
+            type: "system",
+            sender: "producer",
+            content: `Gate ${event.gateId} verdict: ${event.verdict}${event.passing ? " (passing)" : " (blocked)"}${event.details ? ` — ${event.details.slice(0, 200)}` : ""}`,
+          },
+        }],
+      };
+    }
+    case "pipeline:completed": {
+      const target = sessions.has(event.sessionId) ? event.sessionId : producerSessionId;
+      if (!target) return { sessions: null, messages };
+      return {
+        sessions: null,
+        messages: [{
+          sessionRole: target,
+          msg: {
+            type: "system",
+            sender: "producer",
+            content: `✅ Pipeline completed (final phase: ${event.finalPhaseIndex + 1})`,
+          },
+        }],
+      };
+    }
+    case "pipeline:error": {
+      const target = sessions.has(event.sessionId) ? event.sessionId : producerSessionId;
+      if (!target) return { sessions: null, messages };
+      return {
+        sessions: null,
+        messages: [{
+          sessionRole: target,
+          msg: {
+            type: "system",
+            sender: "SYSTEM",
+            content: `❌ Pipeline error: ${event.message}${event.lastError ? ` — ${event.lastError}` : ""}`,
+          },
+        }],
+      };
+    }
+    case "pipeline:cancelled": {
+      const target = sessions.has(event.sessionId) ? event.sessionId : producerSessionId;
+      if (!target) return { sessions: null, messages };
+      return {
+        sessions: null,
+        messages: [{
+          sessionRole: target,
+          msg: {
+            type: "system",
+            sender: "SYSTEM",
+            content: `⏹ Pipeline cancelled at phase ${event.atPhaseIndex + 1}`,
+          },
+        }],
+      };
+    }
     case "chat:session:deleted": {
       const sid = event.sessionId;
       if (!sessions.has(sid)) return { sessions: null, messages };
@@ -2010,6 +2133,7 @@ Session:
 
 Workflows:
   /ralphloop <task>    — Run research→plan→code→verify loop
+  /concept <idea>      — Start a /concept pipeline (research → pillars → CD-PILLARS gate)
 
 Utilities:
   /diff                — Show recent changes
@@ -2391,6 +2515,47 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
             .catch((err) => {
               setIsLoading(false);
               addSessionMessage(sid, { type: "system", sender: "SYSTEM", content: `/ralphloop failed: ${err instanceof Error ? err.message : "Unknown error"}` });
+            });
+          return;
+        }
+        case "concept": {
+          const sid = producerSessionIdRef.current;
+          if (!sid) {
+            addSessionMessage(producerSessionIdRef.current, { type: "system", sender: "SYSTEM", content: "/concept requires an active project (open one on /dashboard first)." });
+            return;
+          }
+          const description = args?.trim() || "an unreleased game concept";
+          addSessionMessage(sid, { type: "user", sender: "DIRECTOR", content: trimmed });
+          setIsLoading(true);
+          apiFetch<{ success: boolean; data?: { runId: string; status: string; gateMode: string }; error?: string }>(
+            "/api/pipeline/start",
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                skillName: "pipeline-concept",
+                sessionId: sid,
+                projectId: currentProjectIdRef.current || undefined,
+                taskArgs: description,
+              }),
+            },
+          )
+            .then((result) => {
+              setIsLoading(false);
+              if (result.success && result.data) {
+                addSessionMessage(sid, {
+                  type: "system",
+                  sender: "producer",
+                  content: `▶ /concept pipeline started (runId: ${result.data.runId}, gateMode: ${result.data.gateMode}). Waiting for MiroMind research → creative-director pillars → CD-PILLARS gate. Use /advance to approve gates, /stop <runId> to cancel.`,
+                  showActions: false,
+                });
+              } else {
+                addSessionMessage(sid, { type: "system", sender: "SYSTEM", content: `/concept failed: ${result.error || "Unknown error"}` });
+              }
+            })
+            .catch((err) => {
+              setIsLoading(false);
+              addSessionMessage(sid, { type: "system", sender: "SYSTEM", content: `/concept failed: ${err instanceof Error ? err.message : "Unknown error"}` });
             });
           return;
         }
