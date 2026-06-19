@@ -69,9 +69,10 @@ def pack_sprites(
     if not frames:
         raise ValueError(f"No PNG frames found in {input_dir}")
 
-    # Determine frame size from first image
-    sample = Image.open(frames[0]).convert("RGBA")
-    frame_w, frame_h = sample.width, sample.height
+    # Determine frame size from first image. `with` releases the source
+    # file handle so a 100-frame pack doesn't leak 100 fds.
+    with Image.open(frames[0]) as _src:
+        frame_w, frame_h = _src.width, _src.height
 
     cell_w = max(frame_w, pad) if pad > 0 else frame_w
     cell_h = max(frame_h, pad) if pad > 0 else frame_h
@@ -89,7 +90,8 @@ def pack_sprites(
         x = padding + col * (cell_w + padding)
         y = padding + row * (cell_h + padding)
 
-        img = Image.open(frame_path).convert("RGBA")
+        with Image.open(frame_path) as _src:
+            img = _src.convert("RGBA").copy()
 
         # Center in cell if pad is set
         if pad > 0:

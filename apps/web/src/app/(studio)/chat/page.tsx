@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 import AgentTree from "./components/AgentTree";
 import ChatTabs from "./components/ChatTabs";
-import ChatThread from "./components/ChatThread";
+import ChatThread, { setCurrentProjectIdForMarkdownCache, clearProjectMarkdownCache } from "./components/ChatThread";
 import CommandInput from "./components/CommandInput";
 import QuestionToolbar from "./components/QuestionToolbar";
 import ProgressSummary from "./components/ProgressSummary";
@@ -15,14 +15,8 @@ import NotificationToasts from "./components/NotificationToasts";
 import { useCommandRoom } from "@/hooks/useCommandRoom";
 import { ProjectGuard } from "@/components/ProjectGuard";
 import { useProject } from "@/contexts/ProjectContext";
-import { apiFetch } from "@/lib/api";
-
-interface MCPStatus {
-  status: "not_running" | "connected" | "disconnected";
-  serverRunning?: boolean;
-  godotConnected?: boolean;
-  error?: string;
-}
+import { useDialog } from "@/hooks/useDialog";
+import { useGodotMCPStatus } from "@/hooks/useGodotMCPStatus";
 
 export default function ChatPage() {
   return (
@@ -34,44 +28,58 @@ export default function ChatPage() {
 
 function ChatPageInner() {
   const { currentProject } = useProject();
-  const [mcpStatus, setMcpStatus] = useState<MCPStatus | null>(null);
+  // 14-FH3-mcp-poll-consolidation: reuse useGodotMCPStatus hook
+  // instead of inlining the same fetch+interval+mountedRef logic.
+  // The hook already handles the projectId race (capture-on-request
+  // + mountedRef guard) and unmount cleanup; the inline version was
+  // missing the projectId snapshot and could show projectA's status
+  // under projectB's name briefly after a project switch.
+  const { status: mcpStatus } = useGodotMCPStatus(
+    currentProject?.id ?? null,
+    (currentProject?.engine as "godot" | null) ?? null,
+  );
   const [selectedSubagentId, setSelectedSubagentId] = useState<string | null>(null);
   const [focusMode, setFocusMode] = useState<boolean>(() => {
     if (typeof window === "undefined") return true;
-    const saved = window.localStorage.getItem("studio-chat-focus-mode");
-    return saved === null ? true : saved === "true";
+    try {
+      // 14-L-localstorage-trycatch: Safari private mode + quota
+      // exceeded both throw on localStorage access. Default to
+      // focus mode on (the safer default) and let the user toggle
+      // freely in-memory only.
+      const saved = window.localStorage.getItem("studio-chat-focus-mode");
+      return saved === null ? true : saved === "true";
+    } catch {
+      return true;
+    }
   });
   const isGodot = currentProject?.engine === "godot";
 
   useEffect(() => {
-    window.localStorage.setItem("studio-chat-focus-mode", String(focusMode));
+    try {
+      window.localStorage.setItem("studio-chat-focus-mode", String(focusMode));
+    } catch {
+      // private mode or quota — ignore; the in-memory value is the
+      // source of truth for the rest of this session.
+    }
   }, [focusMode]);
 
-  // Poll MCP health for Godot projects
+  // 14-CR-markdown-cache: keep the markdown render cache bucketed by
+  // the active project so messages from project A don't get rendered
+  // with project B's HTML, and so the per-project Map evicts when the
+  // user navigates away (rather than growing unbounded across the
+  // app's lifetime).
   useEffect(() => {
-    if (!currentProject?.id || currentProject?.engine !== "godot") {
-      setMcpStatus(null);
-      return;
+    const nextId = currentProject?.id ?? null;
+    setCurrentProjectIdForMarkdownCache(nextId);
+    if (nextId) {
+      // Drop the *previous* project's cache on switch (if it had one)
+      // to bound memory at ~200 entries × current project. The
+      // current project's cache is reused.
+      return () => {
+        clearProjectMarkdownCache(nextId);
+      };
     }
-
-    const checkHealth = async () => {
-      try {
-        const result = await apiFetch<{ success: boolean; data: MCPStatus }>(
-          `/api/dashboard/projects/${currentProject.id}/mcp-health`
-        );
-        setMcpStatus(result.data);
-      } catch (err) {
-        // Backend restarts or local network hiccups should degrade gracefully
-        // without surfacing a noisy dev-overlay error for the chat page.
-        setMcpStatus({ status: "disconnected", error: err instanceof Error ? err.message : "Failed to check" });
-      }
-    };
-
-    // Initial check
-    checkHealth();
-    const interval = setInterval(checkHealth, 10000);
-    return () => clearInterval(interval);
-  }, [currentProject?.id, currentProject?.engine]);
+  }, [currentProject?.id]);
 
   const {
     sessions,
@@ -115,6 +123,8 @@ function ChatPageInner() {
   const handleNavigate = (targetSession: string) => {
     selectSession(targetSession);
   };
+
+  const { confirm: showConfirm } = useDialog();
 
   const handleCloseSession = (sessionId: string) => {
     if (sessionId.startsWith("consultation-")) {
@@ -303,8 +313,8 @@ function ChatPageInner() {
                 </span>
               </div>
               <button
-                onClick={() => {
-                  if (confirm(`Close ${roleLabel} consultation and send summary back to Producer?`)) {
+                onClick={async () => {
+                  if (await showConfirm(`Close ${roleLabel} consultation and send summary back to Producer?`)) {
                     closeConsultation(currentSession);
                   }
                 }}
@@ -495,7 +505,7 @@ function AgentStatusBar({
   onPrioritize: () => void;
   onRequestStop: () => void;
 }) {
-  const isDone = session?.status === "done";
+  const isDone = session?.status === "completed";
   const label = session?.role.replace(/-/g, "_").toUpperCase() ?? "AGENT";
 
   return (

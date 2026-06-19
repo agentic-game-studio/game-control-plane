@@ -28,7 +28,7 @@ export const departmentLeadAgents: Partial<Record<AgentRole, AgentDefinition>> =
     skills: ["code-review", "create-architecture", "architecture-decision", "dev-story", "story-done", "tech-debt"],
     memory: "session",
     reportsTo: ["technical-director"],
-    delegates: ["gameplay-programmer", "engine-programmer", "ai-programmer", "network-programmer", "tools-programmer", "ui-programmer"],
+    delegates: ["gameplay-programmer", "engine-programmer", "ai-programmer", "network-programmer", "tools-programmer", "ui-programmer", "godot-specialist", "unity-specialist", "unreal-specialist", "code-reviewer"],
   },
 
   "art-director": {
@@ -93,7 +93,7 @@ export const departmentLeadAgents: Partial<Record<AgentRole, AgentDefinition>> =
     skills: ["release-checklist", "launch-checklist", "changelog", "patch-notes", "hotfix"],
     memory: "project",
     reportsTo: ["producer"],
-    delegates: ["devops-engineer"],
+    delegates: ["devops-engineer", "qa-lead"],
   },
 
   "localization-lead": {
@@ -106,6 +106,6 @@ export const departmentLeadAgents: Partial<Record<AgentRole, AgentDefinition>> =
     skills: ["localize"],
     memory: "project",
     reportsTo: ["producer"],
-    delegates: [],
+    delegates: ["writer", "ui-programmer"],
   },
 };

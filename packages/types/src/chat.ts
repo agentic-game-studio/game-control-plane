@@ -22,6 +22,7 @@ export type ProducerSummaryFactKind =
   | "ticket_updated"
   | "workflow_stage"
   | "workflow_complete"
+  | "workflow_cleared"
   | "autonomous_iteration_started"
   | "autonomous_iteration_completed"
   | "autonomous_iteration_failed"
@@ -33,7 +34,8 @@ export type ProducerSummaryFactKind =
   | "consultation_closed"
   | "agent_spawned"
   | "spawn_task_complete"
-  | "spawn_task_failed";
+  | "spawn_task_failed"
+  | "producer_replan_failed";
 
 export interface ProducerSummaryFact {
   kind: ProducerSummaryFactKind;
@@ -56,8 +58,28 @@ export interface ProducerSummarySnapshot {
   lastEmittedContentHash: string | null;
   /** Short line for autonomous activity */
   autonomousHint?: string | null;
+  // 30-M-producer-summary-truncation: monotonic count of facts
+  // dropped from `recentFacts` because the in-memory cap
+  // (MAX_RECENT_FACTS) was hit. `recentFacts` is a ring; without
+  // this counter a consumer that surfaces the full history has no
+  // way to know it's been truncated — it sees a snapshot with 30
+  // facts regardless of session age. The field is additive: a
+  // snapshot loaded from a pre-30th-pass save file will not have
+  // it, and consumers must treat `undefined` as 0.
+  droppedFactCount?: number;
 }
-export type ChatSessionStatus = "active" | "done" | "completed" | "compacted";
+// "done" was an alias for "completed" — removed. The backend only ever sets
+// "completed" (chat.ts:1352, 1675); the frontend still has 4 sites that
+// compare against "done". Those are updated to "completed" in the same PR
+// to keep the type accurate.
+// 29-L-chat-session-status-failed: add "failed" so a session that
+// errored out (LLM 4xx/5xx mid-conversation, the user closed the
+// browser mid-tool-call, a quest-bridge error during spawn) has
+// somewhere to land in the type. The "compacted" branch is the
+// happy-path for long sessions; "failed" is the unhappy path
+// that the producer-summary service, the chat-restore endpoint,
+// and the UI's session list all need to distinguish.
+export type ChatSessionStatus = "active" | "completed" | "compacted" | "failed";
 
 export interface QuestionOption {
   id: string;

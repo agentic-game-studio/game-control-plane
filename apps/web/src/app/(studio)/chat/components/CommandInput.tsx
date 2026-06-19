@@ -9,7 +9,16 @@ interface CommandInputProps {
   statusHint?: string;
 }
 
-const COMMANDS = [
+const MAX_PASTED_IMAGES = 4;
+// 28-L-commandinput-image-cap-comment: the previous comment
+// said "matches the 5MB body limit" but the constant is 1MB
+// per image. The real invariant is "4 images × 1MB = 4MB
+// comfortably under the 5MB body limit". A future maintainer
+// reading the old comment might raise the cap assuming the API
+// tolerates larger. Clarify the intent.
+const MAX_IMAGE_BYTES = 1_000_000; // 1MB per image; 4 images × 1MB = 4MB stays under the 5MB body limit
+
+export const COMMANDS = [
   { cmd: "/autonomous", desc: "Start autonomous production loop" },
   { cmd: "/spawn", desc: "Bring an agent online (manual)" },
   { cmd: "/approve", desc: "Approve last agent request" },
@@ -32,13 +41,44 @@ const COMMANDS = [
   { cmd: "/ralphloop", desc: "Run research→plan→code→verify loop" },
 ];
 
+interface PendingImage {
+  file: File;
+  previewUrl: string;
+}
+
 export default function CommandInput({ onSend, isLoading, queueCount = 0, statusHint }: CommandInputProps) {
   const [value, setValue] = useState("");
   const [showHints, setShowHints] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState(0);
-  const [pendingImages, setPendingImages] = useState<string[]>([]);
+  // Store File objects (not Base64) and use URL.createObjectURL for the preview.
+  // This avoids the memory cost of base64-encoding every pasted image at
+  // paste time — a 2MB PNG becomes a ~2.7MB base64 string kept in React state
+  // until the user sends or removes the image. We convert to base64 only when
+  // the user actually sends. The preview URL is revoked on remove/unmount so
+  // we don't leak object URLs across renders.
+  const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const hintsRef = useRef<HTMLDivElement>(null);
+
+  // 25-C-object-url-leak: track the current pending images in a ref so
+  // the unmount cleanup can revoke every blob URL the component is
+  // still holding. The previous implementation captured
+  // `pendingImages` from the initial render in a useEffect with `[]`
+  // deps — that closure always saw the initial empty array, so if
+  // the user pasted an image and then navigated away, the blob URL
+  // was never revoked. With the ref, the cleanup sees the live list
+  // regardless of when the unmount happens. The setter form on
+  // handleSend (line ~91) already does the right thing for the
+  // "send" path; this fixes the "navigate away with unsent image"
+  // path.
+  const pendingImagesRef = useRef<PendingImage[]>([]);
+  pendingImagesRef.current = pendingImages;
+
+  useEffect(() => {
+    return () => {
+      pendingImagesRef.current.forEach((img) => URL.revokeObjectURL(img.previewUrl));
+    };
+  }, []);
 
   useEffect(() => {
     textareaRef.current?.focus();
@@ -49,61 +89,98 @@ export default function CommandInput({ onSend, isLoading, queueCount = 0, status
     cmd.cmd.toLowerCase().startsWith(value.toLowerCase())
   );
 
-  const handleSend = (text?: string) => {
+  const handleSend = async (text?: string) => {
     const input = text ?? value;
     if (!input.trim() && pendingImages.length === 0) return;
-    onSend(input, pendingImages.length > 0 ? pendingImages : undefined);
+
+    // Convert Files → base64 at send time (not paste time) so the heavy
+    // strings only exist in memory during the API call.
+    let base64Images: string[] | undefined;
+    if (pendingImages.length > 0) {
+      base64Images = await Promise.all(pendingImages.map((img) => fileToBase64(img.file)));
+    }
+    onSend(input, base64Images);
     setValue("");
     setShowHints(false);
-    setPendingImages([]);
+    // Revoke preview URLs and clear pending state. Use the setter form so we
+    // get the current list at the time of clearing.
+    setPendingImages((current) => {
+      current.forEach((img) => URL.revokeObjectURL(img.previewUrl));
+      return [];
+    });
   };
 
-  const handleSelectCommand = (cmd: string) => {
-    setValue(cmd + " ");
-    setShowHints(false);
-    textareaRef.current?.focus();
-  };
-
-  const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    const v = e.target.value;
-    setValue(v);
-    setShowHints(v.startsWith("/") && !v.includes(" "));
-    setSelectedIndex(0);
-  };
-
-  const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      // 18-C-hints-dead: if the hints dropdown is open and the user
+      // hits Enter, prefer selecting the highlighted command over
+      // sending raw text. This matches the visual affordance of the
+      // highlighted item and prevents the user from having to mouse
+      // over to confirm a pick.
+      if (showHints && filteredCommands.length > 0) {
+        const pick = filteredCommands[selectedIndex] ?? filteredCommands[0];
+        if (pick) {
+          handleSelectCommand(pick.cmd);
+          return;
+        }
+      }
+      handleSend();
+      return;
+    }
+    // 18-C-hints-dead: arrow-key navigation through the hints list.
     if (showHints && filteredCommands.length > 0) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
-        setSelectedIndex((i) => Math.min(i + 1, filteredCommands.length - 1));
+        setSelectedIndex((i) => (i + 1) % filteredCommands.length);
         return;
       }
       if (e.key === "ArrowUp") {
         e.preventDefault();
-        setSelectedIndex((i) => Math.max(i - 1, 0));
-        return;
-      }
-      if (e.key === "Enter" || e.key === "Tab") {
-        e.preventDefault();
-        const cmd = filteredCommands[selectedIndex];
-        if (cmd) {
-          handleSelectCommand(cmd.cmd);
-        }
+        setSelectedIndex((i) => (i - 1 + filteredCommands.length) % filteredCommands.length);
         return;
       }
       if (e.key === "Escape") {
+        e.preventDefault();
         setShowHints(false);
         return;
       }
     }
+  };
 
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
+  const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const next = e.target.value;
+    setValue(next);
+    // 18-C-hints-dead: show the slash-command autocomplete dropdown
+    // whenever the input starts with "/" and could match at least one
+    // command. Previously `showHints` was initialized to `false` and
+    // only ever set to `false` (on send / on select), so the dropdown
+    // never appeared — typing `/spawn`, `/help`, etc. silently
+    // matched nothing visible. Reset selectedIndex so keyboard
+    // navigation always starts at the first match.
+    const hasLeadingSlash = next.trimStart().startsWith("/");
+    if (!hasLeadingSlash) {
+      if (showHints) setShowHints(false);
+    } else {
+      const matches = COMMANDS.filter((cmd) =>
+        cmd.cmd.toLowerCase().startsWith(next.trimStart().toLowerCase()),
+      );
+      if (matches.length === 0) {
+        if (showHints) setShowHints(false);
+      } else if (!showHints) {
+        setShowHints(true);
+        setSelectedIndex(0);
+      }
     }
   };
 
-  const handlePaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+  const handleSelectCommand = (cmd: string) => {
+    setValue(cmd);
+    setShowHints(false);
+    textareaRef.current?.focus();
+  };
+
+  const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const items = e.clipboardData.items;
     const imageItems: DataTransferItem[] = [];
 
@@ -117,19 +194,37 @@ export default function CommandInput({ onSend, isLoading, queueCount = 0, status
 
     e.preventDefault();
 
-    const newImages: string[] = [];
-    for (const item of imageItems) {
-      const file = item.getAsFile();
-      if (!file) continue;
-      const base64 = await fileToBase64(file);
-      newImages.push(base64);
-    }
-
-    setPendingImages((prev) => [...prev, ...newImages]);
+    setPendingImages((prev) => {
+      const remainingSlots = MAX_PASTED_IMAGES - prev.length;
+      if (remainingSlots <= 0) {
+        // Already at the cap — silently drop rather than spam alerts on
+        // bulk paste. Browser will show the images in the clipboard tool
+        // until the user sends or removes existing ones.
+        return prev;
+      }
+      const accepted = imageItems.slice(0, remainingSlots);
+      const newEntries: PendingImage[] = [];
+      for (const item of accepted) {
+        const file = item.getAsFile();
+        if (!file) continue;
+        if (file.size > MAX_IMAGE_BYTES) {
+          // Skip oversized — converting these to base64 at send time would
+          // bloat the request past the 5MB body limit. Drop silently; users
+          // can paste smaller images or use a file upload route.
+          continue;
+        }
+        newEntries.push({ file, previewUrl: URL.createObjectURL(file) });
+      }
+      return [...prev, ...newEntries];
+    });
   };
 
   const removeImage = (index: number) => {
-    setPendingImages((prev) => prev.filter((_, i) => i !== index));
+    setPendingImages((prev) => {
+      const target = prev[index];
+      if (target) URL.revokeObjectURL(target.previewUrl);
+      return prev.filter((_, i) => i !== index);
+    });
   };
 
   return (
@@ -139,12 +234,19 @@ export default function CommandInput({ onSend, isLoading, queueCount = 0, status
         {pendingImages.length > 0 && (
           <div className="flex gap-2 flex-wrap">
             {pendingImages.map((img, i) => (
-              <div key={i} className="relative group border-2 border-black shadow-[2px_2px_0_0_rgba(0,0,0,1)]">
-                <img src={img} alt={`Pasted ${i + 1}`} className="h-16 w-auto object-cover" />
+              // 26-M-pending-image-keys: key off the previewUrl
+              // instead of the array index. Removing a non-first
+              // image reuses the prior element's DOM, which holds a
+              // reference to the now-revoked ObjectURL and renders
+              // a stale thumbnail. Same pattern fix as ImageGallery
+              // in ChatThread.tsx.
+              <div key={img.previewUrl} className="relative group border-2 border-black shadow-[2px_2px_0_0_rgba(0,0,0,1)]">
+                <img src={img.previewUrl} alt={`Pasted ${i + 1}`} className="h-16 w-auto object-cover" />
                 <button
                   onClick={() => removeImage(i)}
                   className="absolute -top-2 -right-2 w-5 h-5 bg-[#df2b31] text-white border border-black flex items-center justify-center text-xs hover:bg-black"
                   title="Remove image"
+                  aria-label={`Remove pasted image ${i + 1}`}
                 >
                   &times;
                 </button>

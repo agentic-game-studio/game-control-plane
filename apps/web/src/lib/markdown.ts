@@ -1,7 +1,7 @@
 "use client";
 
 /** Minimal markdown-to-HTML renderer (safe — escapes HTML first) */
-export function renderMarkdown(md: string): string {
+export function renderMarkdown(md: string, options?: { wikilinks?: boolean }): string {
   // Convert literal \n (from LLM JSON) to actual newlines
   let html = md.replace(/\\n/g, "\n");
 
@@ -81,12 +81,82 @@ export function renderMarkdown(md: string): string {
   // Strikethrough
   html = html.replace(/~~(.+?)~~/g, '<del class="opacity-60 line-through">$1</del>');
 
-  // Links [text](url) — filter dangerous URI schemes (S6)
+  // Links [text](url) — allowlist safe schemes (S6 + C4 + 12-H22).
+  // The previous blocklist was bypassable via ` Javascript:alert(1)`;
+  // the previous allowlist chain still let through `java\nscript:alert(1)`
+  // because browsers strip ASCII whitespace from href values before
+  // scheme parsing. The 4th-pass C4 fix added a control-char reject and
+  // an allowlist, but the test order was tight enough to leave
+  // subtle bypasses: `url.trim()` only strips ASCII whitespace, not
+  // Unicode whitespace (` `, ` `-` `) which browsers
+  // also strip before scheme parsing, and the allowlist was
+  // a positive list, not a deny-list — a future maintainer could
+  // add `data:` or `javascript:` to the allowed prefix list and
+  // re-introduce XSS.
+  //
+  // 12-H22: tighten further with three independent checks:
+  //  1. Reject any URL containing ASCII control chars OR Unicode
+  //     whitespace (browser-stripped-before-parse category).
+  //  2. Strip leading/trailing ASCII + Unicode whitespace before
+  //     scheme parsing (the regex `^https?:` only matches if the
+  //     first non-whitespace char is the scheme letter, not a
+  //     Unicode-seeming prefix).
+  //  3. Defence-in-depth scheme deny-list: explicitly reject
+  //     `javascript:`, `data:`, `vbscript:`, `file:` — schemes
+  //     browsers interpret as code or local file access. Even
+  //     if the allowlist has a bug, this deny-list catches it.
   html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, text, url) => {
-    const safe = /^[a-z][a-z0-9+.-]*:/i.test(url) && !/^(\s*)(javascript|data|vbscript)\s*:/i.test(url);
-    if (!safe) return `[${text}](${url})`;
-    return `<a href="${url}" target="_blank" rel="noopener noreferrer" class="text-[#0055FF] underline hover:bg-[#0055FF] hover:text-white px-0.5 transition-colors">${text}</a>`;
+    // 1. control chars + Unicode whitespace (browsers strip both before scheme parse)
+    if (new RegExp("[\\x00-\\x1f\\x7f\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF]").test(url)) {
+      return `[${text}](${url})`;
+    }
+    // 2. ASCII + Unicode trim
+    const trimmed = url.replace(new RegExp("^[\\s\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF]+|[\\s\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF]+$", "g"), "");
+    // 3. deny-list explicit dangerous schemes. Lowercase first so
+    //    `JAVASCRIPT:` and `Javascript:` (which some HTTP clients
+    //    can be tricked into normalising) are caught by the same
+    //    regex — case-insensitive flags are below, but a redundant
+    //    lowercase guard makes the intent obvious to readers and
+    //    protects against a future maintainer removing the `/i`
+    //    flag from the allowlist test below.
+    const normalised = trimmed.toLowerCase();
+    if (/^(javascript|data|vbscript|file):/i.test(normalised)) {
+      return `[${text}](${url})`;
+    }
+    // Allowlist safe schemes.
+    if (!/^(https?:|mailto:|#|\/|\/\/)/i.test(trimmed)) return `[${text}](${url})`;
+    const safeHref = trimmed.replace(/"/g, "&quot;");
+    return `<a href="${safeHref}" target="_blank" rel="noopener noreferrer" class="text-[#0055FF] underline hover:bg-[#0055FF] hover:text-white px-0.5 transition-colors">${text}</a>`;
   });
+
+  // Wikilinks [[target]] — when the `wikilinks` option is set, render as
+  // clickable spans (wiki viewer) instead of plain text. The slug is
+  // sanitized to a-z, 0-9, `-` to mirror the previous DocumentViewer
+  // behavior; the inner `target` text is HTML-escaped upstream, so the
+  // span is XSS-safe.
+  //
+  // 17-C1: previously, `DocumentViewer.tsx` shipped its own `renderMarkdown`
+  // that didn't apply the 4-layer XSS defenses from this file (no link
+  // handler at all, but a future maintainer adding one would have shipped
+  // an XSS because the local renderer skipped the URL allowlist + control-
+  // char reject). Centralising here so the wiki viewer can't drift from
+  // the chat renderer.
+  if (options?.wikilinks) {
+    // 18-M-wikilink-alias: match the indexer's regex shape so
+    // `[[link|alias]]` slugifies only the link portion, not the
+    // whole `link|alias`. The previous regex captured the entire
+    // inside and slugified it, producing `combatloopcombat` from
+    // `[[Combat Loop|Combat]]` — a slug that doesn't exist in the
+    // index, so the rendered clickable span navigated nowhere.
+    // The slug computation matches `slugify()` in
+    // document-store.ts:84-91 (lowercase, collapse spaces to `-`,
+    // strip non-alphanumeric).
+    html = html.replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_m, target, alias) => {
+      const slug = target.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
+      const displayText = alias ? `[[${target}|${alias}]]` : `[[${target}]]`;
+      return `<span data-wikilink="${slug}" class="text-blue-600 underline cursor-pointer hover:text-blue-800">${displayText}</span>`;
+    });
+  }
 
   // Paragraphs: double newline splits
   html = html.replace(/\n\n/g, '</p><p class="my-2">');

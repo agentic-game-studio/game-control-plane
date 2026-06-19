@@ -1,6 +1,6 @@
 "use client";
-
-import { useState, useEffect, useCallback } from "react";
+import { createLogger } from "../../../lib/logger";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useProject } from "@/contexts/ProjectContext";
 import { DataLoader } from "@/components/DataLoader";
@@ -9,6 +9,8 @@ import { ProjectGrid } from "./components/ProjectGrid";
 import { ActivityLog } from "./components/ActivityLog";
 import { NewProjectModal } from "./components/NewProjectModal";
 import { apiFetch } from "@/lib/api";
+import { DASHBOARD_SERVER_STATUS_POLL_MS, MCP_HEALTH_POLL_MS } from "@/lib/timing";
+const logger = createLogger("page");
 
 interface MCPStatus {
   status: "not_running" | "connected" | "disconnected";
@@ -27,12 +29,13 @@ interface ServerStatus {
 }
 
 export default function DashboardPage() {
-  const { data, loading, error, retry, createProject, deleteProject } = useDashboard();
+  const { data, loading, error, retry, createProject, createDemoProject, deleteProject } = useDashboard();
   const { currentProject, selectProject } = useProject();
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [mcpStatuses, setMcpStatuses] = useState<Record<string, MCPStatus>>({});
   const [serverStatus, setServerStatus] = useState<ServerStatus | null>(null);
   const [settingUp, setSettingUp] = useState(false);
+  const [creatingDemo, setCreatingDemo] = useState(false);
 
   // Check server status
   const checkServerStatus = useCallback(async () => {
@@ -54,7 +57,7 @@ export default function DashboardPage() {
       );
       await checkServerStatus();
     } catch (err) {
-      console.error("Server setup failed:", err);
+      logger.error("Server setup failed", { err: err });
     } finally {
       setSettingUp(false);
     }
@@ -67,14 +70,30 @@ export default function DashboardPage() {
         method: "POST",
       });
     } catch (err) {
-      console.error("Failed to launch Godot editor:", err);
+      logger.error("Failed to launch Godot editor", { err: err });
+    }
+  };
+
+  const launchDemoProject = async () => {
+    // Guard against double-clicks: the CLOUD_DEMO button is also disabled
+    // while in-flight, but a double-click faster than React's re-render can
+    // still queue two requests. This state check catches that case.
+    if (creatingDemo) return;
+    setCreatingDemo(true);
+    try {
+      const project = await createDemoProject();
+      selectProject(project.id);
+    } catch (err) {
+      logger.error("Failed to create demo project", { err: err });
+    } finally {
+      setCreatingDemo(false);
     }
   };
 
   // Check server status on mount and periodically
   useEffect(() => {
     checkServerStatus();
-    const interval = setInterval(checkServerStatus, 60000);
+    const interval = setInterval(checkServerStatus, DASHBOARD_SERVER_STATUS_POLL_MS);
     return () => clearInterval(interval);
   }, [checkServerStatus]);
 
@@ -83,6 +102,12 @@ export default function DashboardPage() {
     const godotProjects = data.projects.filter((p) => p.engine === "godot");
     if (godotProjects.length === 0) return;
 
+    // 14-FH4-dashboard-mcp-poll-guards: snapshot the project list at
+    // request time so a project added/removed mid-flight can't write a
+    // stale entry under a new key. Also gate the setState on a
+    // mountedRef to avoid setting state on an unmounted component
+    // (StrictMode double-mount in dev, or a quick route switch).
+    const requestedProjectIds = godotProjects.map((p) => p.id);
     const statuses: Record<string, MCPStatus> = {};
     await Promise.all(
       godotProjects.map(async (project) => {
@@ -90,19 +115,41 @@ export default function DashboardPage() {
           const result = await apiFetch<MCPStatus>(
             `/api/dashboard/projects/${project.id}/mcp-health`
           );
+          // Only write the result if the project was still in the
+          // list when the fetch resolved — otherwise the user removed
+          // the project mid-poll and we'd leak a ghost entry.
+          if (!requestedProjectIds.includes(project.id)) return;
           statuses[project.id] = result;
         } catch {
+          if (!requestedProjectIds.includes(project.id)) return;
           statuses[project.id] = { status: "disconnected", error: "Failed to check" };
         }
       })
     );
+    // Skip the setState if the component unmounted during the fetch —
+    // otherwise React warns "Can't perform a state update on an
+    // unmounted component" in dev. We use the same mountedRef pattern
+    // as useGodotMCPStatus.
+    if (!mountedRef.current) return;
     setMcpStatuses(statuses);
   }, [data.projects]);
+
+  // Track mounted state so an in-flight checkMCPHealth doesn't
+  // setState on an unmounted dashboard (e.g. user navigates away
+  // mid-poll). StrictMode dev double-mount + a 10s polling interval
+  // makes this easy to hit.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   // Poll every 10 seconds
   useEffect(() => {
     checkMCPHealth();
-    const interval = setInterval(checkMCPHealth, 10000);
+    const interval = setInterval(checkMCPHealth, MCP_HEALTH_POLL_MS);
     return () => clearInterval(interval);
   }, [checkMCPHealth]);
 
@@ -184,6 +231,8 @@ export default function DashboardPage() {
               currentProject={currentProject}
               onSelectProject={(project) => selectProject(project.id)}
               onNewProject={() => setIsModalOpen(true)}
+              onDemoProject={launchDemoProject}
+              isCreatingDemo={creatingDemo}
               onDeleteProject={deleteProject}
               mcpStatuses={mcpStatuses}
               onLaunchEditor={launchEditor}

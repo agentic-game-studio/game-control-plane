@@ -1,5 +1,5 @@
 "use client";
-
+import { createLogger } from "../lib/logger";
 import {
   createContext,
   useCallback,
@@ -12,14 +12,28 @@ import {
 import type { Project, WSEvent } from "@game-studio/types";
 import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "@/hooks/useWebSocket";
+import { WS_REFETCH_DEBOUNCE_MS } from "@/lib/timing";
+const logger = createLogger("ProjectContext");
 
+// 29-L-project-context-versioned-cache: bump the suffix on the
+// `projects-cache` key to v1. The previous unversioned key would
+// silently serve stale serialized project arrays across a
+// deploy that changed the Project interface (an added/renamed
+// field), and localStorage entries never expire. Versioned keys
+// mean a breaking change to the cached shape automatically
+// purges the previous value on the first read of the new key.
 const STORAGE_KEY = "studio:current-project-id";
+const CACHE_KEY = "studio:projects-cache-v1";
 
 interface ProjectContextValue {
   projects: Project[];
   currentProject: Project | null;
   currentProjectId: string | null;
   selectProject: (projectId: string | null) => void;
+  /** Clear the current project selection. Equivalent to
+   * `selectProject(null)` but named for logout-style call sites so
+   * intent is obvious at the call site. */
+  clearProject: () => void;
   loading: boolean;
   error: string | null;
   refresh: () => Promise<void>;
@@ -39,10 +53,37 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
       const result = await apiFetch<Project[]>("/api/dashboard/projects");
       setProjects(result);
       setError(null);
+      // Cache the fresh list so a transient API failure on the next load
+      // can still surface a usable (if stale) UI instead of a broken one.
+      try {
+        localStorage.setItem(CACHE_KEY, JSON.stringify(result));
+      } catch { /* localStorage unavailable */ }
     } catch (err) {
-      console.error("Failed to fetch projects:", err);
-      setError(err instanceof Error ? err.message : "Failed to load projects");
-      setProjects([]);
+      logger.error("Failed to fetch projects", { err: err });
+      // Q9-14: fall back to cached projects first, then only surface the
+      // error banner if cache is also empty. The previous order set the
+      // banner unconditionally on API failure, which confuses offline
+      // reloads — the user sees a red error but the project list still
+      // renders fine from cache.
+      let cacheHit = false;
+      try {
+        const cached = localStorage.getItem(CACHE_KEY);
+        if (cached) {
+          setProjects(JSON.parse(cached) as Project[]);
+          cacheHit = true;
+        } else {
+          setProjects([]);
+        }
+      } catch {
+        setProjects([]);
+      }
+      if (cacheHit) {
+        // API failed but cache served us. Don't show a banner — the UI
+        // is usable. Clear any prior error.
+        setError(null);
+      } else {
+        setError(err instanceof Error ? err.message : "Failed to load projects");
+      }
     } finally {
       setLoading(false);
     }
@@ -86,7 +127,7 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
         if (debounceRef.current) clearTimeout(debounceRef.current);
         debounceRef.current = setTimeout(() => {
           fetchProjects();
-        }, 300);
+        }, WS_REFETCH_DEBOUNCE_MS);
       }
     },
     [fetchProjects],
@@ -123,6 +164,7 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
       currentProject,
       currentProjectId,
       selectProject,
+      clearProject: () => selectProject(null),
       loading,
       error,
       refresh: fetchProjects,

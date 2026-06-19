@@ -124,8 +124,10 @@ export function ProjectCard({ project, isSelected, onClick, onRequestDelete, mcp
                   }}
                   className="w-6 h-6 border-2 border-black flex items-center justify-center hover:bg-[#c13301] hover:text-white hover:border-[#c13301] transition-colors"
                   title="Remove from dashboard"
+                  // 10-L8: announce destructive action to assistive tech
+                  aria-label={`Remove project ${project.name} from dashboard`}
                 >
-                  <span className="material-symbols-outlined text-xs">logout</span>
+                  <span className="material-symbols-outlined text-xs" aria-hidden="true">logout</span>
                 </button>
               )}
             </div>

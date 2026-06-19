@@ -1,10 +1,12 @@
 "use client";
-
-import { useState, useCallback, useEffect } from "react";
+import { createLogger } from "../lib/logger";
+import { useState, useCallback } from "react";
 import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "./useWebSocket";
+import { useAbortableEffect } from "./useAbortableEffect";
 import type { TeamConfig } from "@game-studio/types";
 import type { WSEvent } from "@game-studio/types";
+const logger = createLogger("useTeams");
 
 interface UseTeamsReturn {
   teams: TeamConfig[];
@@ -21,27 +23,31 @@ export function useTeams(): UseTeamsReturn {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const fetchTeams = useCallback(async () => {
+  const fetchTeams = useCallback(async (signal?: AbortSignal) => {
     try {
-      const result = await apiFetch<TeamConfig[]>("/api/teams");
+      const result = await apiFetch<TeamConfig[]>("/api/teams", { signal });
       setTeams(result);
       setError(null);
     } catch (err) {
-      console.error("Failed to fetch teams:", err);
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      logger.error("Failed to fetch teams", { err: err });
       setError(err instanceof Error ? err.message : "Failed to load teams");
-    } finally {
-      setLoading(false);
     }
   }, []);
 
-  useEffect(() => {
-    fetchTeams();
+  // 14-FH10-unmount-cancel
+  useAbortableEffect(async (signal) => {
+    try {
+      await fetchTeams(signal);
+    } finally {
+      setLoading(false);
+    }
   }, [fetchTeams]);
 
   const onWSEvent = useCallback(
     (event: WSEvent) => {
       if (event.type === "team:started" || event.type === "team:completed") {
-        fetchTeams();
+        void fetchTeams();
       }
     },
     [fetchTeams]
@@ -76,7 +82,7 @@ export function useTeams(): UseTeamsReturn {
 
   const retry = useCallback(() => {
     setLoading(true);
-    fetchTeams();
+    void fetchTeams();
   }, [fetchTeams]);
 
   return { teams, loading, error, retry, getTeam, runTeam, getTeamStatus };

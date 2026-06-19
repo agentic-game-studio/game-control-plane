@@ -3,8 +3,7 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { createPortal } from "react-dom";
 import type { GameAsset, AssetType, AssetCategory } from "@game-studio/types";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
+import { API_BASE } from "@/lib/api";
 
 const TYPE_ICONS: Record<AssetType, string> = {
   "3d": "view_in_ar",
@@ -12,6 +11,7 @@ const TYPE_ICONS: Record<AssetType, string> = {
   vfx: "auto_awesome",
   audio: "music_note",
   texture: "texture",
+  screenshot: "monitor",
 };
 
 const TYPE_LABELS: Record<AssetType, string> = {
@@ -20,6 +20,7 @@ const TYPE_LABELS: Record<AssetType, string> = {
   vfx: "VFX",
   audio: "AUDIO",
   texture: "TEX",
+  screenshot: "SCREEN",
 };
 
 const CATEGORY_COLORS: Record<AssetCategory, string> = {
@@ -89,10 +90,16 @@ export function AssetCard({ asset, onDelete }: AssetCardProps) {
     closeContextMenu();
   }, [closeContextMenu]);
 
-  // Build thumbnail URL: if the asset has a thumbnailPath, serve it via the API
+  // Build thumbnail URL: prefer the server-provided signed URL (10-L1)
+  // which carries an HMAC of the asset id; the unauthenticated
+  // /:id/thumbnail route rejects requests without a valid sig. Fall
+  // back to constructing the URL only if the list endpoint predates
+  // the signed-URL change (older payloads).
   const thumbnailSrc =
     asset.thumbnailPath && !imgError
-      ? `${API_BASE}/api/assets/${asset.id}/thumbnail`
+      ? asset.signedThumbnailUrl
+        ? `${API_BASE}${asset.signedThumbnailUrl}`
+        : `${API_BASE}/api/assets/${asset.id}/thumbnail`
       : null;
 
   // Full-size image for preview (use thumbnail as fallback)

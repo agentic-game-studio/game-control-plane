@@ -7,8 +7,37 @@ import type { WSEvent } from "@game-studio/types";
 
 export const gatesRouter: Router = Router();
 
-// Track gate verdicts in memory (could be persisted)
+// Track gate verdicts in memory. Pruned lazily on read so entries don't
+// accumulate forever for sessions that finish all their gates and never
+// come back. A verdict older than the TTL is considered stale.
+const GATE_VERDICT_TTL_MS = 24 * 60 * 60 * 1000; // 24h
+// 26-M-gate-verdicts-cap: hard cap on map size. The TTL prune runs
+// only at verdict-write time, so a long-running API with N active
+// sessions and 18 gates each can grow the map to N*18 entries
+// (e.g. 10k sessions = 180k entries) before the next prune. With
+// Map iteration order = insertion order, the cap drops the oldest
+// entries first, which is the same intent as the TTL sweep.
+const MAX_GATE_VERDICTS = 5000;
 const gateVerdicts: Map<string, { verdict: string; details: string; timestamp: string }> = new Map();
+
+function pruneGateVerdicts(): void {
+  const cutoff = Date.now() - GATE_VERDICT_TTL_MS;
+  for (const [key, v] of gateVerdicts) {
+    if (Date.parse(v.timestamp) < cutoff) gateVerdicts.delete(key);
+  }
+  // Cap enforcement: drop oldest entries (Map preserves insertion
+  // order) until we're under the limit. Runs after the TTL sweep so
+  // we don't evict fresh entries to make room for even fresher ones.
+  if (gateVerdicts.size > MAX_GATE_VERDICTS) {
+    const toDrop = gateVerdicts.size - MAX_GATE_VERDICTS;
+    let dropped = 0;
+    for (const key of gateVerdicts.keys()) {
+      if (dropped >= toDrop) break;
+      gateVerdicts.delete(key);
+      dropped++;
+    }
+  }
+}
 
 // GET /gates — list all gate statuses
 gatesRouter.get("/", async (req: Request, res: Response) => {
@@ -59,13 +88,24 @@ gatesRouter.post("/:gateId/run", async (req: Request, res: Response) => {
     return;
   }
 
-  // Execute gate with LLM
-  res.json({
+  // 10-H7: respond 202 Accepted so the client understands the gate is
+  // running asynchronously and the actual verdict will arrive via the
+  // `gate:verdict` WebSocket event (or by polling the verdict cache via
+  // GET /gates with sessionId). Previously the route used 200 with
+  // `status: "running"`, which made clients think the gate had already
+  // completed and rendered a misleading status until the verdict arrived.
+  res.status(202).json({
     success: true,
     data: { gateId, status: "running" },
   });
 
-  try {
+  // The gate execution intentionally runs after the response is sent so
+  // the HTTP call doesn't block on a 30s+ LLM round-trip. Errors are
+  // surfaced via the `gate:verdict` broadcast (BLOCKED) and cached so
+  // polling clients can still recover the result. We catch every error
+  // here so an uncaught rejection cannot bubble up to the express
+  // unhandled-rejection handler and crash the process.
+  Promise.resolve().then(async () => {
     // Add context about target phase if provided
     let gateContext = context || "";
     if (targetPhase) {
@@ -74,8 +114,9 @@ gatesRouter.post("/:gateId/run", async (req: Request, res: Response) => {
 
     const result = await executeGate(gateId, effectiveSessionId, gateContext);
 
-    // Store verdict
+    // Store verdict (after pruning old entries to keep the map bounded)
     const gateKey = `${effectiveSessionId}:${gateId}`;
+    pruneGateVerdicts();
     gateVerdicts.set(gateKey, {
       verdict: result.verdict,
       details: result.details.slice(0, 500),
@@ -94,7 +135,7 @@ gatesRouter.post("/:gateId/run", async (req: Request, res: Response) => {
       },
       sessionId: effectiveSessionId,
     } as WSEvent);
-  } catch (error) {
+  }).catch((error) => {
     const errMsg = error instanceof Error ? error.message : String(error);
     logger.error({ gateId, error: errMsg, event: "gate_error" }, "Gate execution failed");
     const info = getGateInfo(gateId);
@@ -109,7 +150,7 @@ gatesRouter.post("/:gateId/run", async (req: Request, res: Response) => {
       },
       sessionId: effectiveSessionId,
     } as WSEvent);
-  }
+  });
 });
 
 // GET /gates/:gateId — get gate info

@@ -12,9 +12,18 @@ import { invokeAgent } from "./llm-service.js";
 import { logger } from "../utils/logger.js";
 import type { AgentRole } from "@game-studio/types";
 
+// 31-L-gate-verdict-duplicate: the previous union had a duplicate
+// "READY" literal and a `| string` fallback that collapsed the
+// union to `string` (so TypeScript never caught verdict typos).
+// Keep "NOT_SUPPORTED" / "ERROR" as local extensions — the canonical
+// `GateVerdict` union in @game-studio/types is missing those two
+// sentinels that this file returns for "gate not yet implemented"
+// and "LLM call threw". Lifting them into the canonical type is a
+// broader refactor for a future pass; the dedupe + string-collapse
+// removal here is the bounded LOW cleanup.
 export interface GateResult {
   gateId: string;
-  verdict: "APPROVE" | "READY" | "CONCERNS" | "REJECT" | "NOT_READY" | "READY" | string;
+  verdict: "APPROVE" | "READY" | "CONCERNS" | "REJECT" | "NOT_READY" | "NOT_SUPPORTED" | "ERROR";
   details: string;
   agent: string;
   timestamp: string;
@@ -29,33 +38,41 @@ interface GateDefinition {
 }
 
 // Gate to agent mapping
-const GATE_AGENTS: Record<string, { agent: AgentRole; model: string }> = {
-  "CD-PILLARS": { agent: "creative-director", model: "opus" },
-  "CD-GDD-ALIGN": { agent: "creative-director", model: "opus" },
-  "CD-SYSTEMS": { agent: "creative-director", model: "opus" },
-  "CD-NARRATIVE": { agent: "creative-director", model: "opus" },
-  "CD-PLAYTEST": { agent: "creative-director", model: "opus" },
-  "CD-PHASE-GATE": { agent: "creative-director", model: "opus" },
-  "TD-FEASIBILITY": { agent: "technical-director", model: "opus" },
-  "TD-ARCHITECTURE": { agent: "technical-director", model: "opus" },
-  "TD-SYSTEM-BOUNDARY": { agent: "technical-director", model: "opus" },
-  "TD-PHASE-GATE": { agent: "technical-director", model: "opus" },
-  "TD-ADR": { agent: "technical-director", model: "opus" },
-  "TD-ENGINE-RISK": { agent: "technical-director", model: "opus" },
-  "PR-SCOPE": { agent: "producer", model: "opus" },
-  "PR-SPRINT": { agent: "producer", model: "opus" },
-  "PR-MILESTONE": { agent: "producer", model: "opus" },
-  "PR-EPIC": { agent: "producer", model: "opus" },
-  "PR-PHASE-GATE": { agent: "producer", model: "opus" },
-  "AD-CONCEPT-VISUAL": { agent: "art-director", model: "sonnet" },
-  "AD-ART-BIBLE": { agent: "art-director", model: "sonnet" },
-  "AD-PHASE-GATE": { agent: "art-director", model: "sonnet" },
-  "AD-VISUAL": { agent: "art-director", model: "sonnet" },
-  "LP-FEASIBILITY": { agent: "lead-programmer", model: "sonnet" },
-  "LP-CODE-REVIEW": { agent: "lead-programmer", model: "sonnet" },
-  "QL-STORY-READY": { agent: "qa-lead", model: "sonnet" },
-  "QL-TEST-COVERAGE": { agent: "qa-lead", model: "sonnet" },
-  "ND-CONSISTENCY": { agent: "narrative-director", model: "sonnet" },
+// 31-M-gate-model-dead-field: the `model` field is dead. Model
+// selection happens inside `invokeAgent` via `getModelForTier` from
+// the agent's `tier` field (read from the agent's MD file), not from
+// this table. Keeping the `model` string here is divergent-fix bait:
+// a future tier→model change in `getModelForTier` would not be
+// reflected in this table, and a maintainer who reads `model` here
+// expecting it to be authoritative would be misled. The agent
+// field is the only one the rest of the file uses.
+const GATE_AGENTS: Record<string, { agent: AgentRole }> = {
+  "CD-PILLARS": { agent: "creative-director" },
+  "CD-GDD-ALIGN": { agent: "creative-director" },
+  "CD-SYSTEMS": { agent: "creative-director" },
+  "CD-NARRATIVE": { agent: "creative-director" },
+  "CD-PLAYTEST": { agent: "creative-director" },
+  "CD-PHASE-GATE": { agent: "creative-director" },
+  "TD-FEASIBILITY": { agent: "technical-director" },
+  "TD-ARCHITECTURE": { agent: "technical-director" },
+  "TD-SYSTEM-BOUNDARY": { agent: "technical-director" },
+  "TD-PHASE-GATE": { agent: "technical-director" },
+  "TD-ADR": { agent: "technical-director" },
+  "TD-ENGINE-RISK": { agent: "technical-director" },
+  "PR-SCOPE": { agent: "producer" },
+  "PR-SPRINT": { agent: "producer" },
+  "PR-MILESTONE": { agent: "producer" },
+  "PR-EPIC": { agent: "producer" },
+  "PR-PHASE-GATE": { agent: "producer" },
+  "AD-CONCEPT-VISUAL": { agent: "art-director" },
+  "AD-ART-BIBLE": { agent: "art-director" },
+  "AD-PHASE-GATE": { agent: "art-director" },
+  "AD-VISUAL": { agent: "art-director" },
+  "LP-FEASIBILITY": { agent: "lead-programmer" },
+  "LP-CODE-REVIEW": { agent: "lead-programmer" },
+  "QL-STORY-READY": { agent: "qa-lead" },
+  "QL-TEST-COVERAGE": { agent: "qa-lead" },
+  "ND-CONSISTENCY": { agent: "narrative-director" },
 };
 
 // Gate prompts from director-gates.md
@@ -232,7 +249,7 @@ No specific context provided. If you can perform a general review based on avail
 
     return {
       gateId,
-      verdict: verdict.parsed,
+      verdict: verdict.parsed as GateResult["verdict"],
       details: result.content,
       agent: gateConfig.agent,
       timestamp: new Date().toISOString(),
@@ -268,27 +285,69 @@ function parseVerdict(
   }
 
   // Check for partial matches
+  // 32-CR-parseverdict-partial-fail-open: the previous branches
+  // returned "APPROVE" / "READY" (PASS) and "CONCERNS" (PASS) as
+  // fallbacks even when those verdicts were NOT in the gate's
+  // `expectedOptions`. For a gate whose expectedOptions are
+  // `["VIABLE", "INFEASIBLE"]` (TD-FEASIBILITY) or
+  // `["ADEQUATE", "INADEQUATE"]` (QL-TEST-COVERAGE), an LLM first
+  // line containing "APPROVE" / "READY" / "STRONG" / "CONCERNS"
+  // bypassed the exact-match check and was classified as PASS
+  // anyway. isGatePassing() returns true for "READY" /
+  // "CONCERNS" (both in PASS_VERDICTS in
+  // milestone-gate-service.ts:20-23), so a TD-FEASIBILITY gate
+  // could silently approve an infeasible milestone. Restrict
+  // each partial-match branch to a verdict that is actually in
+  // expectedOptions; otherwise fall through to the 20-M
+  // fail-closed throw at the bottom.
   if (firstLine.includes("APPROVE") || firstLine.includes("READY") || firstLine.includes("STRONG")) {
-    return { parsed: expectedOptions.includes("APPROVE") ? "APPROVE" : "READY", raw: firstLine };
-  }
-  if (firstLine.includes("REJECT") || firstLine.includes("NOT READY") || firstLine.includes("INFEASIBLE") || firstLine.includes("INADEQUATE") || firstLine.includes("UNREALISTIC") || firstLine.includes("OFF TRACK") || firstLine.includes("HIGH RISK")) {
+    if (expectedOptions.includes("APPROVE")) return { parsed: "APPROVE", raw: firstLine };
+    if (expectedOptions.includes("READY")) return { parsed: "READY", raw: firstLine };
+    if (expectedOptions.includes("STRONG")) return { parsed: "STRONG", raw: firstLine };
+    // fall through to throw below
+  } else if (firstLine.includes("REJECT") || firstLine.includes("NOT READY") || firstLine.includes("INFEASIBLE") || firstLine.includes("INADEQUATE") || firstLine.includes("UNREALISTIC") || firstLine.includes("OFF TRACK") || firstLine.includes("HIGH RISK")) {
     // Map to closest expected option
     if (expectedOptions.includes("NOT_READY")) return { parsed: "NOT_READY", raw: firstLine };
     if (expectedOptions.includes("REJECT")) return { parsed: "REJECT", raw: firstLine };
     if (expectedOptions.includes("INFEASIBLE")) return { parsed: "INFEASIBLE", raw: firstLine };
     if (expectedOptions.includes("INADEQUATE")) return { parsed: "INADEQUATE", raw: firstLine };
     if (expectedOptions.includes("UNREALISTIC")) return { parsed: "UNREALISTIC", raw: firstLine };
-    return { parsed: "REJECT", raw: firstLine };
-  }
-  if (firstLine.includes("CONCERNS") || firstLine.includes("CONCERN") || firstLine.includes("GAPS") || firstLine.includes("AT RISK") || firstLine.includes("OPTIMISTIC")) {
+    if (expectedOptions.includes("OFF_TRACK")) return { parsed: "OFF_TRACK", raw: firstLine };
+    if (expectedOptions.includes("HIGH_RISK")) return { parsed: "HIGH_RISK", raw: firstLine };
+    // 32-CR-parseverdict-block-fallback: only fall back to "REJECT"
+    // if the gate actually accepts "REJECT". The previous shape
+    // returned "REJECT" regardless of expectedOptions, which
+    // would silently mis-classify a "READY" / "VIABLE" gate.
+    if (expectedOptions.includes("REJECT")) return { parsed: "REJECT", raw: firstLine };
+    // fall through to throw below
+  } else if (firstLine.includes("CONCERNS") || firstLine.includes("CONCERN") || firstLine.includes("GAPS") || firstLine.includes("AT RISK") || firstLine.includes("OPTIMISTIC")) {
     if (expectedOptions.includes("CONCERNS")) return { parsed: "CONCERNS", raw: firstLine };
     if (expectedOptions.includes("GAPS")) return { parsed: "GAPS", raw: firstLine };
     if (expectedOptions.includes("AT_RISK")) return { parsed: "AT_RISK", raw: firstLine };
-    return { parsed: "CONCERNS", raw: firstLine };
+    // 32-CR-parseverdict-concerns-fallback: same as above — the
+    // previous fallback to "CONCERNS" was fail-open for gates
+    // whose expectedOptions don't include "CONCERNS" (e.g. a
+    // QL-TEST-COVERAGE gate that expects ["ADEQUATE", "INADEQUATE"]).
+    if (expectedOptions.includes("CONCERNS")) return { parsed: "CONCERNS", raw: firstLine };
+    // fall through to throw below
   }
 
-  // Default to CONCERNS if we can't parse
-  return { parsed: expectedOptions.includes("CONCERNS") ? "CONCERNS" : expectedOptions[0], raw: firstLine };
+  // 20-M-verdict-fail-open: the previous default returned
+  // `expectedOptions.includes("CONCERNS") ? "CONCERNS" :
+  // expectedOptions[0]`. CONCERNS is in PASS_VERDICTS
+  // (milestone-gate-service.ts:22), so an LLM that produced
+  // something completely unparseable — e.g., a model echoing its
+  // prompt, returning a JSON-RPC error, or hallucinating a verdict
+  // keyword that doesn't appear in expectedOptions — got
+  // classified as "passing with concerns", which is fail-open for
+  // a security-relevant classifier. Throw instead; the catch in
+  // executeGate returns verdict: "ERROR" (a BLOCK verdict), the
+  // logger.error gets the original content for triage, and the
+  // caller can decide whether to retry or surface to the operator.
+  // The firstLine is included so triage doesn't have to re-parse.
+  throw new Error(
+    `parseVerdict: could not classify verdict. expectedOptions=[${expectedOptions.join(", ")}] rawFirstLine="${firstLine}"`,
+  );
 }
 
 /**

@@ -18,6 +18,7 @@ const TABS: { label: string; value: AssetType | "all" }[] = [
   { label: "Audio", value: "audio" },
   { label: "VFX", value: "vfx" },
   { label: "Texture", value: "texture" },
+  { label: "Screenshots", value: "screenshot" },
 ];
 
 interface AssetFiltersProps {

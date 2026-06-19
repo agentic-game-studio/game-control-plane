@@ -1,9 +1,10 @@
 "use client";
-
-import { useEffect, useState, useRef } from "react";
-import type { ContextUsage } from "@game-studio/types";
+import { createLogger } from "../../../../lib/logger";
+import { useEffect, useState, useRef, useCallback } from "react";
+import type { ContextUsage, WSEvent } from "@game-studio/types";
 import { apiFetch } from "@/lib/api";
 import { useProject } from "@/contexts/ProjectContext";
+import { useWebSocket } from "@/hooks/useWebSocket";
 import {
   PRODUCER_MODEL_CONTEXT_TOKENS,
   countConversationHistoryChars,
@@ -11,6 +12,8 @@ import {
   producerModelContextFillPercent,
   contextFillPercentFromUsage,
 } from "@/lib/chat-context";
+
+const logger = createLogger("ProgressSummary");
 
 interface TicketSummary {
   available: number;
@@ -84,29 +87,57 @@ export default function ProgressSummary({ activeAgents, producerSessionId, curre
     };
   }, [compactingSessionId]);
 
-  useEffect(() => {
-    const fetchTickets = async () => {
-      try {
-        const query = currentProjectId ? `?projectId=${encodeURIComponent(currentProjectId)}` : "";
-        const board = await apiFetch<TicketsResponse>(`/api/tickets${query}`);
-        if (board.columns) {
-          const summary: TicketSummary = { available: 0, in_progress: 0, qa: 0, completed: 0 };
-          board.columns.forEach((col) => {
-            if (col.id in summary) {
-              summary[col.id as keyof TicketSummary] = col.tickets.length;
-            }
-          });
-          setTickets(summary);
-        }
-      } catch (err) {
-        console.error("[Progress] Failed to fetch tickets:", err);
+  const fetchTickets = useCallback(async () => {
+    try {
+      const query = currentProjectId ? `?projectId=${encodeURIComponent(currentProjectId)}` : "";
+      const board = await apiFetch<TicketsResponse>(`/api/tickets${query}`);
+      if (board.columns) {
+        const summary: TicketSummary = { available: 0, in_progress: 0, qa: 0, completed: 0 };
+        board.columns.forEach((col) => {
+          if (col.id in summary) {
+            summary[col.id as keyof TicketSummary] = col.tickets.length;
+          }
+        });
+        setTickets(summary);
       }
-    };
-
-    fetchTickets();
-    const interval = setInterval(fetchTickets, 30000);
-    return () => clearInterval(interval);
+    } catch (err) {
+      logger.error("Failed to fetch tickets", { err: err });
+    }
   }, [currentProjectId]);
+
+  // 15-H-progress-summary-ticket-poll: the previous useEffect fired
+  // /api/tickets every 30s. The backend already broadcasts ticket:*
+  // (created/updated/deleted/moved/verified/deadletter) over WebSocket
+  // — re-polling the entire board every 30s wastes a round-trip per
+  // mounted chat page and produces stale data between polls. Now we
+  // fetch on mount and project change, then refetch on any ticket
+  // event. ignore events for other projects (multi-project workspaces).
+  useEffect(() => {
+    fetchTickets();
+  }, [fetchTickets]);
+
+  const onWSEvent = useCallback(
+    (event: WSEvent) => {
+      if (
+        event.type === "ticket:created" ||
+        event.type === "ticket:updated" ||
+        event.type === "ticket:deleted" ||
+        event.type === "ticket:moved" ||
+        event.type === "ticket:verified" ||
+        event.type === "ticket:deadletter"
+      ) {
+        // Skip events for other projects when we have a current project
+        const eventProjectId = "projectId" in event ? event.projectId : null;
+        if (currentProjectId && eventProjectId && eventProjectId !== currentProjectId) {
+          return;
+        }
+        fetchTickets();
+      }
+    },
+    [fetchTickets, currentProjectId]
+  );
+
+  useWebSocket(onWSEvent);
 
   useEffect(() => {
     if (!targetSession) {
@@ -140,7 +171,7 @@ export default function ProgressSummary({ activeAgents, producerSessionId, curre
         setContextEstTokens(estimateConversationTokensFromHistory(session.conversationHistory));
         setContextPct(producerModelContextFillPercent(session.conversationHistory));
       } catch (err) {
-        console.error("[Progress] Failed to fetch session context:", err);
+        logger.error("Failed to fetch session context", { err: err });
       }
     };
 

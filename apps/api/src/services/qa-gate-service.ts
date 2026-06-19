@@ -3,20 +3,32 @@
  * boot check → GUT → smoke playtest
  */
 
-import { execSync } from "child_process";
+import { execFile } from "child_process";
+import { promisify } from "util";
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from "fs";
+import fs from "fs/promises";
 import { join } from "path";
-import { loadConfig } from "../config.js";
+import { loadConfig, resolvePipelinePython } from "../config.js";
 import { resolveProjectWorkspace } from "../utils/workspace.js";
+import { resolveHomeDir } from "../utils/paths.js";
 import { logger } from "../utils/logger.js";
 import { runRegressionCheck } from "./regression-service.js";
 import type { TicketTestEvidence } from "@game-studio/types";
+
+const execFileAsync = promisify(execFile);
 
 export interface QAGateStepResult {
   name: keyof TicketTestEvidence;
   passed: boolean;
   output?: string;
   errors?: string[];
+  // 23-H-gut-skip-fail-open: a step that was *not run* (vs. one that
+  // ran and failed) needs a separate signal so the chain can decide
+  // pass-vs-fail based on review mode. Without this, a GUT-less
+  // project returned `passed: true` for the GUT step, which the chain
+  // then counted as a pass — silently dropping the test gate in
+  // `lean`/`full` review modes.
+  skipped?: boolean;
 }
 
 export interface QAGateResult {
@@ -26,30 +38,49 @@ export interface QAGateResult {
   summary: string;
 }
 
-function runGodotHeadlessCommand(
+async function runGodotHeadlessCommand(
   projectPath: string,
   command: string,
   extraArgs: string[] = [],
   timeoutSec = 90,
-): { success: boolean; stdout: string; stderr: string; returnCode: number } {
+): Promise<{ success: boolean; stdout: string; stderr: string; returnCode: number }> {
   const config = loadConfig();
   const scriptDir = join(config.WORKSPACE_DIR, "scripts", "godot");
-  const pythonBin = process.env.PIPELINE_PYTHON ?? "python3";
-  const godotBin = process.env.GODOT_BIN ?? join(process.env.HOME ?? "", ".local/bin/godot_bin/Godot");
+  const pythonBin = resolvePipelinePython();
+  const home = resolveHomeDir();
+  // 24-M-env-var-drift: read GODOT_BIN from the Zod-validated
+  // config instead of `process.env.GODOT_BIN` directly. The 23rd
+  // pass added GODOT_BIN to the env schema (config.ts:57) but
+  // didn't migrate this consumer. The Zod default is the empty
+  // string, so `||` matches the original `??` behavior at the
+  // empty-string boundary.
+  const godotBin = config.GODOT_BIN || (home ? join(home, ".local/bin/godot_bin/Godot") : "");
 
-  const cmd = [
-    pythonBin,
-    `"${join(scriptDir, "run_godot_headless.py")}"`,
-    `--project "${projectPath}"`,
-    `--command ${command}`,
-    `--godot-bin "${godotBin}"`,
-    `--timeout ${Math.min(timeoutSec, 120)}`,
+  // Use execFileAsync (no shell) to avoid command injection via projectPath
+  // or any of the other string inputs. A malicious projectPath like
+  // `foo"; rm -rf /; "bar` would have been split into a shell pipeline;
+  // now it's a single argv element that Python receives literally.
+  //
+  // 27-C-qa-gate-event-loop: was sync `execFileSync` from
+  // node:child_process. runQAGateChain runs three of these back-to-back
+  // (boot 45s + GUT 120s + smoke 60s = up to 225s), and Node is
+  // single-threaded, so the entire process — every WS broadcast, every
+  // HTTP request, every SSE log stream — froze for the duration.
+  // Converted to the async variant from the same module; the caller
+  // chain (runBootCheckGate → runQAGateChain → autonomous loop) is
+  // already structured for await.
+  const args = [
+    join(scriptDir, "run_godot_headless.py"),
+    `--project`, projectPath,
+    `--command`, command,
+    `--godot-bin`, godotBin,
+    `--timeout`, String(Math.min(timeoutSec, 120)),
     ...extraArgs,
-  ].join(" ");
+  ];
 
   try {
-    const result = execSync(cmd, { timeout: (timeoutSec + 30) * 1000 });
-    const stdout = result?.toString() ?? "";
+    const { stdout: rawStdout, stderr } = await execFileAsync(pythonBin, args, { timeout: (timeoutSec + 30) * 1000 });
+    const stdout = rawStdout ?? "";
     try {
       const parsed = JSON.parse(stdout.trim()) as { success: boolean; returnCode: number; stdout?: string; stderr?: string };
       return {
@@ -58,8 +89,25 @@ function runGodotHeadlessCommand(
         stderr: parsed.stderr ?? "",
         returnCode: parsed.returnCode ?? 0,
       };
-    } catch {
-      return { success: true, stdout, stderr: "", returnCode: 0 };
+    } catch (err) {
+      // 21-C-qa-gate-parse-fail-open: the previous catch returned
+      // `{ success: true, returnCode: 0 }` whenever stdout didn't
+      // parse as JSON. The Python gate script is supposed to emit
+      // a single-line JSON object; if it instead prints a Python
+      // traceback, a partial line (e.g. a timeout cut it off), or
+      // an empty string, the gate was silently classified as
+      // "passed" — moving the ticket toward completion in
+      // runQAGateChain. Mirrors the fail-closed shape used at
+      // autonomous.ts:336-345 (runBootCheck): treat unparseable
+      // output as a failed step, not a pass. Log the raw stdout
+      // (capped) so an operator can see *why* the gate failed to
+      // parse without trawling the Python script.
+      const preview = stdout.length > 500 ? `${stdout.slice(0, 500)}…` : stdout;
+      logger.warn(
+        { err: err instanceof Error ? err.message : String(err), stdoutPreview: preview, event: "qa_gate_parse_failed" },
+        "qa-gate: failed to parse Python gate output as JSON — treating as failure",
+      );
+      return { success: false, stdout, stderr: "Failed to parse gate output as JSON", returnCode: 1 };
     }
   } catch (err: unknown) {
     const stderr = err && typeof err === "object" && "stderr" in err ? String((err as { stderr: unknown }).stderr) : "";
@@ -68,18 +116,31 @@ function runGodotHeadlessCommand(
   }
 }
 
+// 29-L-qa-gate-fatal-patterns-const: hoist the fatal-error regex
+// set to module scope. The previous shape rebuilt the array on
+// every call to extractFatalErrors; the regexes are stateless and
+// don't need a per-call allocation. With a 50KB Godot stderr
+// being scanned per boot, this saves a few hundred microseconds
+// per gate run and gives the patterns a name grep can find.
+const FATAL_PATTERNS: RegExp[] = [
+  /SCRIPT ERROR:/,
+  /Parse Error/,
+  /Parser Error/,
+  /Invalid set index/,
+  /Function not found/,
+];
+
 function extractFatalErrors(output: string): string[] {
   if (!output) return [];
-  const fatalPatterns = [/SCRIPT ERROR:/, /Parse Error/, /Parser Error/, /Invalid set index/, /Function not found/];
   const errors: string[] = [];
   for (const line of output.split("\n")) {
-    if (fatalPatterns.some((p) => p.test(line))) errors.push(line.trim());
+    if (FATAL_PATTERNS.some((p) => p.test(line))) errors.push(line.trim());
   }
   return Array.from(new Set(errors)).slice(0, 20);
 }
 
-export function runBootCheckGate(projectPath: string): QAGateStepResult {
-  const result = runGodotHeadlessCommand(projectPath, "boot", [], 45);
+export async function runBootCheckGate(projectPath: string): Promise<QAGateStepResult> {
+  const result = await runGodotHeadlessCommand(projectPath, "boot", [], 45);
   const errors = extractFatalErrors(result.stderr + result.stdout);
   const passed = result.success && errors.length === 0;
   return {
@@ -90,13 +151,32 @@ export function runBootCheckGate(projectPath: string): QAGateStepResult {
   };
 }
 
-export function runGUTGate(projectPath: string): QAGateStepResult {
+export async function runGUTGate(projectPath: string): Promise<QAGateStepResult> {
   const testsDir = join(projectPath, "tests");
-  const hasGut = existsSync(join(projectPath, "addons", "gut")) || existsSync(testsDir);
+  // 30-L-qa-gut-exists-sync: the previous shape used `existsSync` on
+  // the QA-gate hot path. The 27th pass converted the subprocess
+  // calls to async, but the GUT-presence probe still blocks the
+  // event loop. `existsSync` on a workspace project root is
+  // usually < 1ms, but the GUT chain runs after the boot check
+  // (which already stat'd the same dirs) and the smoke playtest
+  // (which awaits the .gd script). Use `fs.access` in parallel so
+  // both probes are O(1) and non-blocking.
+  const [hasGutAddon, hasTestsDir] = await Promise.all([
+    fs.access(join(projectPath, "addons", "gut")).then(() => true, () => false),
+    fs.access(testsDir).then(() => true, () => false),
+  ]);
+  const hasGut = hasGutAddon || hasTestsDir;
   if (!hasGut) {
-    return { name: "gut", passed: true, output: "GUT not installed — skipped" };
+    // 23-H-gut-skip-fail-open: the previous return set
+    // `passed: true` for a GUT-less project, so the chain at
+    // `runQAGateChain` counted it as a pass and the ticket moved
+    // toward completion. The fail-closed shape (21-C-qa-gate-parse-
+    // fail-open) treats unrun gates as failed by default. The chain
+    // inspects `skipped` to relax this in `solo` review mode (where
+    // the user explicitly opted into "AI only, no enforcement").
+    return { name: "gut", passed: false, skipped: true, output: "GUT not installed — skipped" };
   }
-  const result = runGodotHeadlessCommand(projectPath, "gut", [], 120);
+  const result = await runGodotHeadlessCommand(projectPath, "gut", [], 120);
   const errors = extractFatalErrors(result.stderr);
   const passed = result.success && !/FAILED|failures/i.test(result.stdout + result.stderr);
   return {
@@ -107,12 +187,29 @@ export function runGUTGate(projectPath: string): QAGateStepResult {
   };
 }
 
-export function runSmokePlaytestGate(projectPath: string): QAGateStepResult {
+export async function runSmokePlaytestGate(projectPath: string): Promise<QAGateStepResult> {
   const smokeScript = join(projectPath, "tests", "smoke_playtest.gd");
-  if (!existsSync(smokeScript)) {
-    ensureSmokePlaytestScript(projectPath);
+  // 30-L-qa-smoke-exists-sync: same conversion as runGUTGate above.
+  // The smoke playtest gate is on the same hot path; the `existsSync`
+  // would block the event loop and is the only sync call left in
+  // the chain.
+  if (!(await fs.access(smokeScript).then(() => true, () => false))) {
+    await ensureSmokePlaytestScript(projectPath);
   }
-  const result = runGodotHeadlessCommand(projectPath, "script", [`--script "res://tests/smoke_playtest.gd"`], 60);
+  // 27-C-qa-script-arg-quoting: was a single argv element with
+  // embedded quotes (`["--script \"res://tests/smoke_playtest.gd\""]`).
+  // argparse would have received `--script="res://tests/smoke_playtest.gd"`
+  // as a literal string with quotes in it, and the Python gate
+  // script's `--script` argument would have failed to find a file at
+  // that path. The smoke playtest has therefore never run the real
+  // `.gd` file. Split into two argv elements so argparse gets
+  // `--script` and the path as separate tokens.
+  const result = await runGodotHeadlessCommand(
+    projectPath,
+    "script",
+    ["--script", "res://tests/smoke_playtest.gd"],
+    60,
+  );
   const passed = result.success && result.returnCode === 0;
   return {
     name: "smokePlaytest",
@@ -122,13 +219,13 @@ export function runSmokePlaytestGate(projectPath: string): QAGateStepResult {
   };
 }
 
-function ensureSmokePlaytestScript(projectPath: string): void {
+async function ensureSmokePlaytestScript(projectPath: string): Promise<void> {
   const testsDir = join(projectPath, "tests");
   if (!existsSync(testsDir)) mkdirSync(testsDir, { recursive: true });
   const scriptPath = join(testsDir, "smoke_playtest.gd");
   if (existsSync(scriptPath)) return;
 
-  writeFileSync(
+  await fs.writeFile(
     scriptPath,
     `extends SceneTree
 
@@ -141,12 +238,12 @@ func _initialize() -> void:
   logger.info({ projectPath, event: "smoke_playtest_scaffold" }, "Created smoke_playtest.gd scaffold");
 }
 
-export function runQAGateChain(workspacePath: string, projectId?: string): QAGateResult {
+export async function runQAGateChain(workspacePath: string, projectId?: string): Promise<QAGateResult> {
   const projectPath = resolveProjectWorkspace(workspacePath);
   const now = new Date().toISOString();
   const evidence: TicketTestEvidence = {};
 
-  const boot = runBootCheckGate(projectPath);
+  const boot = await runBootCheckGate(projectPath);
   evidence.bootCheck = { passed: boot.passed, errors: boot.errors, at: now };
   if (!boot.passed) {
     return {
@@ -157,18 +254,30 @@ export function runQAGateChain(workspacePath: string, projectId?: string): QAGat
     };
   }
 
-  const gut = runGUTGate(projectPath);
+  const gut = await runGUTGate(projectPath);
   evidence.gut = { passed: gut.passed, output: gut.output, at: now };
   if (!gut.passed) {
-    return {
-      passed: false,
-      evidence,
-      failureStep: "gut",
-      summary: `GUT failed: ${gut.errors?.slice(0, 2).join("; ") ?? "test failures"}`,
-    };
+    // 23-H-gut-skip-fail-open: a GUT-less project returns
+    // `passed: false, skipped: true`. Fail-closed in `lean` and
+    // `full` review modes (the default + enforced modes); only
+    // `solo` (AI-only, no enforcement) lets the gate pass when
+    // skipped. The user explicitly opted into solo, so we don't
+    // surprise them with a "GUT not installed" failure.
+    if (gut.skipped && loadConfig().REVIEW_MODE === "solo") {
+      // Allow the chain to continue.
+    } else {
+      return {
+        passed: false,
+        evidence,
+        failureStep: "gut",
+        summary: gut.skipped
+          ? `GUT not installed — required in ${loadConfig().REVIEW_MODE} review mode`
+          : `GUT failed: ${gut.errors?.slice(0, 2).join("; ") ?? "test failures"}`,
+      };
+    }
   }
 
-  const smoke = runSmokePlaytestGate(projectPath);
+  const smoke = await runSmokePlaytestGate(projectPath);
   evidence.smokePlaytest = { passed: smoke.passed, output: smoke.output, at: now };
   if (!smoke.passed) {
     return {
@@ -180,7 +289,7 @@ export function runQAGateChain(workspacePath: string, projectId?: string): QAGat
   }
 
   if (projectId) {
-    const regression = runRegressionCheck(workspacePath, projectId, evidence);
+    const regression = await runRegressionCheck(workspacePath, projectId, evidence);
     evidence.regression = {
       passed: regression.passed,
       isBaseline: regression.isBaseline,
@@ -197,45 +306,100 @@ export function runQAGateChain(workspacePath: string, projectId?: string): QAGat
     }
   }
 
+  // 30-H-gut-skip-honest-summary: the previous summary hardcoded
+  // "All QA gates passed (boot, GUT, smoke, regression)" regardless
+  // of the actual evidence. In `solo` review mode a GUT-less project
+  // would mark the gut step as `skipped` (see L244-261) and the
+  // chain would proceed — but the summary still claimed GUT ran.
+  // Derive the summary from the actual evidence so the activity log
+  // and ticket-verdict UI reflect what really executed. The
+  // evidence list is built in the order gates ran, so the join
+  // preserves the same display order as the old hardcoded string.
+  const evidenceLabels: Array<keyof TicketTestEvidence> = ["bootCheck", "gut", "smokePlaytest", "regression"];
+  const parts: string[] = [];
+  for (const k of evidenceLabels) {
+    const ev = evidence[k];
+    if (!ev) continue;
+    // llmVerification is an evidence entry too but doesn't have a
+    // `passed` field — its `verdict` string is the source of truth.
+    // The QA chain here only writes the first four, so we filter
+    // out anything that lacks a boolean `passed` to keep the
+    // summary coherent.
+    if (typeof (ev as { passed?: boolean }).passed !== "boolean") continue;
+    if ((ev as { passed: boolean }).passed) {
+      parts.push(k === "gut" && gut.skipped ? `${String(k)} (skipped)` : String(k));
+    } else {
+      parts.push(`${String(k)} (failed)`);
+    }
+  }
+  const summary = parts.length > 0
+    ? `QA gates passed: ${parts.join(", ")}`
+    : "All QA gates passed";
+
   return {
     passed: true,
     evidence,
-    summary: "All QA gates passed (boot, GUT, smoke, regression)",
+    summary,
   };
 }
 
-export function saveTestEvidenceArtifact(
+// 28-H-qa-gate-async-version-helpers: three sync helpers converted
+// to async. The 27th pass fixed the gate chain's subprocess calls
+// (runBootCheckGate / runGUTGate / runSmokePlaytestGate) but left
+// the version / evidence helpers sync. saveTestEvidenceArtifact is
+// called from build-service at the end of every successful Godot
+// export, blocking the event loop on the writeFileSync; bumpProjectVersion
+// is called from POST /api/builds/bump-version directly. The async
+// signatures propagate to the two callers.
+export async function saveTestEvidenceArtifact(
   projectPath: string,
   ticketId: string,
   evidence: TicketTestEvidence,
-): string {
+): Promise<string> {
   const dir = join(projectPath, "production", "qa-evidence");
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  await fs.mkdir(dir, { recursive: true });
   const relPath = join("production", "qa-evidence", `${ticketId}.json`);
-  writeFileSync(join(projectPath, relPath), JSON.stringify(evidence, null, 2), "utf-8");
+  await fs.writeFile(join(projectPath, relPath), JSON.stringify(evidence, null, 2), "utf-8");
   return relPath;
 }
 
-export function readProjectVersion(projectPath: string): string {
+export async function readProjectVersion(projectPath: string): Promise<string> {
   const projectGodot = join(projectPath, "project.godot");
-  if (!existsSync(projectGodot)) return "0.1.0";
   try {
-    const content = readFileSync(projectGodot, "utf-8");
+    const content = await fs.readFile(projectGodot, "utf-8");
     const match = content.match(/config\/version="([^"]+)"/);
     return match?.[1] ?? "0.1.0";
   } catch {
+    // ENOENT (no project.godot) or permission denied — both fall back
+    // to a sensible default so the caller can proceed.
     return "0.1.0";
   }
 }
 
-export function bumpProjectVersion(projectPath: string, bump: "patch" | "minor" | "major" = "patch"): string {
+export async function bumpProjectVersion(projectPath: string, bump: "patch" | "minor" | "major" = "patch"): Promise<string> {
   const projectGodot = join(projectPath, "project.godot");
-  if (!existsSync(projectGodot)) return "0.1.0";
+  let content: string;
+  try {
+    content = await fs.readFile(projectGodot, "utf-8");
+  } catch {
+    return "0.1.0";
+  }
 
-  let content = readFileSync(projectGodot, "utf-8");
   const match = content.match(/config\/version="([^"]+)"/);
   const current = match?.[1] ?? "0.1.0";
-  const parts = current.split(".").map((n) => parseInt(n, 10) || 0);
+  // 30-M-qa-version-validation: the previous shape accepted any
+  // value captured between the quotes (including control chars,
+  // embedded newlines, and stray "config/version=..." tokens from
+  // a corrupted file) and wrote it straight back via JSON.stringify-
+  // less fs.writeFile. A half-rewritten project.godot would survive
+  // and produce a project.godot the Godot editor refuses to open.
+  // Validate against a strict numeric version pattern before
+  // splitting. If the value is malformed, fall back to the default
+  // so the bump can still proceed (operator can fix the file
+  // separately and re-run the bump).
+  const VERSION_RE = /^\d+(\.\d+){0,2}$/;
+  const safeCurrent = VERSION_RE.test(current) ? current : "0.1.0";
+  const parts = safeCurrent.split(".").map((n) => parseInt(n, 10) || 0);
   while (parts.length < 3) parts.push(0);
   if (bump === "major") { parts[0]++; parts[1] = 0; parts[2] = 0; }
   else if (bump === "minor") { parts[1]++; parts[2] = 0; }
@@ -247,6 +411,6 @@ export function bumpProjectVersion(projectPath: string, bump: "patch" | "minor" 
   } else {
     content += `\nconfig/version="${next}"\n`;
   }
-  writeFileSync(projectGodot, content, "utf-8");
+  await fs.writeFile(projectGodot, content, "utf-8");
   return next;
 }

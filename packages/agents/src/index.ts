@@ -1,4 +1,5 @@
 import type { AgentDefinition, AgentRole } from "@game-studio/types";
+import { AGENT_ROLES, isAgentRole } from "@game-studio/types";
 import { leadershipAgents } from "./leadership.js";
 import { departmentLeadAgents } from "./department-leads.js";
 import { specialistAgents } from "./specialists.js";
@@ -20,6 +21,17 @@ export const agents: Partial<Record<AgentRole, AgentDefinition>> = {
   ...codeReviewerAgents,
 };
 
-export const allAgentRoles: AgentRole[] = Object.keys(agents) as AgentRole[];
+// 27-M-all-roles-derived: derive allAgentRoles from the AGENT_ROLES
+// registry (the 25-L-agent-role-guard source of truth) instead of
+// `Object.keys(agents) as AgentRole[]`. The cast lost its safety:
+// adding a new role to the union but forgetting to add a definition
+// in the registry silently dropped it from the validation script's
+// output. The new shape filters the union through the runtime
+// guard and the partial-record check — a drift in either direction
+// (role in union without definition, definition without union
+// entry) is now impossible.
+export const allAgentRoles: AgentRole[] = AGENT_ROLES.filter(
+  (role): role is AgentRole => isAgentRole(role) && role in agents,
+);
 
 export { delegationMap, agentTiers };

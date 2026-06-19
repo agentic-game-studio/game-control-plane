@@ -91,7 +91,8 @@ class PipelineResult:
 # Step 1 — Generate with mflux
 # ---------------------------------------------------------------------------
 
-def generate_mflux(preset: AssetPreset, output_dir: Path, dry_run: bool = False) -> Path:
+def generate_mflux(preset: AssetPreset, output_dir: Path, dry_run: bool = False,
+                   gen_timeout: int = 600) -> Path:
     """Run mflux-generate-flux2 and return the output image path."""
     slug = re.sub(r'[^a-z0-9]+', '_', preset.name.lower()).strip('_')
     raw_path = output_dir / "raw" / f"{slug}.png"
@@ -121,7 +122,30 @@ def generate_mflux(preset: AssetPreset, output_dir: Path, dry_run: bool = False)
 
     print(f"  [mflux] generating {preset.name} ({preset.width}x{preset.height}, {preset.steps} steps)...")
     t0 = time.time()
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    # 6J-6th: handle subprocess.TimeoutExpired explicitly. Without it, a
+    # hung mflux process would raise a bare exception with no elapsed
+    # time and no cleanup; the surrounding `for preset in presets:` loop
+    # would die on the first hang and the whole batch run would abort
+    # mid-pipeline. Timeout is a known, recoverable failure (mflux is
+    # Apple-Silicon ML and the first generation in a session can run
+    # several minutes past the wall-clock budget on cold cache).
+    try:
+        # 28-M-asset-pipeline-gen-timeout: use the CLI flag instead
+        # of the hardcoded 600s.
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=gen_timeout)
+    except subprocess.TimeoutExpired as exc:
+        elapsed = time.time() - t0
+        # 29-L-asset-pipeline-full-cmd-on-fail: previous shape
+        # printed `cmd[:3]` + "..." which truncated away the
+        # distinguishing args (the seed, the negative-prompt, the
+        # output path). Two failed runs with the same model and
+        # first 3 args were indistinguishable. The full command
+        # contains no secrets (just prompt text + paths) and is
+        # what an operator needs to reproduce the failure.
+        raise RuntimeError(
+            f"mflux timed out after {exc.timeout}s (elapsed {elapsed:.1f}s) — "
+            f"command: {' '.join(cmd)}"
+        ) from exc
     elapsed = time.time() - t0
 
     if result.returncode != 0:
@@ -154,8 +178,12 @@ def remove_background(input_path: Path, output_path: Path, dry_run: bool = False
         return output_path
     except ImportError:
         print("  [rembg] not available, falling back to PIL alpha extraction")
-        # Fallback: convert white/flat backgrounds to transparent
-        img = Image.open(input_path).convert("RGBA")
+        # Fallback: convert white/flat backgrounds to transparent. The
+        # `with` block releases the underlying file handle once we've
+        # finished reading; without it, a long fallback run leaks fds
+        # the same way the main path did.
+        with Image.open(input_path) as _src:
+            img = _src.convert("RGBA").copy()
         datas = img.getdata()
         new_data = []
         for item in datas:
@@ -411,7 +439,14 @@ def post_process(
         print(f"  [DRY-RUN] would write Godot .import -> {final}.import")
         return final, thumb
 
-    img = Image.open(img_path).convert("RGBA")
+    # 6J-6th: Image.open() returns a lazy file handle. Without `with`, the
+    # handle stays open until the image is garbage-collected (Pillow holds
+    # it internally until .load() is called). In a long batch run that
+    # opens 100+ images per preset, file descriptors accumulate until
+    # `OSError: [Errno 24] Too many open files`. The `with` block calls
+    # .close() on exit even if the subsequent crop / paste / save raises.
+    with Image.open(img_path) as _src:
+        img = _src.convert("RGBA").copy()
 
     # 3a. Alpha-trim (crop to content bounding box)
     bbox = img.getbbox()
@@ -514,7 +549,13 @@ def build_manifest_entry(
         "type": preset.type,
         "category": preset.category,
         "sizeBytes": stat.st_size if stat else 0,
-        "tags": preset.tags + [preset.type, preset.category],
+        # 29-L-asset-pipeline-manifest-tag-dup: previous shape
+        # appended `preset.type` and `preset.category` to the
+        # user-defined tags. Both are already first-class fields on
+        # the manifest entry above — adding them to `tags` was
+        # duplicated data that the inventory API then had to dedup
+        # when filtering. Drop the duplicates.
+        "tags": list(preset.tags),
         "generatedWith": {
             "tool": "mflux-generate-flux2",
             "model": preset.model,
@@ -538,12 +579,13 @@ def build_manifest_entry(
 # ---------------------------------------------------------------------------
 
 def run_pipeline(preset: AssetPreset, output_dir: Path, dry_run: bool = False,
-                 workspace_dir: Optional[Path] = None) -> PipelineResult:
+                 workspace_dir: Optional[Path] = None,
+                 gen_timeout: int = 600) -> PipelineResult:
     """Execute the full asset generation pipeline for one preset."""
     t0 = time.time()
     try:
         # Step 1: Generate
-        raw_path = generate_mflux(preset, output_dir, dry_run)
+        raw_path = generate_mflux(preset, output_dir, dry_run, gen_timeout=gen_timeout)
 
         # Step 2: Remove background
         slug = re.sub(r'[^a-z0-9]+', '_', preset.name.lower()).strip('_')
@@ -592,16 +634,17 @@ def run_pipeline(preset: AssetPreset, output_dir: Path, dry_run: bool = False,
 
 def load_presets(yaml_path: Path) -> list[AssetPreset]:
     """Load asset presets from a YAML file."""
+    # 13-M-asset-pipeline: dropped the JSON-with-comments fallback. The
+    # fallback would only work on YAML files that happened to be valid
+    # JSON — multi-doc YAML, anchors, and YAML lists broke silently.
+    # PyYAML is in the standard asset-pipeline dep set; if a user
+    # doesn't have it, we want a loud error, not a garbled parse.
     try:
         import yaml
-    except ImportError:
-        # Fallback: parse simple JSON-with-comments format
-        with open(yaml_path) as f:
-            content = f.read()
-        # Strip comments
-        content = re.sub(r'#[^\n]*', '', content)
-        items = json.loads(content)
-        return [AssetPreset(**item) for item in items]
+    except ImportError as e:
+        raise RuntimeError(
+            "PyYAML is required to load presets. Install with `pip install pyyaml`."
+        ) from e
 
     with open(yaml_path) as f:
         data = yaml.safe_load(f)
@@ -634,6 +677,11 @@ def main():
     parser.add_argument("--sprite-rows", type=int, default=1)
     parser.add_argument("--tags", nargs="*", default=[])
     parser.add_argument("--presets", help="YAML file with batch presets")
+    # 28-M-asset-pipeline-gen-timeout: was hardcoded to 600s. A
+    # warm-cache second generation finishes in ~30s but would still
+    # block for the full 10 minutes on a hang. Make it a CLI flag
+    # so callers can tune per environment.
+    parser.add_argument("--gen-timeout", type=int, default=600, help="Per-asset mflux subprocess timeout (seconds)")
     parser.add_argument("--output-dir", default=".", help="Output root directory")
     parser.add_argument("--workspace-dir", default=None,
                         help="Workspace root dir — manifest paths are stored relative to this")
@@ -683,7 +731,8 @@ def main():
 
     for i, preset in enumerate(presets, 1):
         print(f"[{i}/{len(presets)}] {preset.name}")
-        result = run_pipeline(preset, output_dir, args.dry_run, workspace_dir=workspace_dir)
+        result = run_pipeline(preset, output_dir, args.dry_run,
+                              workspace_dir=workspace_dir, gen_timeout=args.gen_timeout)
         results.append(result)
         if result.manifest_entry:
             manifest_entries.append(result.manifest_entry)
@@ -706,8 +755,15 @@ def main():
             if entry["id"] not in existing_ids:
                 existing.append(entry)
 
-        with open(manifest_path, "w") as f:
+        # C10: write atomically (tmp + rename) so a kill -9 / power loss
+        # mid-write can't leave a half-written manifest. os.replace is
+        # atomic on POSIX and Windows (Python 3.3+).
+        tmp_manifest = manifest_path.with_suffix(manifest_path.suffix + ".tmp")
+        with open(tmp_manifest, "w") as f:
             json.dump(existing, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_manifest, manifest_path)
         print(f"Manifest updated: {manifest_path} ({len(existing)} total assets)")
 
     # Summary

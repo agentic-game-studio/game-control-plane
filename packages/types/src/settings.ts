@@ -114,3 +114,25 @@ function getNextResetDate(): string {
   next.setHours(0, 0, 0, 0);
   return next.toISOString();
 }
+
+// 13-M-settings: DEFAULT_SETTINGS is captured at module-load time, which
+// meant the embedded `resetAt` was frozen at process start. On a server
+// that's been up for weeks, POST /api/settings/reset would clone a
+// `resetAt` that was already in the past — `checkWeeklyReset` would
+// immediately re-fire and the user would never see a stable "fresh"
+// state. `createDefaultSettings()` returns a fresh object on every
+// call so reset operations always anchor to "now + 7 days".
+export function createDefaultSettings(): SettingsConfig {
+  return {
+    ...DEFAULT_SETTINGS,
+    credits: {
+      ...DEFAULT_SETTINGS.credits,
+      subscription: {
+        ...DEFAULT_SETTINGS.credits.subscription,
+        resetAt: getNextResetDate(),
+      },
+    },
+    topUpHistory: [],
+    usageLog: [],
+  };
+}

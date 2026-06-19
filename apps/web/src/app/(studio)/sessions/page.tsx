@@ -1,9 +1,11 @@
 "use client";
-
+import { createLogger } from "../../../lib/logger";
 import { useState, useEffect } from "react";
 import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "@/hooks/useWebSocket";
+import { useDialog } from "@/hooks/useDialog";
 import type { WSEvent } from "@game-studio/types";
+const logger = createLogger("page");
 
 interface Session {
   id: string;
@@ -33,7 +35,7 @@ export default function SessionsPage() {
       const data = await apiFetch<Session[]>("/api/sessions");
       setSessions(data);
     } catch (error) {
-      console.error("Failed to load sessions:", error);
+      logger.error("Failed to load sessions", { err: error });
     } finally {
       setLoading(false);
     }
@@ -44,10 +46,19 @@ export default function SessionsPage() {
       loadSessions();
     }
     if (event.type === "log:entry" && selectedSession && event.sessionId === selectedSession.id) {
-      setLogs((prev) => [
-        ...prev,
-        { level: event.level, message: event.message, timestamp: event.timestamp },
-      ]);
+      // 14-CR-unbounded-logs: cap the in-memory log list. A long-running
+      // session that the user opens and walks away from can produce
+      // 10k+ WS log events; setLogs with an unbounded array triggers
+      // an O(n) re-render on every push, and the React state grows
+      // into the multi-MB range. Keep the last 500 — enough context
+      // for a human reader, small enough to render instantly.
+      setLogs((prev) => {
+        const next = [
+          ...prev,
+          { level: event.level, message: event.message, timestamp: event.timestamp },
+        ];
+        return next.length > 500 ? next.slice(next.length - 500) : next;
+      });
     }
   };
 
@@ -65,14 +76,16 @@ export default function SessionsPage() {
       setNewSessionName("");
       loadSessions();
     } catch (error) {
-      console.error("Failed to create session:", error);
+      logger.error("Failed to create session", { err: error });
     } finally {
       setCreating(false);
     }
   };
 
+  const { confirm: showConfirm } = useDialog();
+
   const handleDelete = async (id: string) => {
-    if (!confirm("Delete this session?")) return;
+    if (!(await showConfirm("Delete this session?"))) return;
     try {
       await apiFetch(`/api/sessions/${id}`, { method: "DELETE" });
       setSessions((prev) => prev.filter((s) => s.id !== id));
@@ -81,7 +94,7 @@ export default function SessionsPage() {
         setLogs([]);
       }
     } catch (error) {
-      console.error("Failed to delete session:", error);
+      logger.error("Failed to delete session", { err: error });
     }
   };
 
@@ -94,7 +107,7 @@ export default function SessionsPage() {
       });
       loadSessions();
     } catch (error) {
-      console.error("Failed to create checkpoint:", error);
+      logger.error("Failed to create checkpoint", { err: error });
     }
   };
 
@@ -110,7 +123,7 @@ export default function SessionsPage() {
         setLogs(data.logs);
       }
     } catch (error) {
-      console.error("Failed to load logs:", error);
+      logger.error("Failed to load logs", { err: error });
     }
   };
 

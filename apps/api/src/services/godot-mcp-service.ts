@@ -12,12 +12,34 @@
  *     → Response read from MCP server stdout
  */
 
-import { spawn, execSync, ChildProcess } from "node:child_process";
+import { spawn, ChildProcess, execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
-import { accessSync, globSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname as pathDirname, join, resolve } from "node:path";
+// 29-H-godot-mcp-dead-imports: the previous import list had
+// `execFileSync`, `rmSync`, `readFileSync`, `readdirSync` — all
+// dead. They were never called; the 27th/28th passes migrated
+// every sync I/O site to fs/promises but left the imports in
+// place. Drop them so `rg "Sync$" apps/api/src` returns only
+// the live sync sites (accessSync at startup, existsSync /
+// globSync on the binary-detect path).
+import { accessSync, globSync, existsSync } from "node:fs";
+import os from "node:os";
 import type { LLMTool } from "../llm/zai-client.js";
 import { logger } from "../utils/logger.js";
 import { loadConfig } from "../config.js";
+import { resolveHomeDir } from "../utils/paths.js";
+
+// 28-H-godot-mcp-async-exec: hoist a promisified execFile to module
+// scope. The 27th pass converted the same pattern in qa-gate-service
+// for runSmokePlaytestGate / runBootCheckGate / runGUTGate; this
+// file's `pgrep` / `tasklist` / `npm install` / `npm run build` calls
+// were missed. execFileSync blocks the event loop for the duration
+// of the subprocess — `npm install` is up to 2 minutes — and the
+// launch/setup route handlers are awaited directly, freezing every
+// WebSocket broadcast and SSE stream on the process.
+const execFileAsync = promisify(execFile);
 
 // Re-export tool type for consumers
 export type { LLMTool } from "../llm/zai-client.js";
@@ -69,23 +91,50 @@ export interface GodotMCPServiceOptions {
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
+// 19-M-version-const: hoist the godot-mcp-pro package version to a single
+// module-level constant. Previously the literal "v1.11.0" was duplicated
+// across 14+ path candidates and 2 user-facing error messages, so a
+// version bump required an audit pass and a missed edit silently broke
+// the installer (resolveServerPath would always return a non-existent
+// path and the spawn would die with ENOENT). One source of truth: bump
+// here and every probe/lookup/error message follows.
+const GODOT_MCP_PRO_VERSION = "v1.11.0";
+
+// 20-L-cwd: derive the search root from this file's location, not
+// process.cwd(). The dev server starts in `apps/api/`, the Docker
+// image starts in `/app/`, and a `pnpm dev` from the repo root
+// lands somewhere else again. `godot-mcp-pro-${VERSION}/` always
+// lives at the repo root, which is 3 levels up from this file. The
+// same pattern was applied to llm-service.ts:36 (19-M) and
+// shipthis-service.ts:13 (19-L) — extend it here too so all three
+// path resolvers agree about where the repo is. Without this, the
+// findServerDir fallback at L1172 always returned a path that
+// doesn't exist in Docker, and the user's "Setup Godot MCP" button
+// in production showed a useless ENOENT error.
+const THIS_FILE_DIR = pathDirname(fileURLToPath(import.meta.url));
+const REPO_ROOT_FROM_THIS_FILE = resolve(THIS_FILE_DIR, "..", "..", "..");
+
 /** Auto-detect MCP server path from env var or relative paths */
 function resolveServerPath(): string {
-  // 1. Explicit env var (highest priority)
-  if (process.env.GODOT_MCP_SERVER_PATH) {
-    return process.env.GODOT_MCP_SERVER_PATH;
+  // 1. Explicit env var (highest priority).
+  // 24-M-env-var-drift: read GODOT_MCP_SERVER_PATH from the
+  // Zod-validated config instead of `process.env.GODOT_MCP_SERVER_PATH`
+  // directly. The 23rd pass added GODOT_MCP_SERVER_PATH to the env
+  // schema (config.ts:60) but didn't migrate this consumer. A future
+  // Zod transform (e.g. `z.string().transform(s => path.resolve(s))`)
+  // applied to the schema would silently not take effect here.
+  const configGodotMcp = loadConfig().GODOT_MCP_SERVER_PATH;
+  if (configGodotMcp) {
+    return configGodotMcp;
   }
 
   // 2. Try relative to API root (apps/api) and project root
-  // API runs from apps/api, MCP server is in project root
-  const cwd = process.cwd();
+  // API runs from apps/api, MCP server is in project root. Anchor
+  // the search at the repo root derived from this file's location
+  // (REPO_ROOT_FROM_THIS_FILE) rather than process.cwd() so the dev
+  // server and the Docker image agree about where the package is.
   const candidates = [
-    // From project root (cwd = game-control-plane)
-    `${cwd}/godot-mcp-pro-v1.11.0/server/build/index.js`,
-    // From apps/api (cwd = game-control-plane/apps/api), go up 2 levels
-    `${cwd}/../../godot-mcp-pro-v1.11.0/server/build/index.js`,
-    // From apps/api (cwd = game-control-plane/apps/api), go up 1 level
-    `${cwd}/../godot-mcp-pro-v1.11.0/server/build/index.js`,
+    join(REPO_ROOT_FROM_THIS_FILE, `godot-mcp-pro-${GODOT_MCP_PRO_VERSION}`, "server", "build", "index.js"),
   ];
 
   for (const p of candidates) {
@@ -102,8 +151,11 @@ function resolveServerPath(): string {
   return candidates[0];
 }
 
-/** Tool name set for membership checking */
-const GODOT_MCP_TOOL_NAMES = new Set([
+/** Tool name set for membership checking. The set is built once at module
+ * load from a static literal, then frozen so a future tool-author who
+ * accidentally adds a `.add()` or `.delete()` somewhere (e.g. inside a
+ * hot-reload branch) can't silently mutate the registry. */
+const GODOT_MCP_TOOL_NAMES: ReadonlySet<string> = Object.freeze(new Set([
   // Project tools
   "get_project_info", "get_filesystem_tree", "search_files", "get_project_settings",
   "set_project_setting", "uid_to_project_path", "project_path_to_uid",
@@ -177,20 +229,76 @@ const GODOT_MCP_TOOL_NAMES = new Set([
   // Testing tools
   "run_test_scenario", "assert_node_state", "assert_screen_text", "compare_screenshots",
   "run_stress_test", "get_test_report",
-]);
+]));
 
 /** Check if a tool name is a known Godot MCP tool */
 export function isGodotMCPTool(name: string): boolean {
   return GODOT_MCP_TOOL_NAMES.has(name);
 }
 
-/** Get all Godot MCP tool definitions (for LLM injection) */
-export function getGodotMCPToolDefinitions(): LLMTool[] {
-  return Array.from(GODOT_MCP_TOOL_NAMES).map((name) => ({
+/** Get all Godot MCP tool definitions (for LLM injection). Cached at
+ * module load — the registry is frozen, so the array is identical for
+ * the lifetime of the process. */
+const GODOT_MCP_TOOL_DEFINITIONS: ReadonlyArray<LLMTool> = Object.freeze(
+  Array.from(GODOT_MCP_TOOL_NAMES).map((name) => ({
     name,
     description: `[Godot MCP] Tool: ${name} — see Godot MCP Pro documentation for details`,
     input_schema: { type: "object", properties: {}, required: [] },
-  }));
+  })),
+);
+
+export function getGodotMCPToolDefinitions(): LLMTool[] {
+  return GODOT_MCP_TOOL_DEFINITIONS as LLMTool[];
+}
+
+// 12-H10: tools/list cache. The static GODOT_MCP_TOOL_NAMES set is
+// good enough for membership checks (isGodotMCPTool), but the
+// authoritative tool list lives on the MCP server. If a future
+// refactor switches to dynamic discovery (sending `tools/list` to
+// the server instead of using the static set), this cache is where
+// the result should land so each service.start() doesn't refetch.
+// The shape is: projectId -> { tools, fetchedAt }. Stale entries
+// (older than TOOLS_CACHE_TTL_MS) are dropped on read.
+const TOOLS_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+// 26-M-tools-cache-cap: hard cap on cache size. TTL pruning runs
+// only on read, so a server that creates many projects over its
+// lifetime (e.g. a multi-tenant test rig that spins up 10k projects
+// in a few hours, each calling setCachedToolsForProject once) can
+// grow the map without bound between reads. Cap at 200 — well above
+// any realistic single-tenant project count, and low enough that the
+// map stays well under V8's Map performance cliff.
+const MAX_TOOLS_CACHE_ENTRIES = 200;
+const toolsCache = new Map<string, { tools: LLMTool[]; fetchedAt: number }>();
+
+export function getCachedToolsForProject(projectId: string): LLMTool[] | null {
+  const entry = toolsCache.get(projectId);
+  if (!entry) return null;
+  if (Date.now() - entry.fetchedAt > TOOLS_CACHE_TTL_MS) {
+    toolsCache.delete(projectId);
+    return null;
+  }
+  return entry.tools;
+}
+
+export function setCachedToolsForProject(projectId: string, tools: LLMTool[]): void {
+  toolsCache.set(projectId, { tools, fetchedAt: Date.now() });
+  // Cap enforcement: drop oldest entries (Map preserves insertion
+  // order) until we're under the limit. Avoids an O(n) pass on
+  // every call by checking the size once and short-circuiting on
+  // the common case where the cap isn't hit.
+  if (toolsCache.size > MAX_TOOLS_CACHE_ENTRIES) {
+    const toDrop = toolsCache.size - MAX_TOOLS_CACHE_ENTRIES;
+    let dropped = 0;
+    for (const key of toolsCache.keys()) {
+      if (dropped >= toDrop) break;
+      toolsCache.delete(key);
+      dropped++;
+    }
+  }
+}
+
+export function clearCachedToolsForProject(projectId: string): void {
+  toolsCache.delete(projectId);
 }
 
 /** Godot MCP Service — manages the MCP server lifecycle */
@@ -204,6 +312,10 @@ export class GodotMCPService {
   private initialized = false;
   private stdoutBuffer = "";
   private readonly MAX_STDOUT_BUFFER = 1024 * 1024; // 1MB cap to prevent OOM
+  /** 11-M7: set true by `stop()` so the child-process "exit" listener
+   * can distinguish a graceful shutdown from a crash and avoid emitting
+   * a misleading warning. */
+  private intentionalStop = false;
   /** Absolute path of the Godot project (detected from MCP responses) */
   private godotProjectDir: string | null = null;
   /** Workspace-relative path for rewriting Godot paths */
@@ -221,8 +333,22 @@ export class GodotMCPService {
   async start(): Promise<void> {
     if (this.isRunning) return;
 
+    // 15-H-start-reentry: if a previous start() partially failed (spawn
+    // succeeded but handshake errored, or setupGodotMCPServer threw
+    // after we attached listeners), this.process may be set while
+    // isRunning is false. Without this guard, re-calling start() would
+    // spawn a SECOND child, leak the first one (its listeners are
+    // overwritten when we re-assign this.process), and never call
+    // cleanup on the orphan. The orphan runs forever, holds a stdin
+    // pipe, and would surface as a zombie process on every project.
+    if (this.process) {
+      logger.warn({ event: "godot_mcp_start_reentry_cleanup" }, "start() called with orphaned process — cleaning up before re-spawn");
+      this.cleanup();
+    }
+
     // Auto-setup: install dependencies and build if needed
-    const setupResult = setupGodotMCPServer();
+    // 28-H-godot-mcp-async-exec: setupGodotMCPServer is now async.
+    const setupResult = await setupGodotMCPServer();
     if (!setupResult.success) {
       throw new Error(`Failed to setup Godot MCP server: ${setupResult.error}`);
     }
@@ -231,20 +357,45 @@ export class GodotMCPService {
     if (this.mode === "minimal") modeArgs.push("--minimal");
     else if (this.mode === "lite") modeArgs.push("--lite");
 
-    // Spawn MCP server with stdio transport
+    // Spawn MCP server with stdio transport.
+    // 12-C13: do NOT inherit the full parent env. The MCP server is a
+    // Godot-editor bridge — it only needs to resolve `node` and the
+    // Godot binary on PATH. Inheriting the full env leaks the parent
+    // process's secrets (ZAI_API_KEY, API_SECRET, DATABASE_URL, etc.)
+    // into a child process that, if compromised via the Godot plugin
+    // surface, would expose every backend credential. Pass only the
+    // minimal set the stdio transport actually needs.
+    const childEnv: NodeJS.ProcessEnv = {};
+    if (process.env.PATH) childEnv.PATH = process.env.PATH;
+    if (process.env.HOME) childEnv.HOME = process.env.HOME;
+    if (process.platform === "win32" && process.env.SYSTEMROOT) {
+      childEnv.SYSTEMROOT = process.env.SYSTEMROOT;
+    }
     this.process = spawn("node", [this.serverPath, ...modeArgs], {
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env },
+      env: childEnv,
     });
 
     // Handle stdout — read JSON-RPC responses
     this.process.stdout?.on("data", (chunk: Buffer) => {
       this.stdoutBuffer += chunk.toString();
-      // Cap buffer to prevent OOM from runaway MCP output
+      // Cap buffer to prevent OOM from runaway MCP output. Slice at the last
+      // newline before the cap so we never throw away the start of an
+      // in-flight JSON-RPC message. The previous implementation sliced at a
+      // raw byte offset, which could straddle a message boundary and silently
+      // drop a response.
       if (this.stdoutBuffer.length > this.MAX_STDOUT_BUFFER) {
-        const discarded = this.stdoutBuffer.length - this.MAX_STDOUT_BUFFER;
-        this.stdoutBuffer = this.stdoutBuffer.slice(discarded);
-        logger.warn({ discarded, event: "godot_mcp_buffer_overflow" }, "MCP stdout buffer overflow — discarded old data");
+        const excess = this.stdoutBuffer.length - this.MAX_STDOUT_BUFFER;
+        const lastNewline = this.stdoutBuffer.indexOf("\n", excess);
+        if (lastNewline === -1) {
+          // No newline found in the excess — fall back to dropping the
+          // entire pre-excess region as malformed input (better than OOM).
+          this.stdoutBuffer = this.stdoutBuffer.slice(excess);
+          logger.warn({ excess, event: "godot_mcp_buffer_overflow_no_newline" }, "MCP stdout buffer overflow with no newline — dropped pre-excess data");
+        } else {
+          this.stdoutBuffer = this.stdoutBuffer.slice(lastNewline + 1);
+          logger.warn({ droppedBytes: lastNewline, event: "godot_mcp_buffer_overflow" }, "MCP stdout buffer overflow — dropped data up to last newline");
+        }
       }
       this.processStdout();
     });
@@ -257,22 +408,96 @@ export class GodotMCPService {
       }
     });
 
-    // Handle process exit
+    // Handle process exit.
+    // 11-M7: distinguish an intentional `stop()` from an unexpected
+    // exit. `this.intentionalStop` is set to true at the top of
+    // `stop()`, so when SIGTERM fires this listener we log at info
+    // instead of warn. Without this, every graceful service shutdown
+    // emitted a misleading "MCP server exited" warning into the logs.
     this.process.on("exit", (code, signal) => {
-      logger.warn({ code, signal, event: "godot_mcp_exit" }, "MCP server exited");
+      if (this.intentionalStop) {
+        logger.info({ code, signal, event: "godot_mcp_exit_clean" }, "MCP server stopped cleanly");
+      } else {
+        logger.warn({ code, signal, event: "godot_mcp_exit" }, "MCP server exited unexpectedly");
+      }
       this.cleanup();
     });
 
     this.process.on("error", (err) => {
       logger.error({ error: err.message, event: "godot_mcp_error" }, "MCP process error");
+      // 15-H-error-no-cleanup: Node's spawn fires `error` (and NOT
+      // `exit`) on ENOENT/EACCES for the binary, or on EPIPE if the
+      // process dies before the handshake. Without this call, the
+      // pendingRequests map is never cleared, this.process is never
+      // nulled, and a subsequent executeTool() races against a dead
+      // stdin. cleanup() nulls the process and aborts the in-flight
+      // requests with a clear error.
+      this.cleanup();
     });
 
-    // Wait briefly for server to initialize
-    await new Promise((r) => setTimeout(r, 1000));
+    // Wait for the MCP `initialize` JSON-RPC handshake to actually complete
+    // before flipping isRunning. The previous 1-second setTimeout was a
+    // best-effort guess — the server may take longer to import modules, and
+    // `executeTool` calls in the meantime could race with init and receive
+    // "method not found" responses. We send the standard MCP initialize
+    // request and await the result, with a generous timeout.
+    try {
+      await this.sendInitializeHandshake();
+      this.initialized = true;
+    } catch (initErr) {
+      logger.warn(
+        { error: initErr instanceof Error ? initErr.message : String(initErr), event: "godot_mcp_init_failed" },
+        "MCP initialize handshake did not complete — service will start in degraded mode",
+      );
+    }
     this.isRunning = true;
-    this.initialized = true;
 
     logger.info({ mode: this.mode, event: "godot_mcp_start" }, "Service started");
+  }
+
+  /** Send the standard MCP `initialize` JSON-RPC request and await the
+   * server's `result` (which contains its protocol version and capabilities).
+   * This replaces the previous "sleep 1s and hope" pattern. */
+  private sendInitializeHandshake(): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      // 23-M-init-handshake-id: use randomUUID() (already imported at
+      // line 16) for the JSON-RPC request id instead of
+      // `init-${Date.now()}`. Low real-world risk — there's only one
+      // initialize per process lifetime, the response is matched by
+      // the `pendingRequests` Map — but the pattern was wrong and
+      // easy to copy into other call sites. Line 488 already uses
+      // `randomUUID()` for the other MCP requests; this was the
+      // leftover.
+      const id = randomUUID();
+      const timer = setTimeout(
+        () => reject(new Error("MCP initialize handshake timed out after 5s")),
+        5000,
+      );
+      this.pendingRequests.set(id, {
+        resolve: (val) => { clearTimeout(timer); resolve(val); },
+        reject: (err) => { clearTimeout(timer); reject(err); },
+        // Store the real timer so the centralized timeout-clear path
+        // (when a response arrives) clears the right handle.
+        timeout: timer,
+      });
+      const initRequest = {
+        jsonrpc: "2.0" as const,
+        id,
+        method: "initialize",
+        params: {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: { name: "game-control-plane", version: "0.1.0" },
+        },
+      };
+      try {
+        this.process?.stdin?.write(JSON.stringify(initRequest) + "\n");
+      } catch (writeErr) {
+        clearTimeout(timer);
+        this.pendingRequests.delete(id);
+        reject(writeErr);
+      }
+    });
   }
 
   private processStdout() {
@@ -324,36 +549,85 @@ export class GodotMCPService {
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pendingRequests.delete(id);
+        // 18-H-mcp-no-cancel: best-effort JSON-RPC cancellation
+        // notification to the MCP server. The server doesn't know
+        // we gave up; its `tools/call` continues to run on the
+        // Godot side (a long mcp__godot_run_project test), holding
+        // the Godot editor's WS connection. When the response
+        // eventually arrives, processStdout sees no matching id and
+        // silently drops it — the work was wasted, and the orphan
+        // call blocks subsequent calls. JSON-RPC 2.0 § 4.5 allows
+        // notifications/cancelled as a hint; the server is free to
+        // ignore it, but Godot's MCP server honors the cancellation
+        // request. Failures here are non-fatal — the timeout
+        // rejection is what the caller sees.
+        try {
+          const cancelNotification = {
+            jsonrpc: "2.0",
+            method: "notifications/cancelled",
+            params: { id, reason: "client timeout" },
+          };
+          this.process!.stdin!.write(JSON.stringify(cancelNotification) + "\n");
+        } catch (cancelErr) {
+          logger.warn(
+            { method, id, err: cancelErr instanceof Error ? cancelErr.message : String(cancelErr), event: "godot_mcp_cancel_write_failed" },
+            "Failed to send MCP cancel notification — server will receive late response that will be dropped",
+          );
+        }
         logger.error({ method, id, event: "godot_mcp_timeout" }, `MCP request timed out: ${method}`);
         reject(new Error(`Request '${method}' timed out after ${this.timeout}ms`));
       }, this.timeout);
 
       this.pendingRequests.set(id, { resolve, reject, timeout });
 
-      // Write JSON-RPC request to stdin
+      // Write JSON-RPC request to stdin. If the MCP server's stdin has
+      // been closed (server died, but the `exit` event hasn't fired yet),
+      // Node raises EPIPE synchronously here. Without the try/catch that
+      // bubbles up as an unhandled promise rejection, leaving the
+      // pending request in the Map until the timeout eventually fires.
+      // Rejecting eagerly keeps the error visible at the request site
+      // and frees the id for the next caller.
       const data = JSON.stringify(request) + "\n";
-      this.process!.stdin!.write(data);
+      try {
+        this.process!.stdin!.write(data);
+      } catch (err) {
+        clearTimeout(timeout);
+        this.pendingRequests.delete(id);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
     });
   }
 
   /**
    * Rewrite absolute file paths from Godot to workspace-relative paths.
-   * Godot returns absolute paths like /Users/cursor/some-folder/godot-test-1/scene.gd
+   * Godot returns absolute paths like
+   *   /Users/cursor/some-folder/godot-test-1/scene.gd        (macOS)
+   *   /home/ci-runner/some-folder/godot-test-1/scene.gd      (Linux)
+   *   C:\Users\ci-runner\some-folder\godot-test-1\scene.gd   (Windows)
    * We rewrite these to ./workspace/godot-test-1/scene.gd for the LLM.
    */
   private rewritePaths(result: string): string {
-    // Detect the Godot project directory from the result
-    // Godot typically returns paths containing the project directory name
+    // 10-C7: detect the project directory regardless of host platform.
+    // The previous regex was hardcoded to `/Users/...` which only
+    // matched macOS. On Linux (Railway, CI) and Windows the regex
+    // never matched, so `godotProjectDir` was never set, and the
+    // path-rewriter silently no-op'd. Use the home directory from
+    // os.homedir() (works on all platforms) as the prefix anchor.
     if (!this.godotProjectDir && this.workspaceRelativePath) {
-      // Look for the project name in absolute paths like /Users/xxx/.../project-name/
-      // Match up to the project directory and capture the full path prefix
+      const homeDir = os.homedir();
+      const escapedHome = homeDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const escapedProjectName = this.workspaceRelativePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const projectMatch = result.match(new RegExp(`(/Users/[^/]+/[^/]+/${escapedProjectName}/)`));
+      // Match either POSIX or Windows separators inside the captured prefix.
+      // The trailing segment is the project-name; everything before the
+      // project-name is the prefix we want to substitute.
+      const projectMatch = result.match(
+        new RegExp(`(?:${escapedHome}[/\\\\][^/\\\\]+(?:[/\\\\][^/\\\\]+)*[/\\\\]${escapedProjectName})[/\\\\]`),
+      );
       if (projectMatch) {
-        this.godotProjectDir = projectMatch[1].replace(/\/$/, "");
+        this.godotProjectDir = projectMatch[0].replace(/[/\\\\]$/, "");
         logger.info(
-          { godotDir: this.godotProjectDir, workspaceRelative: this.workspaceRelativePath },
-          "Detected Godot project directory"
+          { godotDir: this.godotProjectDir, workspaceRelative: this.workspaceRelativePath, event: "godot_project_dir_detected" },
+          "Detected Godot project directory",
         );
       }
     }
@@ -363,7 +637,7 @@ export class GodotMCPService {
     }
 
     // Replace the absolute Godot path prefix with workspace-relative path
-    // e.g., /Users/choguun/Documents/cursor/godot-test-1 → ./workspace/godot-test-1
+    // e.g., /home/ci-runner/.../godot-test-1 → ./workspace/godot-test-1
     const relativeWorkspace = `./workspace/${this.workspaceRelativePath}`;
     return result.split(this.godotProjectDir).join(relativeWorkspace);
   }
@@ -372,6 +646,14 @@ export class GodotMCPService {
   async executeTool(name: string, params: Record<string, unknown>): Promise<string> {
     if (!this.isRunning) {
       return `Error: GodotMCPService is not running. Call start() first.`;
+    }
+    // 10-H9: refuse tool calls until the JSON-RPC handshake has completed.
+    // The previous code accepted requests as soon as the child process was
+    // spawned — but the server may take 1-2s to import modules before it
+    // can answer `tools/call`. Calls arriving in that window would return
+    // "method not found" errors that look like real Godot failures.
+    if (!this.initialized) {
+      return `Error: GodotMCPService is starting up — initialize handshake has not completed. Retry shortly.`;
     }
 
     try {
@@ -480,6 +762,8 @@ export class GodotMCPService {
     if (!this.isRunning) return;
 
     logger.info({ event: "godot_mcp_stop" }, "Stopping service");
+    // 11-M7: tell the child-process "exit" listener this is graceful.
+    this.intentionalStop = true;
 
     // Clear pending requests
     for (const [, pending] of this.pendingRequests) {
@@ -495,16 +779,32 @@ export class GodotMCPService {
       proc.kill("SIGTERM");
       this.process = null;
 
-      // Force kill if SIGTERM didn't work within 5s
+      // Force kill if SIGTERM didn't work within 5s. Track the handle on
+      // the proc so the process-exit path can clearTimeout it — otherwise
+      // a process that dies within 5s of SIGTERM leaves a phantom timer
+      // whose callback fires and tries to kill a PID that's been reused.
       const forceKillTimer = setTimeout(() => {
         try {
-          if (proc.pid) {
-            process.kill(proc.pid, "SIGKILL");
+          // 12-C9: guard against PID reuse. Between SIGTERM and the 5s
+          // timer, the proc may have exited and the OS could have
+          // assigned the same PID to another process. Using
+          // `proc.kill(SIGKILL)` (instead of `process.kill(proc.pid, ...)`)
+          // is safer because Node tracks the proc handle's state — if
+          // the proc already exited, this is a no-op. We also check
+          // exitCode/killed defensively in case the exit listener
+          // hasn't run yet.
+          if (proc.exitCode !== null || proc.killed) return;
+          if (proc.kill("SIGKILL")) {
             logger.warn({ pid: proc.pid, event: "godot_mcp_force_kill" }, "Force-killed hung MCP server process");
           }
         } catch { /* already dead */ }
       }, 5000);
       forceKillTimer.unref();
+      (proc as { _forceKillTimer?: ReturnType<typeof setTimeout> })._forceKillTimer = forceKillTimer;
+      proc.once("exit", () => {
+        const t = (proc as { _forceKillTimer?: ReturnType<typeof setTimeout> })._forceKillTimer;
+        if (t) clearTimeout(t);
+      });
     }
 
     this.isRunning = false;
@@ -520,6 +820,19 @@ export class GodotMCPService {
       pending.reject(new Error("MCP server process exited"));
     }
     this.pendingRequests.clear();
+    // 12-H1: clear the stdout buffer. Without this, a tail of
+    // partial-JSON data from a previous run sits in the buffer until
+    // the next start() appends to it. processStdout() then sees a
+    // mix of stale tail + new chunks and tries to parse the
+    // concatenation — JSON.parse fails on most lines, but a lucky
+    // concatenation could parse as a malformed response and either
+    // get dropped (best case) or be misinterpreted as a legitimate
+    // response with a new id (worst case, but pendingRequests is
+    // empty post-cleanup so the new id wouldn't match anything).
+    // Either way, parsing stale input burns CPU on every event and
+    // pollutes the logs with `godot_mcp_stdout` noise. Reset to a
+    // known-empty state.
+    this.stdoutBuffer = "";
   }
 }
 
@@ -534,6 +847,14 @@ export async function getOrCreateGodotMCPService(
   projectId: string,
   options?: GodotMCPServiceOptions
 ): Promise<GodotMCPService> {
+  // 15-H-shutdown-race: short-circuit any race that fires AFTER
+  // shutdownAllMCPServices. The shutdown clears both maps but a
+  // request in flight that hits the route handler at the wrong
+  // moment would still try to spawn a new child. The flag is the
+  // belt; the map clear is the suspenders.
+  if (shuttingDown) {
+    throw new Error("MCP services are shutting down — cannot create new services");
+  }
   const existing = activeServices.get(projectId);
   if (existing) return existing;
 
@@ -563,13 +884,53 @@ export async function removeGodotMCPService(projectId: string): Promise<void> {
     await service.stop();
     activeServices.delete(projectId);
   }
+  // 12-H12: also clear the tools cache. Without this, a project
+  // that was deleted and re-created with the same id would inherit
+  // a stale tools list from the previous instance. The cache TTL
+  // (5 minutes) would eventually clear it, but the user would see
+  // "tool not found" errors until then. Eager cleanup is cheap.
+  clearCachedToolsForProject(projectId);
 }
 
 /** Stop all active MCP services (for graceful shutdown) */
 export async function shutdownAllMCPServices(): Promise<void> {
+  // 15-H-shutdown-race: set the backstop flag FIRST so any in-flight
+  // getOrCreate that races past the map check below still throws.
+  shuttingDown = true;
+  // 15-H-shutdown-race: clear AFTER awaiting the stops, not before.
+  // The previous order (clear → await stop) let a concurrent
+  // getOrCreateGodotMCPService see an empty map during the stop
+  // window, spawn a new child process, and call activeServices.set
+  // — leaving two MCP servers running for the same projectId. Now:
+  // mark intent first, then await, then clear.
+  //
+  // 15-H-pending-creations: pendingCreations entries that resolve
+  // AFTER shutdown would call activeServices.set on a torn-down map,
+  // creating a zombie service that never gets stopped. Drain
+  // pendingCreations too so a creation that fires during shutdown
+  // doesn't escape.
   const entries = [...activeServices.entries()];
-  activeServices.clear();
+  for (const [, service] of entries) {
+    // Best-effort: the service may already be stopping; ignore the
+    // race (stop() is idempotent thanks to intentionalStop).
+    void service.stop();
+  }
   await Promise.allSettled(entries.map(([, service]) => service.stop()));
+  // Clear both registries AFTER the await. A getOrCreate that races
+  // after this point sees an empty map and would re-spawn; guard
+  // against that with the shutdown flag below.
+  activeServices.clear();
+  pendingCreations.clear();
+}
+
+// 15-H-shutdown-race: a getOrCreate call that races AFTER the await
+// but BEFORE this function returns would see an empty map and spawn
+// a new service. The flag is a belt-and-suspenders backstop — the
+// real fix is to clear maps last, but the flag also covers
+// pendingCreations that resolve mid-shutdown.
+let shuttingDown = false;
+export function isShuttingDown(): boolean {
+  return shuttingDown;
 }
 
 /** Get the active service for a project (null if not running) */
@@ -579,8 +940,7 @@ export function getGodotMCPService(projectId: string): GodotMCPService | null {
 
 // ─── Plugin Auto-Installation ──────────────────────────────────────────
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, cpSync, readdirSync } from "node:fs";
-import { join, resolve } from "node:path";
+import * as fsp from "node:fs/promises";
 
 /** Result of a plugin installation attempt */
 export interface InstallPluginResult {
@@ -600,10 +960,17 @@ export interface InstallPluginResult {
  * @param projectDir - Absolute path to the Godot project directory
  * @param workspaceDir - The workspace directory (for finding godot-mcp-pro)
  */
-export function installGodotMCPPlugin(
+// 16-H-install-plugin-async: previously this used `cpSync` / `readFileSync`
+// / `writeFileSync` / `rmSync` synchronously. The Godot MCP plugin folder
+// contains 50+ small files; `cpSync` of all of them blocks the Node event
+// loop for 100ms+ on slow disks (Docker volumes, NFS, encrypted home
+// dirs). The HTTP handler that calls this serialized every other
+// incoming request for the duration. Matches the 11-M5 pattern in
+// dashboard.ts:writeDemoGodotProject — keep the ergonomics, just yield.
+export async function installGodotMCPPlugin(
   projectDir: string,
   workspaceDir: string
-): InstallPluginResult {
+): Promise<InstallPluginResult> {
   const result: InstallPluginResult = {
     success: false,
     pluginCopied: false,
@@ -614,109 +981,107 @@ export function installGodotMCPPlugin(
     // Find the godot-mcp-pro addons folder - check multiple possible locations
     const possiblePaths = [
       // Next to workspace (common setup)
-      resolve(workspaceDir, "..", "godot-mcp-pro-v1.11.0", "addons", "godot_mcp"),
+      resolve(workspaceDir, "..", `godot-mcp-pro-${GODOT_MCP_PRO_VERSION}`, "addons", "godot_mcp"),
       // Inside workspace
-      resolve(workspaceDir, "godot-mcp-pro-v1.11.0", "addons", "godot_mcp"),
-      // Current working directory
-      resolve(process.cwd(), "godot-mcp-pro-v1.11.0", "addons", "godot_mcp"),
-      // Parent of current working directory
-      resolve(process.cwd(), "..", "godot-mcp-pro-v1.11.0", "addons", "godot_mcp"),
+      resolve(workspaceDir, `godot-mcp-pro-${GODOT_MCP_PRO_VERSION}`, "addons", "godot_mcp"),
+      // From the repo root (the canonical install location — anchors
+      // on this file's location, not process.cwd(), so dev and Docker
+      // agree about where the package is).
+      resolve(REPO_ROOT_FROM_THIS_FILE, `godot-mcp-pro-${GODOT_MCP_PRO_VERSION}`, "addons", "godot_mcp"),
       // Parent of workspace parent
-      resolve(workspaceDir, "..", "..", "godot-mcp-pro-v1.11.0", "addons", "godot_mcp"),
+      resolve(workspaceDir, "..", "..", `godot-mcp-pro-${GODOT_MCP_PRO_VERSION}`, "addons", "godot_mcp"),
     ];
 
     let sourcePath: string | null = null;
     for (const candidate of possiblePaths) {
+      // existsSync is fine here — it's a single stat call, not a recursive
+      // copy. Using fsp.access in a loop would multiply the round trips.
       if (existsSync(candidate)) {
         sourcePath = candidate;
-        logger.info({ sourcePath: candidate }, "Found Godot MCP plugin");
+        logger.info({ sourcePath: candidate, event: "godot_mcp_plugin_found" }, "Found Godot MCP plugin");
         break;
       }
     }
 
     if (!sourcePath) {
-      result.error = `Godot MCP plugin not found. Searched:\n${possiblePaths.map(p => `  - ${p}`).join("\n")}\n\nMake sure godot-mcp-pro-v1.11.0 is in the project root.`;
-      logger.error({ searched: possiblePaths }, "Godot MCP plugin source not found");
+      result.error = `Godot MCP plugin not found. Searched:\n${possiblePaths.map(p => `  - ${p}`).join("\n")}\n\nMake sure godot-mcp-pro-${GODOT_MCP_PRO_VERSION} is in the project root.`;
+      logger.error({ searched: possiblePaths, event: "godot_mcp_plugin_source_missing" }, "Godot MCP plugin source not found");
       return result;
     }
 
     // Create project's addons directory if it doesn't exist
     const projectAddonsDir = join(projectDir, "addons");
-    if (!existsSync(projectAddonsDir)) {
-      mkdirSync(projectAddonsDir, { recursive: true });
-    }
+    await fsp.mkdir(projectAddonsDir, { recursive: true });
 
     // Copy the godot_mcp folder to the project's addons directory
     const projectPluginDir = join(projectAddonsDir, "godot_mcp");
 
-    // Remove existing plugin folder if it exists (for clean reinstall)
-    if (existsSync(projectPluginDir)) {
-      // Use rmSync if available (Node 14.14+), otherwise skip
-      try {
-        const { rmSync } = require("node:fs");
-        rmSync(projectPluginDir, { recursive: true, force: true });
-      } catch {
-        // Fallback: skip removal, just overwrite
-      }
-    }
+    // Remove existing plugin folder if it exists (for clean reinstall).
+    // fsp.rm with force:true is idempotent — no need to existsSync first.
+    await fsp.rm(projectPluginDir, { recursive: true, force: true });
 
     // Copy the plugin files
-    cpSync(sourcePath, projectPluginDir, { recursive: true });
+    await fsp.cp(sourcePath, projectPluginDir, { recursive: true });
     result.pluginCopied = true;
-    logger.info({ sourcePath, destPath: projectPluginDir }, "Godot MCP plugin copied");
+    logger.info({ sourcePath, destPath: projectPluginDir, event: "godot_mcp_plugin_copied" }, "Godot MCP plugin copied");
 
     // Enable the plugin in project.godot (Godot 4 format)
     const projectGodotPath = join(projectDir, "project.godot");
-    if (existsSync(projectGodotPath)) {
-      let projectGodotContent = readFileSync(projectGodotPath, "utf-8");
-      const pluginCfgPath = "res://addons/godot_mcp/plugin.cfg";
-
-      // Check if already enabled in Godot 4 format ([editor_plugins])
-      if (projectGodotContent.includes(pluginCfgPath)) {
-        result.pluginEnabled = true;
-      } else {
-        // Remove any Godot 3 format [plugins] entries
-        projectGodotContent = projectGodotContent.replace(
-          /\[plugins\][^\[]*?"Godot MCP Pro"\/enable="[^"]*"[^\[]*?\n/g,
-          ""
-        );
-
-        if (projectGodotContent.includes("[editor_plugins]")) {
-          // Append to existing [editor_plugins] section
-          projectGodotContent = projectGodotContent.replace(
-            /\[editor_plugins\]\s*\nenabled=PackedStringArray\(([^)]*)\)/,
-            (_, existing: string) => {
-              if (existing.includes(pluginCfgPath)) return `enabled=PackedStringArray(${existing})`;
-              return `enabled=PackedStringArray(${existing}, "${pluginCfgPath}")`;
-            }
-          );
-          // Fallback: if regex didn't match the PackedStringArray pattern, just add after section header
-          if (!projectGodotContent.includes(pluginCfgPath)) {
-            projectGodotContent = projectGodotContent.replace(
-              /\[editor_plugins\]/,
-              `[editor_plugins]\n\nenabled=PackedStringArray("${pluginCfgPath}")`
-            );
-          }
-        } else {
-          // Add new [editor_plugins] section
-          const pluginEntry = `\n[editor_plugins]\n\nenabled=PackedStringArray("${pluginCfgPath}")\n`;
-          projectGodotContent += pluginEntry;
-        }
-
-        writeFileSync(projectGodotPath, projectGodotContent, "utf-8");
-        result.pluginEnabled = true;
-        logger.info({ projectGodotPath }, "Godot MCP plugin enabled in project.godot (Godot 4 format)");
+    let projectGodotContent: string;
+    try {
+      projectGodotContent = await fsp.readFile(projectGodotPath, "utf-8");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        result.error = `project.godot not found at ${projectGodotPath}`;
+        return result;
       }
+      throw err;
+    }
+
+    const pluginCfgPath = "res://addons/godot_mcp/plugin.cfg";
+
+    // Check if already enabled in Godot 4 format ([editor_plugins])
+    if (projectGodotContent.includes(pluginCfgPath)) {
+      result.pluginEnabled = true;
     } else {
-      result.error = `project.godot not found at ${projectGodotPath}`;
-      return result;
+      // Remove any Godot 3 format [plugins] entries
+      projectGodotContent = projectGodotContent.replace(
+        /\[plugins\][^\[]*?"Godot MCP Pro"\/enable="[^"]*"[^\[]*?\n/g,
+        ""
+      );
+
+      if (projectGodotContent.includes("[editor_plugins]")) {
+        // Append to existing [editor_plugins] section
+        projectGodotContent = projectGodotContent.replace(
+          /\[editor_plugins\]\s*\nenabled=PackedStringArray\(([^)]*)\)/,
+          (_, existing: string) => {
+            if (existing.includes(pluginCfgPath)) return `enabled=PackedStringArray(${existing})`;
+            return `enabled=PackedStringArray(${existing}, "${pluginCfgPath}")`;
+          }
+        );
+        // Fallback: if regex didn't match the PackedStringArray pattern, just add after section header
+        if (!projectGodotContent.includes(pluginCfgPath)) {
+          projectGodotContent = projectGodotContent.replace(
+            /\[editor_plugins\]/,
+            `[editor_plugins]\n\nenabled=PackedStringArray("${pluginCfgPath}")`
+          );
+        }
+      } else {
+        // Add new [editor_plugins] section
+        const pluginEntry = `\n[editor_plugins]\n\nenabled=PackedStringArray("${pluginCfgPath}")\n`;
+        projectGodotContent += pluginEntry;
+      }
+
+      await fsp.writeFile(projectGodotPath, projectGodotContent, "utf-8");
+      result.pluginEnabled = true;
+      logger.info({ projectGodotPath, event: "godot_mcp_plugin_enabled" }, "Godot MCP plugin enabled in project.godot (Godot 4 format)");
     }
 
     result.success = true;
   } catch (err) {
     const error = err as Error;
     result.error = error.message;
-    logger.error({ error: error.message }, "Failed to install Godot MCP plugin");
+    logger.error({ error: error.message, event: "godot_mcp_plugin_install_failed" }, "Failed to install Godot MCP plugin");
   }
 
   return result;
@@ -738,13 +1103,22 @@ export function isGodotMCPPluginInstalled(projectDir: string): boolean {
  *
  * @param projectDir - Absolute path to the Godot project directory
  */
-export function isGodotMCPPluginEnabled(projectDir: string): boolean {
+// 28-H-godot-mcp-async-read: converted from sync readFileSync to
+// async readFile. The function is called from launchGodotEditor
+// (every "Launch Godot" click) and previously blocked the event
+// loop for the duration of a stat + read. The signature change
+// forces the (one) call site to await.
+export async function isGodotMCPPluginEnabled(projectDir: string): Promise<boolean> {
   const projectGodotPath = join(projectDir, "project.godot");
   if (!existsSync(projectGodotPath)) return false;
 
-  const content = readFileSync(projectGodotPath, "utf-8");
-  // Check Godot 4 format ([editor_plugins] with plugin.cfg path)
-  return content.includes("res://addons/godot_mcp/plugin.cfg");
+  try {
+    const content = await fsp.readFile(projectGodotPath, "utf-8");
+    // Check Godot 4 format ([editor_plugins] with plugin.cfg path)
+    return content.includes("res://addons/godot_mcp/plugin.cfg");
+  } catch {
+    return false;
+  }
 }
 
 // ─── Godot Editor Launch ──────────────────────────────────────────────────
@@ -755,30 +1129,36 @@ export function isGodotMCPPluginEnabled(projectDir: string): boolean {
  * Ensures the MCP plugin is installed and enabled in project.godot
  * before launching. Uses Godot 4 [editor_plugins] format.
  */
-export function launchGodotEditor(projectDir: string): { success: boolean; pid?: number; error?: string } {
+export async function launchGodotEditor(projectDir: string): Promise<{ success: boolean; pid?: number; error?: string }> {
   const platform = process.platform; // "darwin" | "linux" | "win32"
 
   // Ensure plugin is installed and enabled before launching
-  if (!isGodotMCPPluginInstalled(projectDir) || !isGodotMCPPluginEnabled(projectDir)) {
+  if (!isGodotMCPPluginInstalled(projectDir) || !(await isGodotMCPPluginEnabled(projectDir))) {
     const config = loadConfig();
-    const installResult = installGodotMCPPlugin(projectDir, config.WORKSPACE_DIR);
+    const installResult = await installGodotMCPPlugin(projectDir, config.WORKSPACE_DIR);
     if (!installResult.success) {
-      logger.warn({ projectDir, error: installResult.error }, "Could not install/enable Godot MCP plugin before launch");
+      logger.warn({ projectDir, error: installResult.error, event: "godot_mcp_plugin_install_skipped" }, "Could not install/enable Godot MCP plugin before launch");
     }
   }
 
-  // Check if Godot is already running
-  const isAlreadyRunning = (): number | null => {
+  // 28-H-godot-mcp-async-exec: converted from sync execFileSync
+  // (event-loop block during /proc scan) to async execFileAsync.
+  // The pgrep path on macOS/Linux can spike to 30-50ms on busy
+  // CI runners; the launchGodotEditor route awaits this directly.
+  const isAlreadyRunning = async (): Promise<number | null> => {
     try {
       if (platform === "win32") {
         // Windows: use tasklist
-        const output = execSync('tasklist /FI "IMAGENAME eq Godot.exe" /NH', { encoding: "utf-8", stdio: ["pipe", "pipe", "ignore"] });
-        const match = output.match(/Godot\.exe\s+(\d+)/);
+        const { stdout } = await execFileAsync("tasklist", ["/FI", "IMAGENAME eq Godot.exe", "/NH"], { encoding: "utf-8", timeout: 5_000 });
+        const match = stdout.match(/Godot\.exe\s+(\d+)/);
         if (match) return parseInt(match[1], 10);
       } else {
-        // macOS / Linux: use pgrep
-        const output = execSync("pgrep -xi Godot 2>/dev/null || true", { encoding: "utf-8", stdio: ["pipe", "pipe", "ignore"] }).trim();
-        if (output) return parseInt(output.split("\n")[0], 10);
+        // macOS / Linux: use pgrep. -x matches the exact process name
+        // (not a substring), so a system process that happens to contain
+        // "Godot" in its full command line doesn't get matched.
+        const { stdout } = await execFileAsync("pgrep", ["-xi", "Godot"], { encoding: "utf-8", timeout: 5_000 });
+        const trimmed = stdout.trim();
+        if (trimmed) return parseInt(trimmed.split("\n")[0], 10);
       }
     } catch {
       // Process not found — proceed to launch
@@ -786,15 +1166,15 @@ export function launchGodotEditor(projectDir: string): { success: boolean; pid?:
     return null;
   };
 
-  const existingPid = isAlreadyRunning();
+  const existingPid = await isAlreadyRunning();
   if (existingPid) {
-    logger.info({ projectDir, existingPid }, "Godot editor already running, skipping launch");
+    logger.info({ projectDir, existingPid, event: "godot_editor_already_running" }, "Godot editor already running, skipping launch");
     return { success: true, pid: existingPid };
   }
 
   // Find Godot binary — platform-specific candidates
   const localAppData = process.env.LOCALAPPDATA ?? "";
-  const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
+  const home = resolveHomeDir() ?? "";
   const candidates: string[] = platform === "win32" ? [
     // Windows: Program Files, user installs, Steam
     "C:\\Program Files\\Godot\\Godot.exe",
@@ -820,8 +1200,15 @@ export function launchGodotEditor(projectDir: string): { success: boolean; pid?:
     ...(home ? globSync(`${home}/.local/bin/godot*`) : []),
   ];
 
-  // Check env var override first (highest priority)
-  let godotBin: string | null = process.env.GODOT_EDITOR_PATH ?? null;
+  // Check env var override first (highest priority).
+  // 24-M-env-var-drift-schema-orphan: GODOT_EDITOR_PATH is read
+  // here but was missing from the Zod schema entirely. The schema
+  // listed GODOT_BIN but not GODOT_EDITOR_PATH — the runtime and
+  // the schema disagreed about what the env var is *named*. Add
+  // GODOT_EDITOR_PATH to the schema (see config.ts:67 in this
+  // commit) and consume the validated value here so the single
+  // Zod-validated path is the only one.
+  let godotBin: string | null = loadConfig().GODOT_EDITOR_PATH || null;
 
   // Auto-detect if no env override
   if (!godotBin) {
@@ -844,11 +1231,11 @@ export function launchGodotEditor(projectDir: string): { success: boolean; pid?:
     });
     proc.unref();
 
-    logger.info({ godotBin, projectDir, pid: proc.pid }, "Godot editor launched");
+    logger.info({ godotBin, projectDir, pid: proc.pid, event: "godot_editor_launched" }, "Godot editor launched");
     return { success: true, pid: proc.pid };
   } catch (err) {
     const error = err as Error;
-    logger.error({ error: error.message, godotBin, projectDir }, "Failed to launch Godot editor");
+    logger.error({ error: error.message, godotBin, projectDir, event: "godot_editor_launch_failed" }, "Failed to launch Godot editor");
     return { success: false, error: error.message };
   }
 }
@@ -868,18 +1255,17 @@ export interface SetupServerResult {
  * Returns the server directory (containing package.json and build/).
  */
 export function findServerDir(): string | null {
-  const cwd = process.cwd();
+  // Anchor at the repo root derived from this file's location
+  // (REPO_ROOT_FROM_THIS_FILE) — see 20-L-cwd above. process.cwd()
+  // varies between `apps/api/` (dev) and `/app/` (Docker), so any
+  // candidate built from it produces a non-existent path in
+  // production. The versioned directory is the canonical install
+  // location; the unversioned `godot-mcp-pro` directory is kept as
+  // a fallback for someone who cloned the package without the
+  // version suffix.
   const candidates = [
-    // API runs from apps/api, so go up to project root
-    resolve(cwd, "..", "..", "godot-mcp-pro-v1.11.0", "server"),
-    resolve(cwd, "godot-mcp-pro-v1.11.0", "server"),
-    resolve(cwd, "..", "godot-mcp-pro-v1.11.0", "server"),
-    resolve(cwd, "godot-mcp-pro", "server"),
-    resolve(cwd, "..", "godot-mcp-pro", "server"),
-    resolve(cwd, "..", "..", "godot-mcp-pro", "server"),
-    // From project root
-    resolve(cwd, "godot-mcp-pro-v1.11.0", "server"),
-    resolve(cwd, "..", "godot-mcp-pro-v1.11.0", "server"),
+    resolve(REPO_ROOT_FROM_THIS_FILE, `godot-mcp-pro-${GODOT_MCP_PRO_VERSION}`, "server"),
+    resolve(REPO_ROOT_FROM_THIS_FILE, "godot-mcp-pro", "server"),
   ];
 
   for (const candidate of candidates) {
@@ -915,9 +1301,13 @@ export function isDependenciesInstalled(serverDir: string): boolean {
  *
  * @param onProgress - Optional callback to report progress
  */
-export function setupGodotMCPServer(
+// 28-H-godot-mcp-async-exec: signature now async to accommodate
+// the awaited execFileAsync calls in the body. The route handler
+// already awaits this (POST /api/dashboard/setup-server) so the
+// call-site change is zero-impact.
+export async function setupGodotMCPServer(
   onProgress?: (stage: string) => void
-): SetupServerResult {
+): Promise<SetupServerResult> {
   const result: SetupServerResult = {
     success: false,
     installed: false,
@@ -927,28 +1317,38 @@ export function setupGodotMCPServer(
   try {
     const serverDir = findServerDir();
     if (!serverDir) {
-      result.error = `Could not find godot-mcp-pro server directory.\nSearched in:\n  - ${process.cwd()}/godot-mcp-pro-v1.11.0/server\n  - ${process.cwd()}/../godot-mcp-pro-v1.11.0/server\n\nMake sure godot-mcp-pro-v1.11.0 is in the project root.`;
-      logger.error({ searched: [process.cwd(), resolve(process.cwd(), "..")] }, "Godot MCP server not found");
+      // 20-L-cwd: surface the actual repo root we searched, not a
+      // process.cwd() that the operator can't interpret in Docker.
+      const repoRoot = REPO_ROOT_FROM_THIS_FILE;
+      result.error = `Could not find godot-mcp-pro server directory.\nSearched in:\n  - ${repoRoot}/godot-mcp-pro-${GODOT_MCP_PRO_VERSION}/server\n  - ${repoRoot}/godot-mcp-pro/server\n\nMake sure godot-mcp-pro-${GODOT_MCP_PRO_VERSION} is in the project root.`;
+      logger.error({ searched: [resolve(repoRoot, `godot-mcp-pro-${GODOT_MCP_PRO_VERSION}`), resolve(repoRoot, "godot-mcp-pro")], event: "godot_mcp_server_missing" }, "Godot MCP server not found");
       return result;
     }
 
-    logger.info({ serverDir }, "Found Godot MCP server");
+    logger.info({ serverDir, event: "godot_mcp_server_found" }, "Found Godot MCP server");
 
     // Step 1: Install dependencies if needed
     if (!isDependenciesInstalled(serverDir)) {
       onProgress?.("Installing npm dependencies...");
-      logger.info({ serverDir }, "Installing npm dependencies");
+      logger.info({ serverDir, event: "godot_mcp_npm_install_started" }, "Installing npm dependencies");
       try {
-        execSync("npm install", {
+        // 28-H-godot-mcp-async-exec: execFileAsync instead of
+        // execFileSync. execFile passes argv as a vector — no shell
+        // interpolation (a `execSync` shell route would be a small
+        // attack surface for any env that can write into serverDir).
+        // Async because `npm install` blocks the event loop for up
+        // to 2 minutes; the route handler awaits this directly.
+        // (stdio: "pipe" is the default for promisified execFile;
+        // explicit stdio was rejected by the type signature.)
+        await execFileAsync("npm", ["install"], {
           cwd: serverDir,
-          stdio: "pipe",
           timeout: 120000, // 2 minute timeout
         });
         result.installed = true;
-        logger.info({ serverDir }, "npm install completed");
+        logger.info({ serverDir, event: "godot_mcp_npm_install_completed" }, "npm install completed");
       } catch (err) {
         result.error = `npm install failed: ${(err as Error).message}`;
-        logger.error({ error: result.error, serverDir }, "npm install failed");
+        logger.error({ error: result.error, serverDir, event: "godot_mcp_npm_install_failed" }, "npm install failed");
         return result;
       }
     } else {
@@ -958,18 +1358,18 @@ export function setupGodotMCPServer(
     // Step 2: Build if needed
     if (!isServerBuilt(serverDir)) {
       onProgress?.("Building TypeScript...");
-      logger.info({ serverDir }, "Building TypeScript");
+      logger.info({ serverDir, event: "godot_mcp_npm_build_started" }, "Building TypeScript");
       try {
-        execSync("npm run build", {
+        // 28-H-godot-mcp-async-exec: same as above for `npm run build`.
+        await execFileAsync("npm", ["run", "build"], {
           cwd: serverDir,
-          stdio: "pipe",
           timeout: 120000, // 2 minute timeout
         });
         result.built = true;
-        logger.info({ serverDir }, "npm run build completed");
+        logger.info({ serverDir, event: "godot_mcp_npm_build_completed" }, "npm run build completed");
       } catch (err) {
         result.error = `npm run build failed: ${(err as Error).message}`;
-        logger.error({ error: result.error, serverDir }, "npm run build failed");
+        logger.error({ error: result.error, serverDir, event: "godot_mcp_npm_build_failed" }, "npm run build failed");
         return result;
       }
     } else {
@@ -979,7 +1379,7 @@ export function setupGodotMCPServer(
     result.success = true;
   } catch (err) {
     result.error = (err as Error).message;
-    logger.error({ error: result.error }, "Server setup failed");
+    logger.error({ error: result.error, event: "godot_mcp_server_setup_failed" }, "Server setup failed");
   }
 
   return result;

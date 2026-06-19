@@ -8,7 +8,6 @@ export type GateVerdict =
   | "CONCERNS"
   | "REJECT"
   | "NOT_READY"
-  | "READY"
   | "BLOCKED"
   | "VIABLE"
   | "REALISTIC"

@@ -1,8 +1,9 @@
 "use client";
-
-import { useState, useCallback, useEffect } from "react";
+import { createLogger } from "../lib/logger";
+import { useState, useCallback } from "react";
 import { apiFetch } from "@/lib/api";
 import { useWebSocket } from "./useWebSocket";
+import { useAbortableEffect } from "./useAbortableEffect";
 import {
   DEFAULT_SETTINGS,
   type SettingsConfig,
@@ -10,27 +11,33 @@ import {
   type WSEvent,
 } from "@game-studio/types";
 
+const logger = createLogger("useSettings");
+
 export function useSettings() {
   const [data, setData] = useState<SettingsConfig>(DEFAULT_SETTINGS);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const fetchSettings = useCallback(async () => {
+  const fetchSettings = useCallback(async (signal?: AbortSignal) => {
     try {
-      const result = await apiFetch<SettingsConfig>("/api/settings");
+      const result = await apiFetch<SettingsConfig>("/api/settings", { signal });
       setData(result);
       setError(null);
     } catch (err) {
-      console.error("Failed to fetch settings:", err);
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      logger.error("Failed to fetch settings", { err: err });
       setError(err instanceof Error ? err.message : "Failed to load settings");
       setData(DEFAULT_SETTINGS);
-    } finally {
-      setLoading(false);
     }
   }, []);
 
-  useEffect(() => {
-    fetchSettings();
+  // 14-FH10-unmount-cancel
+  useAbortableEffect(async (signal) => {
+    try {
+      await fetchSettings(signal);
+    } finally {
+      setLoading(false);
+    }
   }, [fetchSettings]);
 
   const onWSEvent = useCallback(
@@ -100,7 +107,7 @@ export function useSettings() {
 
   const retry = useCallback(() => {
     setLoading(true);
-    fetchSettings();
+    void fetchSettings();
   }, [fetchSettings]);
 
   return {

@@ -1,10 +1,12 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
+import path from "node:path";
 import { DocumentStore } from "../services/document-store.js";
 import { loadConfig } from "../config.js";
 import { broadcast } from "../services/websocket.js";
 import { readData } from "../services/data-store.js";
 import { resolveProjectWorkspace } from "../utils/workspace.js";
+import { logger } from "../utils/logger.js";
 import type { Project } from "@game-studio/types";
 
 export const documentsRouter: Router = Router();
@@ -14,7 +16,15 @@ const config = loadConfig();
 // Global store for backward compatibility (no project specified)
 const globalStore = new DocumentStore(config.WORKSPACE_DIR);
 
-// Per-project document stores keyed by projectId
+// Per-project document stores keyed by projectId. LRU-bounded so a
+// burst of project creation/deletion can't leak fs.watch handles
+// forever. Each entry holds an active recursive watcher plus an
+// in-memory document graph cache; without a cap, a long-running
+// process that cycles through many short-lived projects (test
+// fixtures, demo sessions) accumulates handles until the kernel's
+// fs.inotify.max_user_watches trips and the watcher errors out.
+// Matches the pattern in apps/api/src/routes/assets.ts:309-313.
+const PROJECT_STORE_LRU_CAP = 200;
 const projectStores = new Map<string, DocumentStore>();
 
 /** Look up a project by ID from dashboard.json */
@@ -30,7 +40,33 @@ async function getProjectById(projectId: string): Promise<Project | null> {
 /** Get or create a DocumentStore for a project */
 async function getProjectStore(projectId: string): Promise<DocumentStore | null> {
   const existing = projectStores.get(projectId);
-  if (existing) return existing;
+  if (existing) {
+    // LRU touch: re-insert so the key moves to the end of the
+    // Map's insertion order. The next eviction pass will skip
+    // this entry in favor of a truly idle one.
+    projectStores.delete(projectId);
+    projectStores.set(projectId, existing);
+    return existing;
+  }
+
+  // 16-H-project-stores-lru-cap: before creating a new entry,
+  // enforce the cap. If the cap is reached, evict the oldest
+  // entry (the first key in iteration order) by stopping its
+  // fs.watch handle and dropping it from the map. Without this,
+  // a process that creates many short-lived projects leaks
+  // recursive watchers until the kernel's inotify limit is hit
+  // and the watcher emits ENOSPC. dropProjectStore() does the
+  // same teardown for explicit deletes.
+  if (projectStores.size >= PROJECT_STORE_LRU_CAP) {
+    const oldest = projectStores.keys().next().value;
+    if (oldest && oldest !== projectId) {
+      const evicted = projectStores.get(oldest);
+      projectStores.delete(oldest);
+      if (evicted) {
+        try { evicted.stopWatching(); } catch { /* best effort */ }
+      }
+    }
+  }
 
   const project = await getProjectById(projectId);
   if (!project) return null;
@@ -54,6 +90,47 @@ async function getProjectStore(projectId: string): Promise<DocumentStore | null>
   return store;
 }
 
+/** 15-H-document-store-broadcast-dup: when a project store's
+ * workspace dir is a subdirectory of WORKSPACE_DIR, the global
+ * store's recursive watcher (rooted at WORKSPACE_DIR) ALSO fires
+ * for the same file. Both stores' onChange handlers would then
+ * broadcast the same `document:updated` event — every connected
+ * client re-renders twice, the wiki UI re-fetches the board twice.
+ *
+ * The fix: the global store's onChange filters out files whose
+ * absolute path falls under any active project store's workspace.
+ * The empty path is the `__watcher_stopped__` sentinel, which is
+ * always passed through (the watcher is gone, no overlap to dedupe).
+ *
+ * path.relative() is used instead of startsWith() so a project
+ * store at `/workspace/foo` correctly excludes a global file at
+ * `/workspace/foobar` (which would false-match the naive
+ * `path.startsWith("/workspace/foo")` check).
+ */
+function isPathInActiveProjectStore(absolutePath: string): boolean {
+  if (!absolutePath) return false;
+  for (const [, store] of projectStores) {
+    const projectDir = store.getWorkspaceDir();
+    const rel = path.relative(projectDir, absolutePath);
+    if (rel && !rel.startsWith("..") && !path.isAbsolute(rel)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Drop the in-memory DocumentStore for a project (called on project delete).
+ * Without this, the projectStores Map grows unbounded as projects are created
+ * and deleted — each entry holds an active fs.watch handle and the in-memory
+ * document graph. */
+export function dropProjectStore(projectId: string): boolean {
+  const store = projectStores.get(projectId);
+  if (!store) return false;
+  store.stopWatching();
+  projectStores.delete(projectId);
+  return true;
+}
+
 /** Resolve store from request — project-scoped or global */
 async function resolveStore(req: Request): Promise<DocumentStore> {
   const projectId = req.query.projectId as string | undefined;
@@ -66,6 +143,11 @@ async function resolveStore(req: Request): Promise<DocumentStore> {
 
 // Start global file watching with WebSocket broadcast
 globalStore.startWatching((event) => {
+  // 15-H-document-store-broadcast-dup: skip events that fall under
+  // any active project store's workspace — those will be broadcast
+  // by the project store's own watcher. Sentinel events (path === "")
+  // always pass through.
+  if (isPathInActiveProjectStore(event.path)) return;
   broadcast({ type: "document:updated", documentId: event.documentId, category: event.category, title: event.title });
 });
 
@@ -76,7 +158,11 @@ documentsRouter.get("/graph/data", async (req: Request, res: Response) => {
     const graph = await store.getGraphData();
     res.json({ success: true, data: { graph } });
   } catch (err) {
-    res.status(500).json({ success: false, error: String(err) });
+    logger.error(
+      { err: err instanceof Error ? err.message : String(err), event: "documents_graph_failed" },
+      "Failed to fetch document graph data",
+    );
+    res.status(500).json({ success: false, error: "Failed to fetch document graph" });
   }
 });
 
@@ -88,7 +174,11 @@ documentsRouter.get("/", async (req: Request, res: Response) => {
     const categories = store.getCategories();
     res.json({ success: true, data: { documents, categories } });
   } catch (err) {
-    res.status(500).json({ success: false, error: String(err) });
+    logger.error(
+      { err: err instanceof Error ? err.message : String(err), event: "documents_list_failed" },
+      "Failed to list documents",
+    );
+    res.status(500).json({ success: false, error: "Failed to list documents" });
   }
 });
 
@@ -103,7 +193,11 @@ documentsRouter.get("/:slug", async (req: Request, res: Response) => {
     }
     res.json({ success: true, data: { document: doc } });
   } catch (err) {
-    res.status(500).json({ success: false, error: String(err) });
+    logger.error(
+      { err: err instanceof Error ? err.message : String(err), slug: req.params.slug, event: "documents_get_failed" },
+      "Failed to fetch document",
+    );
+    res.status(500).json({ success: false, error: "Failed to fetch document" });
   }
 });
 
@@ -112,12 +206,25 @@ documentsRouter.post("/refresh", async (req: Request, res: Response) => {
   try {
     const store = await resolveStore(req);
     store.invalidateCache();
+    // 28-H-documents-bulk-broadcast: the previous shape iterated
+    // every document and fired one WS broadcast each. A project
+    // with 500 markdown files caused 500 broadcasts, 500 wiki UI
+    // re-renders, and 500× studio-hook work. The wiki renders the
+    // full file tree on every `document:updated` event; the
+    // aggregate cost scales O(N²) with project size. Replace with
+    // a single bulk-updated event carrying just the count — the
+    // studio hook refetches the list when it sees the event.
     const documents = await store.listAll();
-    for (const doc of documents) {
-      broadcast({ type: "document:updated", documentId: doc.id, category: doc.category, title: doc.title });
-    }
-    res.json({ success: true });
+    broadcast({
+      type: "documents:bulk-updated",
+      count: documents.length,
+    });
+    res.json({ success: true, count: documents.length });
   } catch (err) {
-    res.status(500).json({ success: false, error: String(err) });
+    logger.error(
+      { err: err instanceof Error ? err.message : String(err), event: "documents_refresh_failed" },
+      "Failed to refresh document cache",
+    );
+    res.status(500).json({ success: false, error: "Failed to refresh documents" });
   }
 });

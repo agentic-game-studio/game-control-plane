@@ -1,0 +1,99 @@
+# 18-H-dockerignore-missing: a root .dockerignore is REQUIRED for
+# this monorepo. Without it, every `docker build` copies the entire
+# repo into the build context — including the workspace/ output
+# (game assets, .import files, build artefacts), the .env file
+# (api keys), node_modules (hundreds of MB), and Python
+# __pycache__ directories. That bloats image size by an order of
+# magnitude and ships secrets to the build context. The
+# .dockerignore is structurally similar to .gitignore but is read
+# by the Docker daemon, not git, and is a separate file because
+# GitHub Actions / build pipelines run before git-aware tooling
+# can intervene. Keep the two in sync — if you add a new
+# environment-sensitive directory to .gitignore, mirror it here.
+
+# Dependencies — never copy into build context, re-install inside the image
+node_modules/
+.pnpm-store/
+
+# Build outputs — produced by the image's own build step
+dist/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+
+# Environment variables — never ship API keys in the build context
+.env
+.env.local
+.env.*.local
+.env.example
+
+# Workspace — game development output. The image runs in production
+# without a workspace; only the framework files in workspace/.claude/
+# are needed for system prompts. Mirror the .gitignore carve-outs
+# so framework files (loaded at runtime) are still available.
+workspace/
+!workspace/.claude/
+
+# Local data + runtime state
+apps/api/src/data/
+apps/api/logs/
+apps/api/*.log
+data/
+
+# Claude / Cursor / VS Code artifacts
+.claude/
+claude/
+.cache/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Editor scratch
+*.swp
+*.swo
+*.bak
+*.tmp
+*.temp
+
+# Test + coverage artefacts
+coverage/
+.nyc_output/
+playwright-report/
+test-results/
+*.pid
+*.seed
+*.log
+
+# Python artefacts (asset pipeline)
+/scripts/asset-pipeline/__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+
+# Reference / vendor sources downloaded for study, not built
+Claude-Code-Game-Studios-main/
+/unity-mcp-pro-v1.3.2
+
+# Git metadata — not needed in the build context
+.git/
+.gitignore
+.gitattributes
+
+# Documentation-only files that bloat context but aren't needed
+# to build the image (DEPLOYMENT.md, README updates, etc.).
+# Keep the Dockerfiles + package.json + apps/**/package.json +
+# pnpm-workspace.yaml + tsconfig*.json — those are the only things
+# the Dockerfile actually reads.
+DEPLOYMENT.md
+plan.md
+*.md
+!apps/api/Dockerfile* 2>/dev/null
+!apps/web/Dockerfile* 2>/dev/null
+
+# CI / workflow files
+.github/
+
+# Build test scratch
+BuildTest/

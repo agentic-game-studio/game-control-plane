@@ -1,7 +1,9 @@
 "use client";
-
+import { createLogger } from "../lib/logger";
 import { useState, useCallback, useEffect, useRef } from "react";
 import { apiFetch } from "@/lib/api";
+import { MCP_HEALTH_POLL_MS } from "@/lib/timing";
+const logger = createLogger("useGodotMCPStatus");
 
 interface MCPHealthStatus {
   status: "not_running" | "connected" | "disconnected";
@@ -29,7 +31,7 @@ export function useGodotMCPStatus(
   engine: "godot" | null,
   options: UseGodotMCPStatusOptions = {}
 ) {
-  const { pollInterval = 10000, enabled = true } = options;
+  const { pollInterval = MCP_HEALTH_POLL_MS, enabled = true } = options;
 
   const [status, setStatus] = useState<MCPHealthStatus | null>(null);
   const [checking, setChecking] = useState(false);
@@ -43,17 +45,22 @@ export function useGodotMCPStatus(
       return;
     }
 
+    // Capture the projectId at request time so an in-flight fetch started for
+    // the old projectId can't overwrite the new project's status when the user
+    // switches projects. Without this guard, switching projectA → projectB
+    // briefly shows projectA's status under projectB's name.
+    const requestProjectId = projectId;
     setChecking(true);
     try {
       const result = await apiFetch<{ success: boolean; data: MCPHealthStatus }>(
-        `/api/dashboard/projects/${projectId}/mcp-health`
+        `/api/dashboard/projects/${requestProjectId}/mcp-health`
       );
       if (mountedRef.current) {
         setStatus(result.data);
         setLastChecked(new Date());
       }
     } catch (err) {
-      console.error("Failed to check MCP health:", err);
+      logger.error("Failed to check MCP health", { err: err });
       if (mountedRef.current) {
         setStatus({
           status: "disconnected",

@@ -56,7 +56,8 @@ def split_tileset(
     Margin: outer edge padding in the source image.
     Spacing: gap between tiles in the source image.
     """
-    img = Image.open(img_path).convert("RGBA")
+    with Image.open(img_path) as _src:
+        img = _src.convert("RGBA").copy()
     img_w, img_h = img.width, img.height
 
     # Calculate grid dimensions
@@ -147,10 +148,10 @@ def main():
         sys.exit(1)
 
     if args.dry_run:
-        img = Image.open(args.input)
-        print(f"[DRY-RUN] Would split {args.input} ({img.width}x{img.height})")
-        print(f"  tile size: {args.tile_width}x{args.tile_height}")
-        print(f"  margin: {args.margin}, spacing: {args.spacing}, pad: {args.pad}")
+        with Image.open(args.input) as img:
+            print(f"[DRY-RUN] Would split {args.input} ({img.width}x{img.height})")
+            print(f"  tile size: {args.tile_width}x{args.tile_height}")
+            print(f"  margin: {args.margin}, spacing: {args.spacing}, pad: {args.pad}")
         return 0
 
     atlas = split_tileset(

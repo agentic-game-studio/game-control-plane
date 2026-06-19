@@ -1,8 +1,10 @@
 "use client";
-
-import { useState, useEffect } from "react";
+import { createLogger } from "../../../lib/logger";
+import { useState, useEffect, useRef } from "react";
 import { apiFetch } from "@/lib/api";
+import { SUCCESS_TOAST_DURATION_MS } from "@/lib/timing";
 import type { AgentRole } from "@game-studio/types";
+const logger = createLogger("page");
 
 interface AgentPrompt {
   name: string;
@@ -40,6 +42,21 @@ export default function AgentsPage() {
   const [selectedAgent, setSelectedAgent] = useState<AgentPrompt | null>(null);
   const [spawning, setSpawning] = useState<string | null>(null);
   const [spawnSuccess, setSpawnSuccess] = useState<string | null>(null);
+  // 14-FH5-toast-cleanup: hold the auto-dismiss timer in a ref so
+  // unmount (or a quick second spawn) can clear the previous one
+  // before scheduling the next. Without this, navigating away within
+  // 3s of a successful spawn leaves the timer firing on an unmounted
+  // component, and rapid double-spawns queue two timers that both
+  // try to clear the second toast prematurely.
+  const spawnSuccessTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    return () => {
+      if (spawnSuccessTimerRef.current) {
+        clearTimeout(spawnSuccessTimerRef.current);
+        spawnSuccessTimerRef.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const loadAgents = async () => {
@@ -47,7 +64,7 @@ export default function AgentsPage() {
         const data = await apiFetch<AgentPrompt[]>("/api/prompts/agents");
         setAgents(data);
       } catch (error) {
-        console.error("Failed to load agents:", error);
+        logger.error("Failed to load agents", { err: error });
       } finally {
         setLoading(false);
       }
@@ -76,9 +93,15 @@ export default function AgentsPage() {
         }),
       });
       setSpawnSuccess(agent.name);
-      setTimeout(() => setSpawnSuccess(null), 3000);
+      if (spawnSuccessTimerRef.current) {
+        clearTimeout(spawnSuccessTimerRef.current);
+      }
+      spawnSuccessTimerRef.current = setTimeout(() => {
+        setSpawnSuccess(null);
+        spawnSuccessTimerRef.current = null;
+      }, SUCCESS_TOAST_DURATION_MS);
     } catch (error) {
-      console.error("Failed to spawn agent:", error);
+      logger.error("Failed to spawn agent", { err: error });
     } finally {
       setSpawning(null);
     }
