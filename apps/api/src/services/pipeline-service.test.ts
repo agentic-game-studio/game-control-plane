@@ -31,6 +31,19 @@ vi.mock("./llm-service.js", () => ({
 vi.mock("./websocket.js", () => ({
   broadcast: vi.fn(),
 }));
+vi.mock("./deep-research-service.js", () => ({
+  runDeepResearch: vi.fn(async () => ({
+    projectId: "p-test",
+    concept: "test",
+    timestamp: new Date().toISOString(),
+    model: "mock",
+    sections: [{ title: "Market", content: "stub" }],
+    citations: [],
+    totalTokens: 0,
+    turns: 2,
+  })),
+  isDeepResearchAvailable: vi.fn(() => true),
+}));
 
 import {
   startPipelineRun,
@@ -42,9 +55,12 @@ import {
 } from "./pipeline-service.js";
 import { executeGate } from "./gate-service.js";
 import { invokeAgent } from "./llm-service.js";
+import { runDeepResearch, isDeepResearchAvailable } from "./deep-research-service.js";
 
 const executeGateMock = executeGate as unknown as ReturnType<typeof vi.fn>;
 const invokeAgentMock = invokeAgent as unknown as ReturnType<typeof vi.fn>;
+const runDeepResearchMock = runDeepResearch as unknown as ReturnType<typeof vi.fn>;
+const isDeepResearchAvailableMock = isDeepResearchAvailable as unknown as ReturnType<typeof vi.fn>;
 
 /** Build a 3-phase dummy pipeline skill (each phase has 1 agent for simplicity, except phase 1 which has 3 to exercise the once-per-phase gate placement). */
 function buildDummySkill(opts: { withGate?: boolean; subSkillsOnPipeline?: boolean } = {}) {
@@ -224,5 +240,191 @@ describe("pipeline-service gate enforcement", () => {
     await awaitLoop(run.runId);
     expect(executeGateMock).not.toHaveBeenCalled();
     expect(getRun(run.runId)?.status).toBe("completed");
+  });
+});
+
+/**
+ * Pipeline-concept tests — Phase 1. Verifies the real `/concept` shape:
+ * market-research phase triggers MiroMind, creative-director phase ends with
+ * the CD-PILLARS gate, manual mode pauses, advance resumes.
+ */
+
+function buildConceptSkill() {
+  return {
+    name: "pipeline-concept" as const,
+    description: "/concept — the simplest kind:\"pipeline\" skill",
+    userInvocable: true,
+    kind: "pipeline" as const,
+    gateMode: "manual" as const,
+    resumable: true,
+    lifecyclePhase: "concept" as const,
+    phases: [
+      {
+        order: 1,
+        name: "market-research",
+        description: "MiroMind deep research on the concept",
+        agents: ["market-researcher"] as any,
+        createsTickets: false,
+      },
+      {
+        order: 2,
+        name: "creative-director",
+        description: "Distill research into pillars + pitch",
+        agents: ["creative-director"] as any,
+        gates: ["CD-PILLARS"],
+        createsTickets: false,
+      },
+    ],
+  } as any;
+}
+
+describe("pipeline-service /concept (Phase 1)", () => {
+  beforeEach(() => {
+    runDeepResearchMock.mockClear();
+    isDeepResearchAvailableMock.mockClear();
+    isDeepResearchAvailableMock.mockReturnValue(true);
+    runDeepResearchMock.mockResolvedValue({
+      projectId: "p-test",
+      concept: "test",
+      timestamp: new Date().toISOString(),
+      model: "mock",
+      sections: [{ title: "Market", content: "stub" }],
+      citations: [],
+      totalTokens: 0,
+      turns: 2,
+    });
+  });
+
+  it("market-research phase calls runDeepResearch once before the agent loop", async () => {
+    executeGateMock.mockResolvedValue({ gateId: "CD-PILLARS", verdict: "APPROVE", details: "ok", agent: "creative-director", timestamp: new Date().toISOString() });
+    const run = await startPipelineRun(buildConceptSkill(), "sess-concept-1", { projectId: "p-test" });
+    await awaitLoop(run.runId);
+
+    expect(runDeepResearchMock).toHaveBeenCalledTimes(1);
+    expect(runDeepResearchMock).toHaveBeenCalledWith(
+      "p-test",
+      expect.any(String),
+      expect.objectContaining({ projectDescription: undefined }),
+    );
+    // 2 phases × 1 agent each = 2 invokes (market-researcher + creative-director).
+    expect(invokeAgentMock).toHaveBeenCalledTimes(2);
+    // CD-PILLARS fires once on the creative-director phase only.
+    expect(executeGateMock).toHaveBeenCalledTimes(1);
+    expect(executeGateMock).toHaveBeenCalledWith("CD-PILLARS", run.sessionId, expect.any(String));
+    // Manual mode + APPROVE pauses at the gate (manual always pauses; advance resumes).
+    expect(getRun(run.runId)?.status).toBe("paused-at-gate");
+    expect(getRun(run.runId)?.currentPhaseIndex).toBe(1); // held at creative-director phase
+  });
+
+  it("phases OTHER than market-research do NOT trigger deep research", async () => {
+    executeGateMock.mockResolvedValue({ gateId: "CD-PILLARS", verdict: "APPROVE", details: "ok", agent: "creative-director", timestamp: new Date().toISOString() });
+    const skill = {
+      name: "pipeline-no-research" as const,
+      description: "Pipeline without a market-research phase",
+      userInvocable: true,
+      kind: "pipeline" as const,
+      gateMode: "auto" as const,
+      resumable: true,
+      lifecyclePhase: "concept" as const,
+      phases: [
+        { order: 1, name: "design", description: "x", agents: ["game-designer"] as any },
+        { order: 2, name: "build", description: "y", agents: ["creative-director"] as any, gates: ["CD-PILLARS"] },
+      ],
+    } as any;
+    const run = await startPipelineRun(skill, "sess-no-research");
+    await awaitLoop(run.runId);
+
+    expect(runDeepResearchMock).not.toHaveBeenCalled();
+    expect(getRun(run.runId)?.status).toBe("completed");
+  });
+
+  it("graceful skip: when isDeepResearchAvailable returns false, agents still run and a warning is emitted", async () => {
+    isDeepResearchAvailableMock.mockReturnValue(false);
+    executeGateMock.mockResolvedValue({ gateId: "CD-PILLARS", verdict: "APPROVE", details: "ok", agent: "creative-director", timestamp: new Date().toISOString() });
+    const run = await startPipelineRun(buildConceptSkill(), "sess-concept-skip", { projectId: "p-test" });
+    await awaitLoop(run.runId);
+
+    expect(runDeepResearchMock).not.toHaveBeenCalled();
+    // Agents still ran (degraded context).
+    expect(invokeAgentMock).toHaveBeenCalledTimes(2);
+    expect(getRun(run.runId)?.status).toBe("paused-at-gate");
+  });
+
+  it("CD-PILLARS gate fires exactly once and pauses on a block verdict (manual)", async () => {
+    executeGateMock.mockResolvedValue({ gateId: "CD-PILLARS", verdict: "REJECT", details: "pillars too vague", agent: "creative-director", timestamp: new Date().toISOString() });
+    const run = await startPipelineRun(buildConceptSkill(), "sess-concept-block", { projectId: "p-test" });
+    await awaitLoop(run.runId);
+
+    expect(executeGateMock).toHaveBeenCalledTimes(1);
+    expect(getRun(run.runId)?.status).toBe("paused-at-gate");
+    expect(getRun(run.runId)?.gateVerdicts["CD-PILLARS"]?.verdict).toBe("REJECT");
+    // Manual never retries — even on REJECT, we hold for the human.
+    expect(invokeAgentMock).toHaveBeenCalledTimes(2); // both phases ran, gate blocked advance
+  });
+
+  it("advanceFromGate resumes from currentPhaseIndex+1 after manual pause", async () => {
+    executeGateMock.mockResolvedValue({ gateId: "CD-PILLARS", verdict: "APPROVE", details: "ok", agent: "creative-director", timestamp: new Date().toISOString() });
+    const run = await startPipelineRun(buildConceptSkill(), "sess-concept-advance", { projectId: "p-test" });
+    await awaitLoop(run.runId);
+
+    // Paused at the gate after phase 1 (creative-director).
+    expect(getRun(run.runId)?.status).toBe("paused-at-gate");
+    expect(getRun(run.runId)?.currentPhaseIndex).toBe(1);
+
+    const advanced = await advanceFromGate(run.runId);
+    expect(advanced).not.toBeNull();
+    await awaitLoop(run.runId);
+
+    // After advance, the gate is consumed and the loop runs out → completed.
+    expect(getRun(run.runId)?.status).toBe("completed");
+    expect(getRun(run.runId)?.currentPhaseIndex).toBe(2);
+  });
+
+  it("resume-after-restart: persisted /concept run at currentPhaseIndex=1 continues from creative-director", async () => {
+    executeGateMock.mockResolvedValue({ gateId: "CD-PILLARS", verdict: "APPROVE", details: "ok", agent: "creative-director", timestamp: new Date().toISOString() });
+    const { randomUUID } = await import("node:crypto");
+    const runId = `run-${randomUUID()}`;
+    const now = new Date().toISOString();
+    const skill = buildConceptSkill();
+    const crashed = {
+      runId,
+      sessionId: "sess-concept-resume",
+      projectId: "p-test",
+      skillName: skill.name,
+      lifecyclePhase: "concept",
+      gateMode: "manual",
+      status: "running",
+      currentPhaseIndex: 1, // market-research done, creative-director next
+      phaseStatuses: [
+        { order: 1, name: "market-research", status: "completed", createsTickets: false },
+        { order: 2, name: "creative-director", status: "pending", createsTickets: false },
+      ],
+      gateVerdicts: {},
+      startedAt: now,
+      updatedAt: now,
+    };
+    require("node:fs").writeFileSync(join(tmpDir, `${runId}.json`), JSON.stringify(crashed, null, 2));
+
+    const resumed = await resumePipelineRun(runId, { skill });
+    expect(resumed).not.toBeNull();
+    await awaitLoop(runId);
+
+    // Only the creative-director agent ran (1 invoke). If resume had re-run phase 0,
+    // market-researcher would also have run + runDeepResearch re-fired.
+    expect(invokeAgentMock).toHaveBeenCalledTimes(1);
+    expect(runDeepResearchMock).not.toHaveBeenCalled();
+    expect(executeGateMock).toHaveBeenCalledTimes(1);
+    expect(getRun(runId)?.status).toBe("paused-at-gate"); // manual + gate
+  });
+
+  it("stopPipelineRun cancels a /concept run cleanly", async () => {
+    executeGateMock.mockResolvedValue({ gateId: "CD-PILLARS", verdict: "APPROVE", details: "ok", agent: "creative-director", timestamp: new Date().toISOString() });
+    const run = await startPipelineRun(buildConceptSkill(), "sess-concept-stop", { projectId: "p-test" });
+    await awaitLoop(run.runId);
+    expect(getRun(run.runId)?.status).toBe("paused-at-gate");
+
+    const stopped = await stopPipelineRun(run.runId);
+    expect(stopped?.status).toBe("cancelled");
+    expect(stopped?.cancelledAt).toBeTruthy();
   });
 });

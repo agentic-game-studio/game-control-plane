@@ -31,6 +31,7 @@ import type {
 import { invokeAgent, detectEngineFromWorkspace, type ProjectContext } from "./llm-service.js";
 import { executeGate } from "./gate-service.js";
 import { isGatePassing } from "./milestone-gate-service.js";
+import { runDeepResearch, isDeepResearchAvailable } from "./deep-research-service.js";
 import { broadcast } from "./websocket.js";
 import { readData } from "./data-store.js";
 import { newId } from "../utils/ids.js";
@@ -129,6 +130,57 @@ function ensurePhaseStatus(run: PipelineRunState, order: number, name: string): 
     run.phaseStatuses.push(ps);
   }
   return ps;
+}
+
+/**
+ * Phase-specific prefetch hook. Currently used by `/concept` to run MiroMind
+ * deep research BEFORE the market-researcher agent (giving the agent the
+ * research report as context). For other phase names this is a no-op.
+ *
+ * Returns true if a prefetch ran (success OR graceful-skip), false if it
+ * threw and the caller should surface the error in the phase status.
+ */
+async function runPhasePrefetch(
+  run: PipelineRunState,
+  phase: SkillDefinition["phases"][number],
+  projectContext: ProjectContext | undefined,
+): Promise<{ ran: boolean; ok: boolean; summary?: string }> {
+  if (phase.name !== "market-research") return { ran: false, ok: true };
+
+  if (!isDeepResearchAvailable()) {
+    logger.warn(
+      { runId: run.runId, event: "pipeline_deep_research_unavailable" },
+      "market-research phase requested but MIROMIND_API_KEY is not configured — skipping deep research (agents will still run)",
+    );
+    return { ran: true, ok: true, summary: "skipped: MIROMIND_API_KEY not configured" };
+  }
+
+  if (!run.projectId) {
+    logger.warn(
+      { runId: run.runId, event: "pipeline_deep_research_no_project" },
+      "market-research phase requested but pipeline has no projectId — skipping deep research",
+    );
+    return { ran: true, ok: true, summary: "skipped: no projectId on run" };
+  }
+
+  const concept = projectContext?.description ?? projectContext?.name ?? "an unreleased game concept";
+  try {
+    const report = await runDeepResearch(run.projectId, concept, {
+      projectDescription: projectContext?.description,
+    });
+    return {
+      ran: true,
+      ok: true,
+      summary: `research report written (${report.sections.length} angles, ${report.citations.length} citations, ${report.totalTokens} tokens)`,
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error(
+      { runId: run.runId, err: msg, event: "pipeline_deep_research_failed" },
+      "MiroMind deep research failed during market-research phase — agents will still run with a degraded prompt",
+    );
+    return { ran: true, ok: false, summary: `failed: ${msg}` };
+  }
 }
 
 /**
@@ -294,6 +346,14 @@ async function runPipelineLoop(
       run.status = "running";
       await persistRun(run);
       emit({ type: "pipeline:phase:started", runId: run.runId, sessionId: run.sessionId, phaseIndex: run.currentPhaseIndex, phaseName: phase.name, createsTickets: phase.createsTickets });
+
+      // Phase-specific prefetch (e.g. MiroMind for market-research). No-op for phases
+      // that don't declare one. Failures are recorded on PhaseStatus but never block
+      // the agent loop (graceful degradation — agents run with degraded context).
+      const prefetch = await runPhasePrefetch(run, phase, projectContext);
+      if (prefetch.ran && !prefetch.ok) {
+        ps.lastError = `prefetch failed: ${prefetch.summary ?? "unknown"}`;
+      }
 
       const agentResults = await runPhaseAgents(run, skill, phase, taskArgs, projectContext);
       if (isCancelled(run)) return;
