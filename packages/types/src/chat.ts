@@ -218,6 +218,8 @@ export interface ChatSession {
   generation?: number;
   /** Rolling producer summary state (API-only extended field; persisted in chat-state.json) */
   producerSummary?: ProducerSummarySnapshot;
+  /** Parent session that spawned this agent via Task tool */
+  parentSessionId?: string;
 }
 
 export interface CreateChatSessionRequest {
