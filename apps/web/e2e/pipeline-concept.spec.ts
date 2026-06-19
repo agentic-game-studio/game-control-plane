@@ -63,18 +63,18 @@ async function createProjectAndSession(request: import("@playwright/test").APIRe
     },
   });
   expect([200, 201]).toContain(createRes.status());
-  const projectId = ((await createRes.json()) as ApiResponse<{ id: string }>).data?.id;
+  const projectId: string = ((await createRes.json()) as ApiResponse<{ id: string }>).data?.id ?? "";
   expect(projectId).toBeTruthy();
 
   // The producer sessionId is `producer-${projectId}` per the chat route's
-// producerSessionId() helper (apps/api/src/routes/chat.ts:498). The
-// get-or-create endpoint may return 201 on first hit, 200 thereafter.
-const sessionId = `producer-${projectId}`;
-const sessRes = await request.get(`${API}/chat/sessions/producer/${projectId}`, {
-  headers: { "x-api-key": API_KEY },
-});
-expect([200, 201]).toContain(sessRes.status());
-return { projectId, sessionId };
+  // producerSessionId() helper (apps/api/src/routes/chat.ts:498). The
+  // get-or-create endpoint may return 201 on first hit, 200 thereafter.
+  const sessionId: string = `producer-${projectId}`;
+  const sessRes = await request.get(`${API}/chat/sessions/producer/${projectId}`, {
+    headers: { "x-api-key": API_KEY },
+  });
+  expect([200, 201]).toContain(sessRes.status());
+  return { projectId, sessionId };
 }
 
 interface ApiResponse<T> {

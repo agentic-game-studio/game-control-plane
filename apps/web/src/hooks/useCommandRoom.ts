@@ -405,6 +405,19 @@ function mergeCachedMessagesIntoBackendSession(
 
 function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, producerSessionId: string, recentApiMessages?: Map<string, number>): WSHandlerResult {
   const messages: WSHandlerResult["messages"] = [];
+  /**
+   * Resolve the target session for a pipeline:* event. Prefer the event's
+   * sessionId when an agent/sub-session is registered for it; otherwise fall
+   * back to the active producer session. Returns "" if neither exists — the
+   * caller bails out with `{ sessions: null, messages }` in that case.
+   *
+   * Local to this handler so the 8 pipeline:* cases share one implementation
+   * of the routing rule.
+   */
+  const pipelineEventTarget = (eventSessionId: string): string => {
+    if (sessions.has(eventSessionId)) return eventSessionId;
+    return producerSessionId;
+  };
   switch (event.type) {
     case "agent:spawned": {
       const sid = event.sessionId;
@@ -719,22 +732,22 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, prod
       return { sessions: null, messages };
     }
     case "pipeline:started": {
-      const target = sessions.has(event.sessionId) ? event.sessionId : producerSessionId;
+      const target = pipelineEventTarget(event.sessionId);
       if (!target) return { sessions: null, messages };
       return {
         sessions: null,
         messages: [{
           sessionRole: target,
           msg: {
-          type: "system",
-          sender: "producer",
-          content: `▶ Pipeline started — skill: ${event.skillName}${event.lifecyclePhase ? ` (phase: ${event.lifecyclePhase})` : ""}, gateMode: ${event.gateMode}, runId: ${event.runId}`,
+            type: "system",
+            sender: "producer",
+            content: `▶ Pipeline started — skill: ${event.skillName}${event.lifecyclePhase ? ` (phase: ${event.lifecyclePhase})` : ""}, gateMode: ${event.gateMode}, runId: ${event.runId}`,
           },
         }],
       };
     }
     case "pipeline:phase:started": {
-      const target = sessions.has(event.sessionId) ? event.sessionId : producerSessionId;
+      const target = pipelineEventTarget(event.sessionId);
       if (!target) return { sessions: null, messages };
       return {
         sessions: null,
@@ -749,7 +762,7 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, prod
       };
     }
     case "pipeline:phase:completed": {
-      const target = sessions.has(event.sessionId) ? event.sessionId : producerSessionId;
+      const target = pipelineEventTarget(event.sessionId);
       if (!target) return { sessions: null, messages };
       const agentSummary = (event.agentResults ?? [])
         .map((r) => `${r.agent}${r.ok ? " ✓" : " ✗"}`)
@@ -767,7 +780,7 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, prod
       };
     }
     case "pipeline:gate:pending": {
-      const target = sessions.has(event.sessionId) ? event.sessionId : producerSessionId;
+      const target = pipelineEventTarget(event.sessionId);
       if (!target) return { sessions: null, messages };
       return {
         sessions: null,
@@ -782,7 +795,7 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, prod
       };
     }
     case "pipeline:gate:verdict": {
-      const target = sessions.has(event.sessionId) ? event.sessionId : producerSessionId;
+      const target = pipelineEventTarget(event.sessionId);
       if (!target) return { sessions: null, messages };
       return {
         sessions: null,
@@ -797,7 +810,7 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, prod
       };
     }
     case "pipeline:completed": {
-      const target = sessions.has(event.sessionId) ? event.sessionId : producerSessionId;
+      const target = pipelineEventTarget(event.sessionId);
       if (!target) return { sessions: null, messages };
       return {
         sessions: null,
@@ -812,7 +825,7 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, prod
       };
     }
     case "pipeline:error": {
-      const target = sessions.has(event.sessionId) ? event.sessionId : producerSessionId;
+      const target = pipelineEventTarget(event.sessionId);
       if (!target) return { sessions: null, messages };
       return {
         sessions: null,
@@ -827,7 +840,7 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, prod
       };
     }
     case "pipeline:cancelled": {
-      const target = sessions.has(event.sessionId) ? event.sessionId : producerSessionId;
+      const target = pipelineEventTarget(event.sessionId);
       if (!target) return { sessions: null, messages };
       return {
         sessions: null,
