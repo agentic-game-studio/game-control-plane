@@ -19,13 +19,25 @@
     "generate": "pnpm generate:agents && pnpm generate:skills"
   },
   "devDependencies": {
+    "@playwright/test": "^1.59.1",
+    "@types/node": "^22.13.5",
     "dotenv": "^16.4.7",
-    "turbo": "^2.4.4",
-    "typescript": "^5.8.2",
-    "@types/node": "^22.13.5"
+    "playwright": "^1.60.0",
+    "turbo": "^2.9.18",
+    "typescript": "^5.8.2"
   },
   "engines": {
     "node": ">=20.0.0",
     "pnpm": ">=10.0.0"
+  },
+  "pnpm": {
+    "overrides": {
+      "vitest": "^3.2.6",
+      "vite": "^6.4.3",
+      "postcss": "^8.5.15",
+      "qs": "^6.15.2",
+      "tar": "^7.5.16",
+      "esbuild": "^0.28.1"
+    }
   }
 }
