@@ -1,3 +1,5 @@
+import type { AgentRole } from "./agent.js";
+
 export type MessageType =
   | "system"
   | "agent"
@@ -207,6 +209,8 @@ export interface ChatSession {
   status: ChatSessionStatus;
   progress: number;
   spawnedAt: string;
+  // Active Tier-1 director persona for this chat session (default: producer)
+  currentPersona?: AgentRole;
   // Execution state for long-running tasks
   fileOperations?: FileOperation[];
   completedPhases?: string[];

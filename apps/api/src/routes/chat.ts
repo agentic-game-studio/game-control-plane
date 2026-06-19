@@ -876,6 +876,49 @@ chatRouter.get("/sessions/:id", (req: Request, res: Response) => {
   res.json({ success: true, data: session });
 });
 
+// Allowed Tier-1 director personas for the chat persona switcher.
+const CHAT_PERSONAS: AgentRole[] = ["producer", "creative-director", "technical-director"];
+
+// POST /api/chat/sessions/:id/persona — Switch the active director persona
+chatRouter.post("/sessions/:id/persona", async (req: Request, res: Response) => {
+  const id = String(req.params.id);
+  const { persona } = req.body as { persona?: unknown };
+
+  if (!persona || typeof persona !== "string" || !CHAT_PERSONAS.includes(persona as AgentRole)) {
+    res.status(400).json({
+      success: false,
+      error: `Invalid persona. Allowed: ${CHAT_PERSONAS.join(", ")}`,
+    });
+    return;
+  }
+
+  const session = chatStore.sessions[id];
+  if (!session) {
+    res.status(404).json({ success: false, error: "Session not found" });
+    return;
+  }
+
+  // Persona switching is only meaningful for producer/orchestrator sessions.
+  if (session.role !== "producer") {
+    res.status(400).json({
+      success: false,
+      error: "Persona switching is only supported for producer sessions",
+    });
+    return;
+  }
+
+  session.currentPersona = persona as AgentRole;
+  await saveChatState();
+
+  broadcast({
+    type: "chat:persona:switched",
+    sessionId: id,
+    persona: persona as AgentRole,
+  } as WSEvent);
+
+  res.json({ success: true, data: session });
+});
+
 // POST /api/chat/sessions — Create new specialist session
 chatRouter.post("/sessions", async (req: Request, res: Response) => {
   const body = req.body as CreateChatSessionRequest;
@@ -1744,8 +1787,12 @@ chatRouter.post("/sessions/:id/messages", async (req: Request, res: Response) =>
     return;
   }
 
-  // Get response from LLM
-  const agentRole = session.role as AgentRole;
+  // Get response from LLM. Producer sessions can switch persona via
+  // /sessions/:id/persona; fall back to the session role otherwise.
+  const agentRole =
+    session.role === "producer"
+      ? (session.currentPersona ?? "producer")
+      : (session.role as AgentRole);
 
   // Add thinking/progress message
   const progressMsgId = newId("msg");

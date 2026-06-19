@@ -6,7 +6,7 @@ import { useWebSocket } from "./useWebSocket";
 import { useProject } from "@/contexts/ProjectContext";
 import { CHAT_CACHE_SAVE_DEBOUNCE_MS, LLM_LOADING_TIMEOUT_MS, QUEUE_DRAIN_DELAY_MS } from "@/lib/timing";
 import { contextFillPercentFromUsage } from "@/lib/chat-context";
-import type { WSEvent, ContextUsage } from "@game-studio/types";
+import type { WSEvent, ContextUsage, AgentRole } from "@game-studio/types";
 const logger = createLogger("useCommandRoom");
 
 export interface DiffBlock {
@@ -104,6 +104,7 @@ export interface AgentSession {
   status: "active" | "done" | "completed";
   progress: number;
   spawnedAt: string;
+  currentPersona?: AgentRole;
   fileOps?: FileOp[];
 }
 
@@ -822,6 +823,7 @@ interface BackendSession {
   status: string;
   progress: number;
   spawnedAt: string;
+  currentPersona?: AgentRole;
 }
 
 function backendSessionToAgentSession(s: BackendSession): AgentSession {
@@ -836,6 +838,7 @@ function backendSessionToAgentSession(s: BackendSession): AgentSession {
     status: s.status as "active" | "done" | "completed",
     progress: s.progress,
     spawnedAt: s.spawnedAt,
+    currentPersona: s.currentPersona,
     fileOps: [],
   };
 }
@@ -860,6 +863,7 @@ export function useCommandRoom() {
   const [compactingSessionId, setCompactingSessionId] = useState<string | null>(null);
   const [activityFeed, setActivityFeed] = useState<ActivityItem[]>([]);
   const [toastNotifications, setToastNotifications] = useState<ActivityItem[]>([]);
+  const [currentPersona, setCurrentPersona] = useState<AgentRole>("producer");
 
   // Q9-11: surface console.error paths to the user. Many error handlers
   // logged to console but the UI never saw them — operators staring at a
@@ -1113,6 +1117,8 @@ export function useCommandRoom() {
             ? cachedForMerge.currentSession
             : producerSession.id;
         setCurrentSession(restoredTab);
+        // Sync the active persona from the producer session (default producer).
+        setCurrentPersona(producerSession.currentPersona ?? "producer");
         // 10-C3: only randomize threadId/threadTitle if the cache didn't
         // already provide them. The previous code unconditionally overwrote
         // the cached values on every page load, so the user saw
@@ -1422,6 +1428,13 @@ export function useCommandRoom() {
           });
           return next;
         });
+        break;
+      }
+
+      case "chat:persona:switched": {
+        if (event.sessionId === producerSessionIdRef.current) {
+          setCurrentPersona(event.persona);
+        }
         break;
       }
 
@@ -2701,6 +2714,21 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
     }
   }, []);
 
+  const switchPersona = useCallback(async (persona: AgentRole) => {
+    if (!currentProjectId || !producerSessionId) return;
+    setCurrentPersona(persona);
+    try {
+      await apiFetch(`/api/chat/sessions/${encodeURIComponent(producerSessionId)}/persona`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ persona }),
+      });
+    } catch (err) {
+      logger.error("Failed to switch persona", { err });
+      pushToast("failed", "Persona switch failed", err instanceof Error ? err.message : String(err));
+    }
+  }, [currentProjectId, producerSessionId, pushToast]);
+
   // Derived state — memoized to avoid unnecessary re-renders
   const currentMessages = useMemo(() => sessions.get(currentSession)?.messages ?? [], [sessions, currentSession]);
   const totalProgress = useMemo(() => {
@@ -2854,6 +2882,8 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
     messageQueue,
     producerSessionId,
     producerUIState,
+    currentPersona,
+    switchPersona,
     activityFeed,
     toastNotifications,
     dismissToast,

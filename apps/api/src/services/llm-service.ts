@@ -2254,7 +2254,7 @@ export async function invokeAgent(
     // we treat any non-OK as a hard block here.
     let creditsOk = false;
     try {
-      creditsOk = await consumeCreditsForAgent(agentRole, task.slice(0, 80));
+      creditsOk = await consumeCreditsForAgent(agentRole, task.slice(0, 80), sessionId);
     } catch (consumeErr) {
       logger.error(
         { event: "consume_credits_threw", agentRole, err: String(consumeErr) },
