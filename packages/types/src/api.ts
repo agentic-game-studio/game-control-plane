@@ -11,6 +11,7 @@ import type { ChatSession, ChatMessage, ContextUsage } from "./chat.js";
 import type { GameBuild } from "./builds.js";
 import type { AutonomousRunMetrics } from "./metrics.js";
 import type { SkillName } from "./skill.js";
+import type { GateMode, LifecyclePhase } from "./pipeline.js";
 
 /** WebSocket event types for real-time frontend updates */
 export type WSEvent =
@@ -78,7 +79,16 @@ export type WSEvent =
   | { type: "autonomous:metrics"; sessionId: string; metrics: AutonomousRunMetrics }
   // Deep research events (MiroMind)
   | { type: "autonomous:research"; phase: "started" | "completed"; projectId: string; concept?: string; sections?: number }
-  | { type: "research:completed"; projectId: string; concept?: string; sections: number };
+  | { type: "research:completed"; projectId: string; concept?: string; sections: number }
+  // Lifecycle pipeline events (Phase 0). Consumed by PlanMessage/ProgressSummary.
+  | { type: "pipeline:started"; runId: string; sessionId: string; projectId?: string; skillName: SkillName; lifecyclePhase?: LifecyclePhase; gateMode: GateMode }
+  | { type: "pipeline:phase:started"; runId: string; sessionId: string; phaseIndex: number; phaseName: string; createsTickets?: boolean }
+  | { type: "pipeline:phase:completed"; runId: string; sessionId: string; phaseIndex: number; phaseName: string; agentResults?: { agent: AgentRole; ok: boolean; summary?: string }[] }
+  | { type: "pipeline:gate:pending"; runId: string; sessionId: string; gateId: string; phaseIndex: number }
+  | { type: "pipeline:gate:verdict"; runId: string; sessionId: string; gateId: string; verdict: string; passing: boolean; details?: string }
+  | { type: "pipeline:completed"; runId: string; sessionId: string; finalPhaseIndex: number }
+  | { type: "pipeline:error"; runId: string; sessionId: string; message: string; lastError?: string; failedPhaseIndex?: number }
+  | { type: "pipeline:cancelled"; runId: string; sessionId: string; cancelledAt: string; atPhaseIndex: number };
 
 /** API request/response types */
 export interface ApiResponse<T = unknown> {

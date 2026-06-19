@@ -1,5 +1,6 @@
 import type { AgentRole } from "./agent.js";
 import type { ModelTier } from "./agent.js";
+import type { SkillKind, GateMode, LifecyclePhase } from "./pipeline.js";
 
 export type SkillName =
   // Onboarding
@@ -131,6 +132,13 @@ export interface SkillPhase {
    * for tilemap, enemy, collectibles rather than duplicating those agents here.
    */
   subSkills?: SkillName[];
+  /**
+   * Pipeline-only. When true, dispatch this phase via the Task tool (the only
+   * Quest-ticket creator, which also triggers auto-verification on completion).
+   * When false/omit, dispatch via invokeAgent (no tickets). Default false for
+   * concept/design pipelines; true for sprint. Ignored by atomic/team skills.
+   */
+  createsTickets?: boolean;
 }
 
 export interface SkillDefinition {
@@ -142,4 +150,13 @@ export interface SkillDefinition {
   args?: SkillArg[];
   gates?: string[];
   teamMembers?: AgentRole[];
+  // ── Pipeline fields (optional; omitted = existing atomic/team behavior) ──
+  /** Discriminator. "pipeline" opts into the pipeline-runner with gate enforcement + resume. */
+  kind?: SkillKind;
+  /** Default "auto" for pipelines. "manual" pauses at every inter-phase gate. */
+  gateMode?: GateMode;
+  /** Default false for atomic/team; pipelines set true to persist run-state for resume. */
+  resumable?: boolean;
+  /** UI/sequencing label. NOT a milestone replacement. */
+  lifecyclePhase?: LifecyclePhase;
 }
