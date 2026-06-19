@@ -16,6 +16,7 @@ import type { Request, Response } from "express";
 import { skills } from "@game-studio/skills";
 import { SessionStore } from "@game-studio/state";
 import { loadConfig } from "../config.js";
+import { readData } from "./../services/data-store.js";
 import type { GateMode, SkillDefinition } from "@game-studio/types";
 import {
   startPipelineRun,
@@ -29,6 +30,26 @@ export const pipelineRouter: Router = Router();
 
 const config = loadConfig();
 const store = new SessionStore(config.WORKSPACE_DIR);
+
+/**
+ * Look up a session in either the SessionStore (autonomous-loop sessions, which
+ * are file-per-session under production/session-state) OR the chat-state JSON
+ * (chat sessions created via /api/chat/sessions). The two stores are owned by
+ * different routes and are NOT kept in sync; the pipeline runs are sessionId-
+ * keyed regardless of which store owns the record.
+ *
+ * Returns true iff some session record exists for sessionId in either store.
+ */
+async function sessionExists(sessionId: string): Promise<boolean> {
+  if (!sessionId) return false;
+  if (await store.get(sessionId)) return true;
+  try {
+    const chatState = await readData<{ sessions?: Record<string, unknown> }>("chat-state.json");
+    return Boolean(chatState?.sessions?.[sessionId]);
+  } catch {
+    return false;
+  }
+}
 
 // POST /start — start a pipeline run
 pipelineRouter.post("/start", async (req: Request, res: Response) => {
@@ -60,8 +81,7 @@ pipelineRouter.post("/start", async (req: Request, res: Response) => {
     return;
   }
 
-  const session = await store.get(sessionId);
-  if (!session) {
+  if (!(await sessionExists(sessionId))) {
     res.status(404).json({ success: false, error: "Session not found" });
     return;
   }
