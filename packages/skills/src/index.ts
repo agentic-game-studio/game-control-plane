@@ -19,3 +19,4 @@ for (const skill of teamSkills) {
 export const allSkillNames: SkillName[] = Object.keys(skills) as SkillName[];
 
 export { skillsByPhase, teamSkills, skillModelTiers };
+export { validateSkill, gatherSubSkills, LIFECYCLE_PHASES } from "./validate-skill.js";
