@@ -10,7 +10,6 @@ export const agentTiers: Record<AgentRole, { tier: 1 | 2 | 3; model: ModelTier }
   "creative-director": { tier: 1, model: "opus" },
   "technical-director": { tier: 1, model: "opus" },
   producer: { tier: 1, model: "opus" },
-  "game-director": { tier: 1, model: "opus" },
   // Tier 2 — Department Leads (Sonnet)
   "game-designer": { tier: 2, model: "sonnet" },
   "lead-programmer": { tier: 2, model: "sonnet" },

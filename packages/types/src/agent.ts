@@ -15,7 +15,6 @@ export type AgentRole =
   | "creative-director"
   | "technical-director"
   | "producer"
-  | "game-director"
   // Tier 2 — Department Leads
   | "game-designer"
   | "lead-programmer"
@@ -88,7 +87,7 @@ export type AgentRole =
 type AgentRoleTuple = [
   // Tier 1
   "autonomous-producer", "creative-director", "technical-director",
-  "producer", "game-director",
+  "producer",
   // Tier 2
   "game-designer", "lead-programmer", "art-director", "audio-director",
   "narrative-director", "qa-lead", "release-manager", "localization-lead",
@@ -116,7 +115,7 @@ type AgentRoleTuple = [
 export const AGENT_ROLES = [
   // Tier 1
   "autonomous-producer", "creative-director", "technical-director",
-  "producer", "game-director",
+  "producer",
   // Tier 2
   "game-designer", "lead-programmer", "art-director", "audio-director",
   "narrative-director", "qa-lead", "release-manager", "localization-lead",
