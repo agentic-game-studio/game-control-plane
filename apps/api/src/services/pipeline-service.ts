@@ -28,10 +28,11 @@ import type {
   StartPipelineOptions,
   WSEvent,
 } from "@game-studio/types";
-import { invokeAgent, type ProjectContext } from "./llm-service.js";
+import { invokeAgent, detectEngineFromWorkspace, type ProjectContext } from "./llm-service.js";
 import { executeGate } from "./gate-service.js";
 import { isGatePassing } from "./milestone-gate-service.js";
 import { broadcast } from "./websocket.js";
+import { readData } from "./data-store.js";
 import { newId } from "../utils/ids.js";
 import { loadConfig } from "../config.js";
 import { logger } from "../utils/logger.js";
@@ -441,10 +442,15 @@ export async function stopPipelineRun(runId: string): Promise<PipelineRunState |
     activeRuns.set(runId, run);
   }
   if (run.status === "completed" || run.status === "cancelled") return run;
+  // Persist first so a failed write doesn't leave in-memory state ahead of disk.
+  // Then commit the in-memory mutation + broadcast; if the in-memory mutation
+  // threw (it can't here, but defensive) the worst case is a stale read in memory.
+  const cancelledAt = new Date().toISOString();
+  const atPhaseIndex = run.currentPhaseIndex;
+  await persistRun({ ...run, status: "cancelled", cancelledAt });
   run.status = "cancelled";
-  run.cancelledAt = new Date().toISOString();
-  await persistRun(run);
-  emit({ type: "pipeline:cancelled", runId, sessionId: run.sessionId, cancelledAt: run.cancelledAt, atPhaseIndex: run.currentPhaseIndex });
+  run.cancelledAt = cancelledAt;
+  emit({ type: "pipeline:cancelled", runId, sessionId: run.sessionId, cancelledAt, atPhaseIndex });
   return run;
 }
 
@@ -472,8 +478,6 @@ export function getRunDone(runId: string): Promise<void> | undefined {
 async function resolveProjectContext(projectId?: string): Promise<ProjectContext | undefined> {
   if (!projectId) return undefined;
   try {
-    const { readData } = await import("./data-store.js");
-    const { detectEngineFromWorkspace } = await import("./llm-service.js");
     type DashboardData = { projects: { id: string; name: string; description?: string; engine?: string; workspacePath?: string }[] };
     const data = await readData<DashboardData>("dashboard.json");
     const project = data.projects.find((p) => p.id === projectId);

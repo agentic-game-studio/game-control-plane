@@ -69,8 +69,9 @@ describe("validateSkill — pipeline contract", () => {
       lifecyclePhase: "concept",
     });
     const issues = validateSkill(skill, skillMap, names);
-    // Only the "phases array" presence check + the synthetic name-mismatch check
-    // (from the script) would fire — validateSkill itself returns no contract issues.
+    // The test asserts ONLY the absence of pipeline-contract issues. The script's
+    // separate key-vs-field name-mismatch check (generate-skill-registry.ts:17-19)
+    // is intentionally out of scope here — validateSkill does not check it.
     expect(issues.filter((i) => i.includes("pipeline") || i.includes("subSkills"))).toEqual([]);
   });
 });
