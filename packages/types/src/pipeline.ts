@@ -62,6 +62,8 @@ export interface PhaseStatus {
   agentResults?: { agent: AgentRole; ok: boolean; summary?: string }[];
   /** Set when the run is paused at this phase's gate in manual mode. */
   gateHeld?: { gateId: string; since: string };
+  /** Optional human-readable note — e.g. a deep-research failure summary that didn't block the phase. */
+  lastError?: string;
 }
 
 export interface PipelineRunState {

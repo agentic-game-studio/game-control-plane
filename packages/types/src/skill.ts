@@ -108,6 +108,8 @@ export type SkillName =
   | "team-multiplayer"
   | "team-progression"
   | "team-world"
+  // Lifecycle Pipelines (Phase 1+) — opt into pipeline-runner via kind:"pipeline"
+  | "pipeline-concept"
   // Local Godot CLI
   | "godot-cli-ops";
 
