@@ -84,6 +84,7 @@ import {
   stopPipelineRun,
   getRun,
   hasActiveRunForSession,
+  listRuns,
   _setRunsDirForTest,
 } from "./pipeline-service.js";
 import { executeGate } from "./gate-service.js";
@@ -774,5 +775,98 @@ describe("pipeline-service /release (Phase 4)", () => {
     expect(buildPhase?.lastError).toMatch(/post-hook failed.*Godot not installed/);
     // Build failed but the run still advanced to the PR-MILESTONE gate.
     expect(getRun(run.runId)?.status).toBe("paused-at-gate");
+  });
+});
+
+/**
+ * Pipeline-make-game tests — Phase 5. Verifies /make-game sequences child
+ * pipelines (concept → design → slice → sprint → polish → release), each with
+ * parentRunId set, running children in auto + pausing the parent at the
+ * inter-pipeline PR-PHASE-GATE (manual). Exercises the gate-clearing fix that
+ * lets PR-PHASE-GATE repeat across phases.
+ */
+
+function buildMakeGameSkill() {
+  return {
+    name: "pipeline-make-game" as const,
+    description: "/make-game — full-lifecycle orchestrator",
+    userInvocable: true,
+    kind: "pipeline" as const,
+    gateMode: "manual" as const,
+    resumable: true,
+    lifecyclePhase: "production" as const,
+    phases: [
+      { order: 1, name: "concept", description: "x", agents: ["producer"] as any, gates: ["PR-PHASE-GATE"], createsTickets: false },
+      { order: 2, name: "design", description: "x", agents: ["producer"] as any, gates: ["PR-PHASE-GATE"], createsTickets: false },
+      { order: 3, name: "slice", description: "x", agents: ["producer"] as any, gates: ["PR-PHASE-GATE"], createsTickets: false },
+      { order: 4, name: "sprint", description: "x", agents: ["producer"] as any, gates: ["PR-PHASE-GATE"], createsTickets: false },
+      { order: 5, name: "polish", description: "x", agents: ["producer"] as any, gates: ["PR-PHASE-GATE"], createsTickets: false },
+      { order: 6, name: "release", description: "x", agents: ["producer"] as any, gates: ["PR-PHASE-GATE"], createsTickets: false },
+    ],
+  } as any;
+}
+
+describe("pipeline-service /make-game (Phase 5)", () => {
+  beforeEach(() => {
+    executeGateMock.mockClear();
+    runDeepResearchMock.mockClear();
+    ingestGDDMock.mockClear();
+    executeGodotExportMock.mockClear();
+    executeGateMock.mockResolvedValue({ gateId: "x", verdict: "APPROVE", details: "ok", agent: "producer", timestamp: new Date().toISOString() });
+    runDeepResearchMock.mockResolvedValue({ projectId: "p-test", concept: "test", timestamp: new Date().toISOString(), model: "mock", sections: [{ title: "M", content: "x" }], citations: [], totalTokens: 0, turns: 1 });
+    ingestGDDMock.mockResolvedValue({ gddPath: "/tmp/g.md", sectionsFound: 1, totalItems: 1, created: 1, skipped: 0, errors: [], createdTitles: [], skippedTitles: [], errorCount: 0 });
+    executeGodotExportMock.mockResolvedValue({ id: "build-mock", platform: "linux" });
+  });
+
+  it("manual mode: runs the concept child (auto) then pauses at PR-PHASE-GATE; advance chains to design (gate re-reviewed)", async () => {
+    const run = await startPipelineRun(buildMakeGameSkill(), "sess-mg-1", { projectId: "p-test", reviewMode: "full" });
+    await awaitLoop(run.runId);
+    // Parent paused at the first inter-pipeline gate (after the concept child).
+    expect(getRun(run.runId)?.status).toBe("paused-at-gate");
+    expect(getRun(run.runId)?.currentPhaseIndex).toBe(0);
+    // The concept child ran to completion with parentRunId set.
+    const children = listRuns("sess-mg-1").filter((r) => r.parentRunId === run.runId);
+    expect(children.length).toBeGreaterThanOrEqual(1);
+    expect(children.some((c) => c.skillName === "pipeline-concept" && c.status === "completed")).toBe(true);
+    // Gates: concept child's CD-PILLARS + parent's PR-PHASE-GATE both fired.
+    const gates = executeGateMock.mock.calls.map((c) => c[0]);
+    expect(gates).toEqual(expect.arrayContaining(["CD-PILLARS", "PR-PHASE-GATE"]));
+
+    // Advance → design child runs → pauses at the NEXT PR-PHASE-GATE (re-reviewed,
+    // proving the gate-clearing fix: PR-PHASE-GATE is not skipped globally).
+    await advanceFromGate(run.runId);
+    await awaitLoop(run.runId);
+    expect(getRun(run.runId)?.status).toBe("paused-at-gate");
+    expect(getRun(run.runId)?.currentPhaseIndex).toBe(1);
+    const children2 = listRuns("sess-mg-1").filter((r) => r.parentRunId === run.runId);
+    expect(children2.some((c) => c.skillName === "pipeline-design")).toBe(true);
+
+    await stopPipelineRun(run.runId);
+  });
+
+  it("PR-PHASE-GATE fires once per phase (6 times), not once globally — gate-clearing fix", async () => {
+    // Auto mode so the parent advances through every phase; count PR-PHASE-GATE reviews.
+    const run = await startPipelineRun(buildMakeGameSkill(), "sess-mg-gatecount", { gateMode: "auto", projectId: "p-test", reviewMode: "full" });
+    await awaitLoop(run.runId);
+    expect(getRun(run.runId)?.status).toBe("completed");
+    const prPhaseGateCount = executeGateMock.mock.calls.filter((c) => c[0] === "PR-PHASE-GATE").length;
+    expect(prPhaseGateCount).toBe(6); // one per lifecycle phase, not 1
+  });
+
+  it("auto mode: runs all 6 child pipelines end-to-end and completes", async () => {
+    const run = await startPipelineRun(buildMakeGameSkill(), "sess-mg-auto", { gateMode: "auto", projectId: "p-test", reviewMode: "full" });
+    await awaitLoop(run.runId);
+    expect(getRun(run.runId)?.status).toBe("completed");
+    // All 6 child pipelines ran, each with parentRunId set.
+    const children = listRuns("sess-mg-auto").filter((r) => r.parentRunId === run.runId);
+    const childSkills = new Set(children.map((c) => c.skillName));
+    expect(childSkills).toEqual(new Set(["pipeline-concept", "pipeline-design", "pipeline-slice", "pipeline-sprint", "pipeline-polish", "pipeline-release"]));
+    // The release child exported a build (proves the chain reached the final stage).
+    expect(executeGodotExportMock).toHaveBeenCalled();
+  });
+
+  it("make-game does NOT declare subSkills on any phase (registry-forbidden)", () => {
+    const skill = buildMakeGameSkill();
+    expect(skill.phases.every((p: { subSkills?: unknown }) => !p.subSkills)).toBe(true);
   });
 });

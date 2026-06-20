@@ -115,6 +115,7 @@ export type SkillName =
   | "pipeline-slice"
   | "pipeline-polish"
   | "pipeline-release"
+  | "pipeline-make-game"
   // Local Godot CLI
   | "godot-cli-ops";
 

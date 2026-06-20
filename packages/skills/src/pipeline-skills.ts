@@ -16,6 +16,7 @@
  * Phase 2 ship: `/design` (3 gates, 3 phases, manual mode).
  * Phase 3 ship: `/sprint` (auto-dispatches available tickets to feature teams).
  * Phase 4 ship: `/slice`, `/polish`, `/release` (pre-production → polish → release).
+ * Phase 5 ship: `/make-game` (chains the above into a full-lifecycle orchestrator).
  */
 
 import type { SkillDefinition } from "@game-studio/types";
@@ -230,6 +231,24 @@ export const pipelineSkills: SkillDefinition[] = [
         gates: ["PR-MILESTONE"],
         createsTickets: true,
       },
+    ],
+  },
+  {
+    name: "pipeline-make-game",
+    description:
+      "/make-game — orchestrate the full lifecycle: concept → design → slice → sprint → polish → release. Each lifecycle stage runs its child pipeline to completion (auto), then the producer reviews at a PR-PHASE-GATE before advancing to the next stage. Manual mode (default): /advance walks you through each stage with one approval between children. Auto mode: runs end-to-end without input. The manual counterpart to autonomous production — same primitives as the individual pipelines, only the parent's inter-pipeline gate-approval differs (plan principle 1).",
+    kind: "pipeline",
+    gateMode: "manual",
+    resumable: true,
+    lifecyclePhase: "production",
+    userInvocable: true,
+    phases: [
+      { order: 1, name: "concept", description: "Run the /concept child pipeline (auto) to a final concept + pillars.", agents: ["producer"], gates: ["PR-PHASE-GATE"], createsTickets: false },
+      { order: 2, name: "design", description: "Run the /design child pipeline (auto) to a GDD + art bible + ADRs.", agents: ["producer"], gates: ["PR-PHASE-GATE"], createsTickets: false },
+      { order: 3, name: "slice", description: "Run the /slice child pipeline (auto) to a vertical-slice prototype.", agents: ["producer"], gates: ["PR-PHASE-GATE"], createsTickets: false },
+      { order: 4, name: "sprint", description: "Run the /sprint child pipeline (auto) to dispatch + execute a sprint.", agents: ["producer"], gates: ["PR-PHASE-GATE"], createsTickets: false },
+      { order: 5, name: "polish", description: "Run the /polish child pipeline (auto).", agents: ["producer"], gates: ["PR-PHASE-GATE"], createsTickets: false },
+      { order: 6, name: "release", description: "Run the /release child pipeline (auto) to a build + sign-off.", agents: ["producer"], gates: ["PR-PHASE-GATE"], createsTickets: false },
     ],
   },
 ];

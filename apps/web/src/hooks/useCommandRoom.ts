@@ -2152,6 +2152,7 @@ Workflows:
   /slice               — Start a /slice pipeline (scope + prototype a vertical slice; TD-SYSTEM-BOUNDARY gate)
   /polish              — Start a /polish pipeline (profile + visual/audio polish; AD-PHASE-GATE gate)
   /release             — Start a /release pipeline (checklist + build export; PR-MILESTONE gate)
+  /make-game           — Start a /make-game orchestrator (full lifecycle concept→release; one /advance per stage)
 
 Utilities:
   /diff                — Show recent changes
@@ -2655,6 +2656,46 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
             .catch((err) => {
               setIsLoading(false);
               addSessionMessage(sid, { type: "system", sender: "SYSTEM", content: `/sprint failed: ${err instanceof Error ? err.message : "Unknown error"}` });
+            });
+          return;
+        }
+        case "make-game": {
+          const sid = producerSessionIdRef.current;
+          if (!sid) {
+            addSessionMessage(producerSessionIdRef.current, { type: "system", sender: "SYSTEM", content: "/make-game requires an active project (open one on /dashboard first)." });
+            return;
+          }
+          addSessionMessage(sid, { type: "user", sender: "DIRECTOR", content: trimmed });
+          setIsLoading(true);
+          apiFetch<{ success: boolean; data?: { runId: string; status: string; gateMode: string }; error?: string }>(
+            "/api/pipeline/start",
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                skillName: "pipeline-make-game",
+                sessionId: sid,
+                projectId: currentProjectIdRef.current || undefined,
+                taskArgs: args?.trim() || "",
+              }),
+            },
+          )
+            .then((result) => {
+              setIsLoading(false);
+              if (result.success && result.data) {
+                addSessionMessage(sid, {
+                  type: "system",
+                  sender: "producer",
+                  content: `▶ /make-game orchestrator started (runId: ${result.data.runId}, gateMode: ${result.data.gateMode}). Full lifecycle: concept → design → slice → sprint → polish → release. Each stage runs to completion then pauses at a PR-PHASE-GATE for your approval. Use /advance to move to the next stage, /stop <runId> to cancel.`,
+                  showActions: false,
+                });
+              } else {
+                addSessionMessage(sid, { type: "system", sender: "SYSTEM", content: `/make-game failed: ${result.error || "Unknown error"}` });
+              }
+            })
+            .catch((err) => {
+              setIsLoading(false);
+              addSessionMessage(sid, { type: "system", sender: "SYSTEM", content: `/make-game failed: ${err instanceof Error ? err.message : "Unknown error"}` });
             });
           return;
         }

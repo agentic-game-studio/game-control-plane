@@ -26,6 +26,7 @@ import type {
   PipelineRunState,
   PhaseStatus,
   SkillDefinition,
+  SkillName,
   StartPipelineOptions,
   WSEvent,
 } from "@game-studio/types";
@@ -166,6 +167,9 @@ async function runPhaseHook(
   if (when === "post" && phase.name === "gdd-draft") return runGddIngestHook(run);
   if (when === "pre" && phase.name === "sprint-dispatch") return runSprintDispatchHook(run);
   if (when === "post" && phase.name === "release-build") return runReleaseBuildHook(run, projectContext);
+  if (when === "pre" && run.skillName === "pipeline-make-game" && MAKE_GAME_CHILDREN[phase.name]) {
+    return runMakeGameChildHook(run, phase);
+  }
   return { ran: false, ok: true };
 }
 
@@ -312,6 +316,68 @@ async function runReleaseBuildHook(run: PipelineRunState, projectContext: Projec
     logger.error(
       { runId: run.runId, err: msg, event: "pipeline_release_build_failed" },
       "Godot export failed during release-build phase — sign-off still proceeds",
+    );
+    return { ran: true, ok: false, summary: `failed: ${msg}` };
+  }
+}
+
+/**
+ * /make-game's child-pipeline phase names → child skill. Each /make-game phase
+ * runs ONE child pipeline to completion, then the parent's PR-PHASE-GATE reviews
+ * before advancing to the next lifecycle stage. Phase names are unique to
+ * /make-game (no other pipeline has a phase named "concept"/"design"/"slice"/…),
+ * but the dispatcher is also guarded on run.skillName === "pipeline-make-game"
+ * so a future phase name collision can't accidentally trigger chaining.
+ */
+const MAKE_GAME_CHILDREN: Record<string, SkillName> = {
+  concept: "pipeline-concept",
+  design: "pipeline-design",
+  slice: "pipeline-slice",
+  sprint: "pipeline-sprint",
+  polish: "pipeline-polish",
+  release: "pipeline-release",
+};
+
+/**
+ * pre-hook: start + await a /make-game child pipeline. Children run AUTO so each
+ * completes end-to-end — passing the parent's manual gateMode to children would
+ * nest pauses (a manual child pauses at its own gate and never completes,
+ * breaking the parent's sequencing). The PARENT's inter-pipeline PR-PHASE-GATE
+ * is where the human approves moving to the next lifecycle stage. Each child
+ * carries parentRunId so its PipelineRunState is independent + resumable, and
+ * is NOT declared as a subSkill (registry-forbidden on pipeline phases).
+ */
+async function runMakeGameChildHook(run: PipelineRunState, phase: SkillDefinition["phases"][number]): Promise<PhaseHookResult> {
+  const childSkillName = MAKE_GAME_CHILDREN[phase.name];
+  if (!childSkillName) return { ran: false, ok: true };
+  const childSkill = skills[childSkillName] as SkillDefinition | undefined;
+  if (!childSkill) {
+    logger.error(
+      { runId: run.runId, child: childSkillName, event: "pipeline_makegame_child_missing" },
+      `make-game child skill ${childSkillName} not found in registry`,
+    );
+    return { ran: true, ok: false, summary: `child skill ${childSkillName} not found` };
+  }
+  try {
+    const childRun = await startPipelineRun(childSkill, run.sessionId, {
+      gateMode: "auto",
+      parentRunId: run.runId,
+      projectId: run.projectId,
+    });
+    // Await the child's detached loop to settle (auto → completes or errors).
+    const done = getRunDone(childRun.runId);
+    if (done) await done;
+    const final = getRun(childRun.runId);
+    const status = final?.status ?? "unknown";
+    if (status === "error" || status === "cancelled") {
+      return { ran: true, ok: false, summary: `child ${childSkillName} ${status}: ${final?.lastError ?? ""}` };
+    }
+    return { ran: true, ok: true, summary: `child ${childSkillName} ${status}` };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error(
+      { runId: run.runId, child: childSkillName, err: msg, event: "pipeline_makegame_child_failed" },
+      `make-game child ${childSkillName} failed`,
     );
     return { ran: true, ok: false, summary: `failed: ${msg}` };
   }
@@ -579,6 +645,13 @@ async function runPipelineLoop(
         // "passed" → fall through and advance
       }
 
+      // Advance to the next phase. Clear THIS phase's gate verdicts so a gate
+      // that legitimately repeats across phases (e.g. /make-game's PR-PHASE-GATE
+      // on every phase) is re-reviewed in the next phase rather than skipped by
+      // the gate-skip optimization above. (Within a single multi-gate phase, the
+      // skip still works because clearing happens only at phase advance, after all
+      // of the phase's gates have passed.)
+      for (const g of phase.gates ?? []) delete run.gateVerdicts[g];
       run.currentPhaseIndex += 1;
       await persistRun(run);
     }
