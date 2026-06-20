@@ -2149,6 +2149,9 @@ Workflows:
   /concept <idea>      — Start a /concept pipeline (research → pillars → CD-PILLARS gate)
   /design <idea>       — Start a /design pipeline (research → GDD → art/ADRs → CD-GDD-ALIGN, TD-FEASIBILITY, TD-ARCHITECTURE gates)
   /sprint              — Start a /sprint pipeline (reads available tickets, dispatches each to its feature team, PR-SPRINT gate)
+  /slice               — Start a /slice pipeline (scope + prototype a vertical slice; TD-SYSTEM-BOUNDARY gate)
+  /polish              — Start a /polish pipeline (profile + visual/audio polish; AD-PHASE-GATE gate)
+  /release             — Start a /release pipeline (checklist + build export; PR-MILESTONE gate)
 
 Utilities:
   /diff                — Show recent changes
@@ -2652,6 +2655,54 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
             .catch((err) => {
               setIsLoading(false);
               addSessionMessage(sid, { type: "system", sender: "SYSTEM", content: `/sprint failed: ${err instanceof Error ? err.message : "Unknown error"}` });
+            });
+          return;
+        }
+        case "slice":
+        case "polish":
+        case "release": {
+          const sid = producerSessionIdRef.current;
+          if (!sid) {
+            addSessionMessage(producerSessionIdRef.current, { type: "system", sender: "SYSTEM", content: `/${cmd} requires an active project (open one on /dashboard first).` });
+            return;
+          }
+          const skillName = cmd === "slice" ? "pipeline-slice" : cmd === "polish" ? "pipeline-polish" : "pipeline-release";
+          const describe = cmd === "slice"
+            ? "scope + prototype a vertical slice → TD-SYSTEM-BOUNDARY gate"
+            : cmd === "polish"
+              ? "profile + visual/audio polish → AD-PHASE-GATE gate"
+              : "release checklist + build export → PR-MILESTONE gate";
+          addSessionMessage(sid, { type: "user", sender: "DIRECTOR", content: trimmed });
+          setIsLoading(true);
+          apiFetch<{ success: boolean; data?: { runId: string; status: string; gateMode: string }; error?: string }>(
+            "/api/pipeline/start",
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                skillName,
+                sessionId: sid,
+                projectId: currentProjectIdRef.current || undefined,
+                taskArgs: args?.trim() || "",
+              }),
+            },
+          )
+            .then((result) => {
+              setIsLoading(false);
+              if (result.success && result.data) {
+                addSessionMessage(sid, {
+                  type: "system",
+                  sender: "producer",
+                  content: `▶ /${cmd} pipeline started (runId: ${result.data.runId}, gateMode: ${result.data.gateMode}). Will ${describe}. Use /advance to approve the gate, /stop <runId> to cancel.`,
+                  showActions: false,
+                });
+              } else {
+                addSessionMessage(sid, { type: "system", sender: "SYSTEM", content: `/${cmd} failed: ${result.error || "Unknown error"}` });
+              }
+            })
+            .catch((err) => {
+              setIsLoading(false);
+              addSessionMessage(sid, { type: "system", sender: "SYSTEM", content: `/${cmd} failed: ${err instanceof Error ? err.message : "Unknown error"}` });
             });
           return;
         }

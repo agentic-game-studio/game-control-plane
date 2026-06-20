@@ -65,6 +65,17 @@ vi.mock("./quest-bridge.js", () => ({
   createQuestTicket: vi.fn(async () => ({ id: "ticket-mock" })),
   moveQuestTicket: vi.fn(async () => undefined),
 }));
+vi.mock("./data-store.js", () => ({
+  // Return a project WITH workspacePath (so /release's build hook exports) but
+  // WITHOUT description (so /concept's deep-research still sees projectDescription
+  // undefined, keeping that assertion green).
+  readData: vi.fn(async () => ({
+    projects: [{ id: "p-test", name: "Test", engine: "godot", workspacePath: "./workspace/projects/p-test" }],
+  })),
+}));
+vi.mock("./build-service.js", () => ({
+  executeGodotExport: vi.fn(async () => ({ id: "build-mock", platform: "linux" })),
+}));
 
 import {
   startPipelineRun,
@@ -81,6 +92,7 @@ import { runDeepResearch, isDeepResearchAvailable } from "./deep-research-servic
 import { ingestGDD } from "./gdd-ingest-service.js";
 import { readTicketsBoard } from "./ticket-board.js";
 import { createQuestTicket, moveQuestTicket } from "./quest-bridge.js";
+import { executeGodotExport } from "./build-service.js";
 
 const executeGateMock = executeGate as unknown as ReturnType<typeof vi.fn>;
 const invokeAgentMock = invokeAgent as unknown as ReturnType<typeof vi.fn>;
@@ -90,6 +102,7 @@ const ingestGDDMock = ingestGDD as unknown as ReturnType<typeof vi.fn>;
 const readTicketsBoardMock = readTicketsBoard as unknown as ReturnType<typeof vi.fn>;
 const createQuestTicketMock = createQuestTicket as unknown as ReturnType<typeof vi.fn>;
 const moveQuestTicketMock = moveQuestTicket as unknown as ReturnType<typeof vi.fn>;
+const executeGodotExportMock = executeGodotExport as unknown as ReturnType<typeof vi.fn>;
 
 /** Build a 3-phase dummy pipeline skill (each phase has 1 agent for simplicity, except phase 1 which has 3 to exercise the once-per-phase gate placement). */
 function buildDummySkill(opts: { withGate?: boolean; subSkillsOnPipeline?: boolean } = {}) {
@@ -700,5 +713,66 @@ describe("pipeline-service /sprint (Phase 3)", () => {
     await awaitLoop(run.runId);
     expect(createQuestTicketMock).not.toHaveBeenCalled(); // nothing to dispatch
     expect(getRun(run.runId)?.status).toBe("paused-at-gate"); // PR-SPRINT still fires
+  });
+});
+
+/**
+ * Pipeline-release tests — Phase 4. Verifies /release: the release-build
+ * post-hook calls executeGodotExport (build + changelog), final-signoff
+ * (createsTickets:true) creates a ticket per agent, PR-MILESTONE fires, and a
+ * build failure is graceful (non-blocking).
+ */
+
+function buildReleaseSkill() {
+  return {
+    name: "pipeline-release" as const,
+    description: "/release — wrap team-release + export",
+    userInvocable: true,
+    kind: "pipeline" as const,
+    gateMode: "manual" as const,
+    resumable: true,
+    lifecyclePhase: "release" as const,
+    phases: [
+      { order: 1, name: "release-checklist", description: "x", agents: ["release-manager"] as any, createsTickets: false },
+      { order: 2, name: "qa-signoff", description: "x", agents: ["qa-lead"] as any, createsTickets: false },
+      { order: 3, name: "release-build", description: "x", agents: ["devops-engineer"] as any, createsTickets: false },
+      { order: 4, name: "final-signoff", description: "x", agents: ["release-manager", "producer"] as any, gates: ["PR-MILESTONE"], createsTickets: true },
+    ],
+  } as any;
+}
+
+describe("pipeline-service /release (Phase 4)", () => {
+  beforeEach(() => {
+    executeGodotExportMock.mockClear();
+    executeGodotExportMock.mockResolvedValue({ id: "build-mock", platform: "linux" });
+    createQuestTicketMock.mockClear();
+    moveQuestTicketMock.mockClear();
+    executeGateMock.mockResolvedValue({ gateId: "x", verdict: "APPROVE", details: "ok", agent: "release-manager", timestamp: new Date().toISOString() });
+  });
+
+  it("release-build post-hook calls executeGodotExport; final-signoff creates a ticket per agent; PR-MILESTONE fires", async () => {
+    const run = await startPipelineRun(buildReleaseSkill(), "sess-release-1", { projectId: "p-test", reviewMode: "full" });
+    await awaitLoop(run.runId);
+
+    // release-build post-hook fired executeGodotExport once with the resolved workspacePath.
+    expect(executeGodotExportMock).toHaveBeenCalledTimes(1);
+    expect(executeGodotExportMock).toHaveBeenCalledWith("p-test", "./workspace/projects/p-test", "linux");
+    // final-signoff (createsTickets:true, 2 agents) → 2 Quest tickets.
+    expect(createQuestTicketMock).toHaveBeenCalledTimes(2);
+    // PR-MILESTONE gate fired once (manual pause).
+    expect(executeGateMock).toHaveBeenCalledWith("PR-MILESTONE", "sess-release-1", expect.any(String));
+    expect(getRun(run.runId)?.status).toBe("paused-at-gate");
+  });
+
+  it("release-build hook is graceful when executeGodotExport throws (non-blocking)", async () => {
+    executeGodotExportMock.mockRejectedValueOnce(new Error("Godot not installed"));
+    const run = await startPipelineRun(buildReleaseSkill(), "sess-release-fail", { projectId: "p-test", reviewMode: "full" });
+    await awaitLoop(run.runId);
+
+    expect(executeGodotExportMock).toHaveBeenCalledTimes(1);
+    const buildPhase = getRun(run.runId)?.phaseStatuses.find((p) => p.name === "release-build");
+    expect(buildPhase?.lastError).toMatch(/post-hook failed.*Godot not installed/);
+    // Build failed but the run still advanced to the PR-MILESTONE gate.
+    expect(getRun(run.runId)?.status).toBe("paused-at-gate");
   });
 });

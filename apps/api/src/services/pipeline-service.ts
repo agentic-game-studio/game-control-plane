@@ -21,6 +21,7 @@
 import { skills } from "@game-studio/skills";
 import type {
   AgentRole,
+  BuildPlatform,
   GateResult,
   PipelineRunState,
   PhaseStatus,
@@ -36,6 +37,7 @@ import { ingestGDD } from "./gdd-ingest-service.js";
 import { createQuestTicket, moveQuestTicket } from "./quest-bridge.js";
 import { readTicketsBoard, resolveProjectIdForSession } from "./ticket-board.js";
 import { planSprintDispatch } from "./sprint-dispatcher.js";
+import { executeGodotExport } from "./build-service.js";
 import { broadcast } from "./websocket.js";
 import { readData } from "./data-store.js";
 import { newId } from "../utils/ids.js";
@@ -163,6 +165,7 @@ async function runPhaseHook(
   if (when === "pre" && phase.name === "market-research") return runDeepResearchHook(run, projectContext);
   if (when === "post" && phase.name === "gdd-draft") return runGddIngestHook(run);
   if (when === "pre" && phase.name === "sprint-dispatch") return runSprintDispatchHook(run);
+  if (when === "post" && phase.name === "release-build") return runReleaseBuildHook(run, projectContext);
   return { ran: false, ok: true };
 }
 
@@ -276,6 +279,39 @@ async function runSprintDispatchHook(run: PipelineRunState): Promise<PhaseHookRe
     logger.error(
       { runId: run.runId, err: msg, event: "pipeline_sprint_dispatch_failed" },
       "sprint-dispatch failed — producer agent still runs; gate enforcement proceeds",
+    );
+    return { ran: true, ok: false, summary: `failed: ${msg}` };
+  }
+}
+
+/**
+ * post-hook: /release's release-build phase. Exports the project via
+ * executeGodotExport (build artifact + changelog in one call). Graceful: no
+ * workspacePath/projectId or export failure → logged on PhaseStatus.lastError,
+ * non-blocking (release sign-off still proceeds). executeGodotExport shells out
+ * to Godot headless (~240s), so this is best-effort — the gate decides
+ * release-readiness, not the export itself.
+ */
+async function runReleaseBuildHook(run: PipelineRunState, projectContext: ProjectContext | undefined): Promise<PhaseHookResult> {
+  const workspacePath = projectContext?.workspacePath;
+  if (!workspacePath || !run.projectId) {
+    logger.warn(
+      { runId: run.runId, event: "pipeline_release_build_no_workspace" },
+      "release-build phase has no resolvable workspacePath/projectId — skipping export",
+    );
+    return { ran: true, ok: true, summary: "skipped: no workspacePath/projectId" };
+  }
+  try {
+    // Default platform; a future enhancement can fan out across platforms or
+    // read the target from taskArgs. One export proves the build path.
+    const platform: BuildPlatform = "linux";
+    const build = await executeGodotExport(run.projectId, workspacePath, platform);
+    return { ran: true, ok: true, summary: `build exported: ${build.id} (${platform})` };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error(
+      { runId: run.runId, err: msg, event: "pipeline_release_build_failed" },
+      "Godot export failed during release-build phase — sign-off still proceeds",
     );
     return { ran: true, ok: false, summary: `failed: ${msg}` };
   }

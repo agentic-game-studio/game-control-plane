@@ -42,6 +42,9 @@ export const COMMANDS = [
   { cmd: "/concept", desc: "Start a /concept pipeline (MiroMind research → creative-director pillars)" },
   { cmd: "/design", desc: "Start a /design pipeline (research → GDD → art bible/ADRs; 3 director gates)" },
   { cmd: "/sprint", desc: "Start a /sprint pipeline (auto-dispatch available tickets to feature teams)" },
+  { cmd: "/slice", desc: "Start a /slice pipeline (scope + prototype a vertical slice; TD-SYSTEM-BOUNDARY gate)" },
+  { cmd: "/polish", desc: "Start a /polish pipeline (profile + visual/audio polish; AD-PHASE-GATE gate)" },
+  { cmd: "/release", desc: "Start a /release pipeline (checklist + build export; PR-MILESTONE gate)" },
 ];
 
 interface PendingImage {

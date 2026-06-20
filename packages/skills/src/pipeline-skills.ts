@@ -15,6 +15,7 @@
  * Phase 1 ship: `/concept` (1 gate, 2 phases, manual mode).
  * Phase 2 ship: `/design` (3 gates, 3 phases, manual mode).
  * Phase 3 ship: `/sprint` (auto-dispatches available tickets to feature teams).
+ * Phase 4 ship: `/slice`, `/polish`, `/release` (pre-production → polish → release).
  */
 
 import type { SkillDefinition } from "@game-studio/types";
@@ -112,6 +113,122 @@ export const pipelineSkills: SkillDefinition[] = [
         agents: ["producer"],
         gates: ["PR-SPRINT"],
         createsTickets: false,
+      },
+    ],
+  },
+  {
+    name: "pipeline-slice",
+    description:
+      "/slice — scope and prototype a vertical slice. technical-director scopes the slice against the GDD, game-designer writes the slice spec, then the prototyper builds a playable prototype + runs a tech spike. TD-SYSTEM-BOUNDARY gate confirms the system boundary is sound before full production. Manual mode: /advance past the gate.",
+    kind: "pipeline",
+    gateMode: "manual",
+    resumable: true,
+    lifecyclePhase: "pre-production",
+    userInvocable: true,
+    phases: [
+      {
+        order: 1,
+        name: "scope-slice",
+        description: "technical-director scopes the vertical slice against the GDD: which systems, what's in/out, the riskiest unknown.",
+        agents: ["technical-director"],
+        createsTickets: false,
+      },
+      {
+        order: 2,
+        name: "slice-spec",
+        description: "game-designer writes the slice spec: the playable scenario, success criteria, and acceptance tests.",
+        agents: ["game-designer"],
+        createsTickets: false,
+      },
+      {
+        order: 3,
+        name: "prototype",
+        description: "prototyper builds a playable prototype and runs a tech spike on the riskiest unknown. Output: prototype artifact on disk. TD-SYSTEM-BOUNDARY gate confirms the system boundary.",
+        agents: ["prototyper"],
+        gates: ["TD-SYSTEM-BOUNDARY"],
+        createsTickets: false,
+      },
+    ],
+  },
+  {
+    name: "pipeline-polish",
+    description:
+      "/polish — wrap team-polish: profile, then visually + aurally polish, then a QA pass. performance-analyst profiles and reports, technical-artist applies visual polish, sound-designer applies audio polish, qa-tester runs a final pass. AD-PHASE-GATE holds for art-director sign-off. Manual mode: /advance past the gate.",
+    kind: "pipeline",
+    gateMode: "manual",
+    resumable: true,
+    lifecyclePhase: "polish",
+    userInvocable: true,
+    phases: [
+      {
+        order: 1,
+        name: "profile",
+        description: "performance-analyst profiles the build and writes a perf report (bottlenecks, frame budget, targets). Output: perf report on disk.",
+        agents: ["performance-analyst"],
+        createsTickets: false,
+      },
+      {
+        order: 2,
+        name: "visual-polish",
+        description: "technical-artist applies visual polish against the perf report + art bible (LODs, atlases, particle budget).",
+        agents: ["technical-artist"],
+        createsTickets: false,
+      },
+      {
+        order: 3,
+        name: "audio-polish",
+        description: "sound-designer applies audio polish (mix, ducking, variation).",
+        agents: ["sound-designer"],
+        createsTickets: false,
+      },
+      {
+        order: 4,
+        name: "qa-pass",
+        description: "qa-tester runs a final polish QA pass. AD-PHASE-GATE holds for art-director sign-off on the polished build.",
+        agents: ["qa-tester"],
+        gates: ["AD-PHASE-GATE"],
+        createsTickets: false,
+      },
+    ],
+  },
+  {
+    name: "pipeline-release",
+    description:
+      "/release — wrap team-release: release-manager checklist, qa-lead sign-off, devops-engineer exports a build, then final sign-off. The build phase auto-exports the project via executeGodotExport (build artifact + changelog). PR-MILESTONE gate holds for milestone sign-off. Manual mode: /advance past the gate.",
+    kind: "pipeline",
+    gateMode: "manual",
+    resumable: true,
+    lifecyclePhase: "release",
+    userInvocable: true,
+    phases: [
+      {
+        order: 1,
+        name: "release-checklist",
+        description: "release-manager runs the release checklist (store metadata, ratings, crash-readiness).",
+        agents: ["release-manager"],
+        createsTickets: false,
+      },
+      {
+        order: 2,
+        name: "qa-signoff",
+        description: "qa-lead signs off on release-readiness (smoke tests, cert checks).",
+        agents: ["qa-lead"],
+        createsTickets: false,
+      },
+      {
+        order: 3,
+        name: "release-build",
+        description: "devops-engineer drives the export. On phase completion the pipeline auto-exports the project via executeGodotExport (writes build artifact + changelog).",
+        agents: ["devops-engineer"],
+        createsTickets: false,
+      },
+      {
+        order: 4,
+        name: "final-signoff",
+        description: "release-manager + producer final sign-off. PR-MILESTONE gate holds for milestone approval. createsTickets:true records the release decision on the board (auto-verified).",
+        agents: ["release-manager", "producer"],
+        gates: ["PR-MILESTONE"],
+        createsTickets: true,
       },
     ],
   },
