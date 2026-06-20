@@ -36,6 +36,8 @@ interface ProgressSummaryProps {
   onCompact?: (sessionId: string) => void;
   /** Session currently being compacted (shows progress bar). */
   compactingSessionId?: string | null;
+  /** Remaining credits across subscription + top-up pools. */
+  remainingCredits?: number;
 }
 
 interface TicketColumn {
@@ -54,7 +56,7 @@ interface SessionPayload {
   conversationHistory?: Array<{ content?: unknown }>;
 }
 
-export default function ProgressSummary({ activeAgents, producerSessionId, currentSession, contextUsageMap, contextPressure, onCompact, compactingSessionId }: ProgressSummaryProps) {
+export default function ProgressSummary({ activeAgents, producerSessionId, currentSession, contextUsageMap, contextPressure, onCompact, compactingSessionId, remainingCredits }: ProgressSummaryProps) {
   const { currentProjectId } = useProject();
   /** Which session to show context for — active tab, falling back to producer. */
   const targetSession = currentSession || producerSessionId;
@@ -226,6 +228,20 @@ export default function ProgressSummary({ activeAgents, producerSessionId, curre
           </span>
           <span className="text-white font-[var(--font-mono)] text-xs">{activeAgents} active</span>
         </div>
+
+        {remainingCredits !== undefined && (
+          <>
+            <div className="w-px h-5 bg-[#2a2a4e] shrink-0" aria-hidden />
+            <div className="flex items-center gap-2 shrink-0 whitespace-nowrap" title="Remaining credits across subscription and top-up pools">
+              <span className="text-[#737688] text-[10px] font-[var(--font-terminal)] uppercase tracking-wider">
+                Credits
+              </span>
+              <span className={`font-[var(--font-mono)] text-xs font-bold tabular-nums ${remainingCredits < 100 ? "text-[#df2b31]" : "text-white"}`}>
+                {remainingCredits.toLocaleString()}
+              </span>
+            </div>
+          </>
+        )}
 
         <div className="w-px h-5 bg-[#2a2a4e] shrink-0" aria-hidden />
 

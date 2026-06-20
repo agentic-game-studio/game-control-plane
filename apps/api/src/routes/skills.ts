@@ -2,6 +2,7 @@ import { Router } from "express";
 import type { Request, Response } from "express";
 import { skills } from "@game-studio/skills";
 import { invokeAgent, detectEngineFromWorkspace, type ProjectContext } from "../services/llm-service.js";
+import { startPipelineRun } from "../services/pipeline-service.js";
 import { SessionStore } from "@game-studio/state";
 import { loadConfig } from "../config.js";
 import { broadcast } from "../services/websocket.js";
@@ -81,6 +82,28 @@ skillsRouter.post("/:id/invoke", async (req: Request, res: Response) => {
   }
 
   const projectContext = projectId ? await getProjectCtx(projectId) : undefined;
+
+  // Pipeline skills delegate to the pipeline-service runner (real gate enforcement +
+  // resumable run-state). Legacy atomic/team skills keep the phase loop below verbatim.
+  if (skill.kind === "pipeline") {
+    const run = await startPipelineRun(skill, sessionId, {
+      gateMode: skill.gateMode,
+      projectId,
+      reviewMode,
+      taskArgs,
+    });
+    res.json({
+      success: true,
+      data: {
+        skillId,
+        runId: run.runId,
+        status: run.status,
+        gateMode: run.gateMode,
+        sessionId,
+      },
+    });
+    return;
+  }
 
   // Execute phases sequentially if skill has phases
   if (skill.phases.length > 0) {

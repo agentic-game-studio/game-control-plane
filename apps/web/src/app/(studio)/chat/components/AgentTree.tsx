@@ -4,6 +4,7 @@ import { useState, useMemo } from "react";
 import { AGENT_TREE, getAgentIcon } from "@/lib/agent-icons";
 import type { AgentTreeNode } from "@/lib/agent-icons";
 import type { AgentSession, ProducerUIState, SubagentInfo } from "@/hooks/useCommandRoom";
+import type { UsageLogEntry } from "@game-studio/types";
 
 interface AgentTreeProps {
   sessions: Map<string, AgentSession>;
@@ -11,6 +12,8 @@ interface AgentTreeProps {
   currentSession: string;
   totalProgress: number;
   producerState?: ProducerUIState;
+  usageLog?: UsageLogEntry[];
+  remainingCredits?: number;
   onSelectSession: (sessionId: string) => void;
   onCloseSession?: (sessionId: string) => void;
   onSelectSubagent?: (subagent: SubagentInfo) => void;
@@ -133,7 +136,7 @@ function filterActiveTree(nodes: AgentTreeNode[], activeRoles: string[]): AgentT
 
 /* ─── Background Task Card ─── */
 
-function BackgroundTaskCard({ id, session, onSelect, onClose }: { id: string; session: AgentSession; onSelect?: (sessionId: string) => void; onClose?: (sessionId: string) => void }) {
+function BackgroundTaskCard({ id, session, creditsUsed, onSelect, onClose }: { id: string; session: AgentSession; creditsUsed?: number; onSelect?: (sessionId: string) => void; onClose?: (sessionId: string) => void }) {
   const icon = getAgentIcon(session.role);
   const label = session.role.replace(/-/g, "_").toUpperCase();
   const isDone = session.status === "completed";
@@ -155,6 +158,14 @@ function BackgroundTaskCard({ id, session, onSelect, onClose }: { id: string; se
             <span className="font-[var(--font-terminal)] text-[9px] uppercase text-[#737688]">
               {isDone ? "Complete" : isActive ? "Active" : "Idle"}
             </span>
+            {creditsUsed !== undefined && creditsUsed > 0 && (
+              <span
+                className="ml-auto font-[var(--font-terminal)] text-[9px] uppercase text-[#ba061b] border border-[#ba061b] px-1"
+                title={`${creditsUsed.toLocaleString()} credits used by this session`}
+              >
+                -{creditsUsed.toLocaleString()} CR
+              </span>
+            )}
           </div>
         </div>
         {onClose && (
@@ -211,7 +222,7 @@ function SubagentCard({ subagent, onSelect }: { subagent: SubagentInfo; onSelect
 
 /* ─── Main Sidebar ─── */
 
-export default function AgentTree({ sessions, subagents, currentSession, totalProgress, producerState, onSelectSession, onCloseSession, onSelectSubagent }: AgentTreeProps) {
+export default function AgentTree({ sessions, subagents, currentSession, totalProgress, producerState, usageLog, remainingCredits, onSelectSession, onCloseSession, onSelectSubagent }: AgentTreeProps) {
   const [showHierarchy, setShowHierarchy] = useState(false);
   const entries = useMemo(() => [...sessions.entries()], [sessions]);
   const producerEntry = useMemo(() => entries.find(([, s]) => s.role === "producer"), [entries]);
@@ -233,6 +244,20 @@ export default function AgentTree({ sessions, subagents, currentSession, totalPr
   const backgroundTasks = useMemo(() =>
     entries.filter(([, s]) => s.role !== "producer"),
     [entries]);
+
+  // Aggregate credits per session once per render instead of filtering
+  // the full usage log for every task card. usageLog is capped at 500
+  // entries on the backend, but getSessionCredits ran a filter+reduce
+  // over it on each card + each in-flight row.
+  const creditsBySession = useMemo(() => {
+    const map = new Map<string, number>();
+    if (!usageLog) return map;
+    for (const entry of usageLog) {
+      if (!entry.sessionId) continue;
+      map.set(entry.sessionId, (map.get(entry.sessionId) ?? 0) + entry.creditsUsed);
+    }
+    return map;
+  }, [usageLog]);
 
   const activeBackgroundTasks = useMemo(() =>
     backgroundTasks.filter(([, s]) => s.status === "active"),
@@ -332,21 +357,32 @@ export default function AgentTree({ sessions, subagents, currentSession, totalPr
                 </span>
               </div>
               <div className="px-3 py-2 space-y-2">
-                {activeBackgroundTasks.slice(0, 3).map(([id, session]) => (
-                  <button
-                    key={id}
-                    onClick={() => onSelectSession(id)}
-                    className="w-full flex items-center gap-2 text-left border border-black bg-white px-2 py-1.5 hover:bg-[#f3f2ff] transition-colors"
-                  >
-                    <span className="material-symbols-outlined text-sm">{getAgentIcon(session.role)}</span>
-                    <span className="font-[var(--font-label)] text-[10px] font-bold uppercase truncate flex-1">
-                      {session.role.replace(/-/g, "_")}
-                    </span>
-                    <span className="font-[var(--font-terminal)] text-[9px] uppercase text-[#737688]">
-                      {session.progress > 0 ? `${session.progress}%` : "running"}
-                    </span>
-                  </button>
-                ))}
+                {activeBackgroundTasks.slice(0, 3).map(([id, session]) => {
+                  const credits = creditsBySession.get(id) ?? 0;
+                  return (
+                    <button
+                      key={id}
+                      onClick={() => onSelectSession(id)}
+                      className="w-full flex items-center gap-2 text-left border border-black bg-white px-2 py-1.5 hover:bg-[#f3f2ff] transition-colors"
+                    >
+                      <span className="material-symbols-outlined text-sm">{getAgentIcon(session.role)}</span>
+                      <span className="font-[var(--font-label)] text-[10px] font-bold uppercase truncate flex-1">
+                        {session.role.replace(/-/g, "_")}
+                      </span>
+                      {credits > 0 && (
+                        <span
+                          className="font-[var(--font-terminal)] text-[9px] uppercase text-[#ba061b] border border-[#ba061b] px-1"
+                          title={`${credits.toLocaleString()} credits used`}
+                        >
+                          -{credits.toLocaleString()}
+                        </span>
+                      )}
+                      <span className="font-[var(--font-terminal)] text-[9px] uppercase text-[#737688]">
+                        {session.progress > 0 ? `${session.progress}%` : "running"}
+                      </span>
+                    </button>
+                  );
+                })}
                 {activeSubagents.slice(0, 2).map((subagent) => (
                   <button
                     key={subagent.id}
@@ -379,6 +415,7 @@ export default function AgentTree({ sessions, subagents, currentSession, totalPr
                   key={id}
                   id={id}
                   session={session}
+                  creditsUsed={creditsBySession.get(id) ?? 0}
                   onSelect={onSelectSession}
                   onClose={onCloseSession}
                 />
@@ -422,6 +459,17 @@ export default function AgentTree({ sessions, subagents, currentSession, totalPr
 
       {/* Status Panel */}
       <div className="border-t-2 border-black bg-[#f3f2ff] p-4 shrink-0">
+        {remainingCredits !== undefined && (
+          <div className="flex items-center justify-between mb-2 pb-2 border-b-2 border-black/10">
+            <span className="font-[var(--font-terminal)] text-[10px] uppercase text-[#434656]">Credits</span>
+            <span
+              className={`font-[var(--font-mono)] text-xs font-bold tabular-nums ${remainingCredits < 100 ? "text-[#df2b31]" : "text-black"}`}
+              title="Remaining credits across subscription and top-up pools"
+            >
+              {remainingCredits.toLocaleString()} CR
+            </span>
+          </div>
+        )}
         {totalActive > 0 ? (
           <>
             <div className="flex items-center gap-2 mb-2">

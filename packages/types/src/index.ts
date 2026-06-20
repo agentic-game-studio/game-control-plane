@@ -15,3 +15,4 @@ export * from "./assets.js";
 export * from "./settings.js";
 export * from "./builds.js";
 export * from "./metrics.js";
+export * from "./pipeline.js";

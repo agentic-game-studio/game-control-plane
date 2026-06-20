@@ -3,6 +3,8 @@
 import { useState, useEffect } from "react";
 import AgentTree from "./components/AgentTree";
 import ChatTabs from "./components/ChatTabs";
+import AgentSelector from "./components/AgentSelector";
+import CurrentAgentHeader from "./components/CurrentAgentHeader";
 import ChatThread, { setCurrentProjectIdForMarkdownCache, clearProjectMarkdownCache } from "./components/ChatThread";
 import CommandInput from "./components/CommandInput";
 import QuestionToolbar from "./components/QuestionToolbar";
@@ -16,6 +18,7 @@ import { useCommandRoom } from "@/hooks/useCommandRoom";
 import { ProjectGuard } from "@/components/ProjectGuard";
 import { useProject } from "@/contexts/ProjectContext";
 import { useDialog } from "@/hooks/useDialog";
+import { useSettings } from "@/hooks/useSettings";
 import { useGodotMCPStatus } from "@/hooks/useGodotMCPStatus";
 
 export default function ChatPage() {
@@ -38,6 +41,11 @@ function ChatPageInner() {
     currentProject?.id ?? null,
     (currentProject?.engine as "godot" | null) ?? null,
   );
+  const { data: settings } = useSettings();
+  const remainingCredits = settings?.credits
+    ? (settings.credits.subscription.current ?? 0) + (settings.credits.onTop.current ?? 0)
+    : undefined;
+  const usageLog = settings?.usageLog ?? [];
   const [selectedSubagentId, setSelectedSubagentId] = useState<string | null>(null);
   const [focusMode, setFocusMode] = useState<boolean>(() => {
     if (typeof window === "undefined") return true;
@@ -101,6 +109,8 @@ function ChatPageInner() {
     messageQueue,
     producerSessionId,
     producerUIState,
+    currentPersona,
+    switchPersona,
     activityFeed,
     toastNotifications,
     dismissToast,
@@ -200,6 +210,8 @@ function ChatPageInner() {
           currentSession={currentSession}
           totalProgress={totalProgress}
           producerState={producerUIState}
+          usageLog={usageLog}
+          remainingCredits={remainingCredits}
           onSelectSession={selectSession}
           onCloseSession={handleCloseSession}
           onSelectSubagent={(sa) => setSelectedSubagentId(sa.id)}
@@ -235,19 +247,28 @@ function ChatPageInner() {
                 : "Full orchestration view with agent tree, in-flight work, and activity rail."}
             </div>
           </div>
-          <button
-            onClick={() => setFocusMode((value) => !value)}
-            className={`shrink-0 flex items-center gap-2 border-2 border-black px-3 py-1.5 font-[var(--font-label)] text-[10px] font-bold uppercase transition-colors ${
-              focusMode
-                ? "bg-black text-white hover:bg-[#0055FF]"
-                : "bg-white text-black hover:bg-black hover:text-white"
-            }`}
-          >
-            <span className="material-symbols-outlined text-sm">
-              {focusMode ? "center_focus_strong" : "dashboard_customize"}
-            </span>
-            {focusMode ? "Exit Focus" : "Enter Focus"}
-          </button>
+          <div className="flex items-center gap-2">
+            {currentSession === producerSessionId && (
+              <AgentSelector
+                currentPersona={currentPersona}
+                onSelect={switchPersona}
+                disabled={isLoading}
+              />
+            )}
+            <button
+              onClick={() => setFocusMode((value) => !value)}
+              className={`shrink-0 flex items-center gap-2 border-2 border-black px-3 py-1.5 font-[var(--font-label)] text-[10px] font-bold uppercase transition-colors ${
+                focusMode
+                  ? "bg-black text-white hover:bg-[#0055FF]"
+                  : "bg-white text-black hover:bg-black hover:text-white"
+              }`}
+            >
+              <span className="material-symbols-outlined text-sm">
+                {focusMode ? "center_focus_strong" : "dashboard_customize"}
+              </span>
+              {focusMode ? "Exit Focus" : "Enter Focus"}
+            </button>
+          </div>
         </div>
         <ProgressSummary
           activeAgents={[...sessions.values()].filter(s => s.status === "active" && s.role !== "producer").length}
@@ -257,6 +278,7 @@ function ChatPageInner() {
           contextPressure={contextPressure}
           onCompact={compactSession}
           compactingSessionId={compactingSessionId}
+          remainingCredits={remainingCredits}
         />
         {currentSession === producerSessionId && producerUIState && producerUIState.mode !== "available" && (
           <ProducerStateBanner producerState={producerUIState} />
@@ -358,6 +380,9 @@ function ChatPageInner() {
             </div>
           );
         })()}
+        {currentSession === producerSessionId && (
+          <CurrentAgentHeader persona={currentPersona} />
+        )}
         <ChatThread
           messages={currentMessages}
           sessions={sessions}

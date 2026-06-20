@@ -119,10 +119,10 @@ describe("quest-bridge workflow locks", () => {
     const sessionId = `s-${Date.now()}-a`;
     const workflowId = startWorkflow(sessionId);
 
-    // 10-L2: workflowId is now `wf-<ms>-<6 hex>` for collision
-    // resistance across concurrent startWorkflow calls. Update the
-    // regex to match the new format.
-    expect(workflowId).toMatch(/^wf-\d+-[0-9a-f]{6}$/);
+    // workflowId is now `wf-<uuid>` (128 bits via newId()) for collision
+    // resistance across concurrent startWorkflow calls. The 26th-pass
+    // audit migrated the old `wf-<ms>-<6hex>` (24 bits) to newId().
+    expect(workflowId).toMatch(/^wf-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
     const wf = getWorkflow(sessionId);
     expect(wf?.workflowId).toBe(workflowId);
     expect(wf?.stage).toBe("plan");

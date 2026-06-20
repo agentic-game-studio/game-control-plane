@@ -29,7 +29,7 @@ export function ProjectGuard({ children }: { children: ReactNode }) {
   if (!currentProject) {
     return (
       <div className="flex h-full items-center justify-center bg-surface p-8">
-        <div className="border-2 border-black bg-yellow-300 shadow-[6px_6px_0_0_rgba(0,0,0,1)] p-6 max-w-md w-full">
+        <div className="border-2 border-black bg-yellow-300 shadow-[6px_6px_0_0_rgba(0,0,0,1)] p-8 max-w-lg w-full">
           <div className="flex items-center gap-3 mb-3">
             <span className="material-symbols-outlined text-2xl">warning</span>
             <h2 className="font-[var(--font-headline)] text-xl font-black uppercase tracking-tighter">

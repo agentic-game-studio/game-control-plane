@@ -302,7 +302,7 @@ settingsRouter.post("/upgrade", async (req: Request, res: Response) => {
 
 // POST /api/settings/consume - Consume credits for a task
 settingsRouter.post("/consume", async (req: Request, res: Response) => {
-  const { taskName, creditsUsed } = req.body as { taskName?: string; creditsUsed?: number };
+  const { taskName, creditsUsed, sessionId } = req.body as { taskName?: string; creditsUsed?: number; sessionId?: string };
 
   if (!taskName || !creditsUsed || creditsUsed <= 0 || !Number.isFinite(creditsUsed)) {
     res.status(400).json({ success: false, error: "Invalid task name or credit amount" });
@@ -355,6 +355,7 @@ settingsRouter.post("/consume", async (req: Request, res: Response) => {
             taskName,
             creditsUsed,
             timestamp: new Date().toISOString(),
+            sessionId,
           },
         ],
       };

@@ -52,6 +52,7 @@ const warnedAgents = new Map<AgentRole, true>();
 export async function consumeCreditsForAgent(
   agentRole: AgentRole,
   taskLabel: string,
+  sessionId?: string,
 ): Promise<boolean> {
   let creditsUsed = AGENT_CREDIT_COST[agentRole];
   if (creditsUsed === undefined) {
@@ -110,10 +111,15 @@ export async function consumeCreditsForAgent(
             // `settings.ts:308` was already migrated in a prior pass
             // but this file was missed. Mirrors the Q4-6th (tickets),
             // Q5-6th (assets), and 22-M-predictable-build-id fix shape.
+            // 32-H-usage-log-session: associate credit consumption with
+            // the agent session so the chat UI can show per-session
+            // credit badges. sessionId is optional for backward
+            // compatibility with manual /api/settings/consume calls.
             id: newId("use"),
             taskName: `${agentRole}: ${taskLabel.slice(0, 80)}`,
             creditsUsed,
             timestamp: new Date().toISOString(),
+            sessionId,
           },
         ],
       };

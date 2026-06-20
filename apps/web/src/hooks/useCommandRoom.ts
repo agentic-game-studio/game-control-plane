@@ -6,7 +6,7 @@ import { useWebSocket } from "./useWebSocket";
 import { useProject } from "@/contexts/ProjectContext";
 import { CHAT_CACHE_SAVE_DEBOUNCE_MS, LLM_LOADING_TIMEOUT_MS, QUEUE_DRAIN_DELAY_MS } from "@/lib/timing";
 import { contextFillPercentFromUsage } from "@/lib/chat-context";
-import type { WSEvent, ContextUsage } from "@game-studio/types";
+import type { WSEvent, ContextUsage, AgentRole } from "@game-studio/types";
 const logger = createLogger("useCommandRoom");
 
 export interface DiffBlock {
@@ -104,6 +104,7 @@ export interface AgentSession {
   status: "active" | "done" | "completed";
   progress: number;
   spawnedAt: string;
+  currentPersona?: AgentRole;
   fileOps?: FileOp[];
 }
 
@@ -404,6 +405,19 @@ function mergeCachedMessagesIntoBackendSession(
 
 function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, producerSessionId: string, recentApiMessages?: Map<string, number>): WSHandlerResult {
   const messages: WSHandlerResult["messages"] = [];
+  /**
+   * Resolve the target session for a pipeline:* event. Prefer the event's
+   * sessionId when an agent/sub-session is registered for it; otherwise fall
+   * back to the active producer session. Returns "" if neither exists — the
+   * caller bails out with `{ sessions: null, messages }` in that case.
+   *
+   * Local to this handler so the 8 pipeline:* cases share one implementation
+   * of the routing rule.
+   */
+  const pipelineEventTarget = (eventSessionId: string): string => {
+    if (sessions.has(eventSessionId)) return eventSessionId;
+    return producerSessionId;
+  };
   switch (event.type) {
     case "agent:spawned": {
       const sid = event.sessionId;
@@ -717,6 +731,129 @@ function handleWSEvent(event: WSEvent, sessions: Map<string, AgentSession>, prod
       }});
       return { sessions: null, messages };
     }
+    case "pipeline:started": {
+      const target = pipelineEventTarget(event.sessionId);
+      if (!target) return { sessions: null, messages };
+      return {
+        sessions: null,
+        messages: [{
+          sessionRole: target,
+          msg: {
+            type: "system",
+            sender: "producer",
+            content: `▶ Pipeline started — skill: ${event.skillName}${event.lifecyclePhase ? ` (phase: ${event.lifecyclePhase})` : ""}, gateMode: ${event.gateMode}, runId: ${event.runId}`,
+          },
+        }],
+      };
+    }
+    case "pipeline:phase:started": {
+      const target = pipelineEventTarget(event.sessionId);
+      if (!target) return { sessions: null, messages };
+      return {
+        sessions: null,
+        messages: [{
+          sessionRole: target,
+          msg: {
+            type: "progress",
+            sender: "producer",
+            content: `Phase ${event.phaseIndex + 1} starting — ${event.phaseName}`,
+          },
+        }],
+      };
+    }
+    case "pipeline:phase:completed": {
+      const target = pipelineEventTarget(event.sessionId);
+      if (!target) return { sessions: null, messages };
+      const agentSummary = (event.agentResults ?? [])
+        .map((r) => `${r.agent}${r.ok ? " ✓" : " ✗"}`)
+        .join(", ");
+      return {
+        sessions: null,
+        messages: [{
+          sessionRole: target,
+          msg: {
+            type: "progress",
+            sender: "producer",
+            content: `Phase ${event.phaseIndex + 1} complete — ${event.phaseName}${agentSummary ? ` (${agentSummary})` : ""}`,
+          },
+        }],
+      };
+    }
+    case "pipeline:gate:pending": {
+      const target = pipelineEventTarget(event.sessionId);
+      if (!target) return { sessions: null, messages };
+      return {
+        sessions: null,
+        messages: [{
+          sessionRole: target,
+          msg: {
+            type: "question",
+            sender: "producer",
+            content: `⏸ Pipeline paused at gate ${event.gateId} (phase ${event.phaseIndex + 1}). Review the verdict and run \`/advance <runId>\` to continue, or \`/stop <runId>\` to cancel.`,
+          },
+        }],
+      };
+    }
+    case "pipeline:gate:verdict": {
+      const target = pipelineEventTarget(event.sessionId);
+      if (!target) return { sessions: null, messages };
+      return {
+        sessions: null,
+        messages: [{
+          sessionRole: target,
+          msg: {
+            type: "system",
+            sender: "producer",
+            content: `Gate ${event.gateId} verdict: ${event.verdict}${event.passing ? " (passing)" : " (blocked)"}${event.details ? ` — ${event.details.slice(0, 200)}` : ""}`,
+          },
+        }],
+      };
+    }
+    case "pipeline:completed": {
+      const target = pipelineEventTarget(event.sessionId);
+      if (!target) return { sessions: null, messages };
+      return {
+        sessions: null,
+        messages: [{
+          sessionRole: target,
+          msg: {
+            type: "system",
+            sender: "producer",
+            content: `✅ Pipeline completed (final phase: ${event.finalPhaseIndex + 1})`,
+          },
+        }],
+      };
+    }
+    case "pipeline:error": {
+      const target = pipelineEventTarget(event.sessionId);
+      if (!target) return { sessions: null, messages };
+      return {
+        sessions: null,
+        messages: [{
+          sessionRole: target,
+          msg: {
+            type: "system",
+            sender: "SYSTEM",
+            content: `❌ Pipeline error: ${event.message}${event.lastError ? ` — ${event.lastError}` : ""}`,
+          },
+        }],
+      };
+    }
+    case "pipeline:cancelled": {
+      const target = pipelineEventTarget(event.sessionId);
+      if (!target) return { sessions: null, messages };
+      return {
+        sessions: null,
+        messages: [{
+          sessionRole: target,
+          msg: {
+            type: "system",
+            sender: "SYSTEM",
+            content: `⏹ Pipeline cancelled at phase ${event.atPhaseIndex + 1}`,
+          },
+        }],
+      };
+    }
     case "chat:session:deleted": {
       const sid = event.sessionId;
       if (!sessions.has(sid)) return { sessions: null, messages };
@@ -822,6 +959,7 @@ interface BackendSession {
   status: string;
   progress: number;
   spawnedAt: string;
+  currentPersona?: AgentRole;
 }
 
 function backendSessionToAgentSession(s: BackendSession): AgentSession {
@@ -836,6 +974,7 @@ function backendSessionToAgentSession(s: BackendSession): AgentSession {
     status: s.status as "active" | "done" | "completed",
     progress: s.progress,
     spawnedAt: s.spawnedAt,
+    currentPersona: s.currentPersona,
     fileOps: [],
   };
 }
@@ -860,6 +999,7 @@ export function useCommandRoom() {
   const [compactingSessionId, setCompactingSessionId] = useState<string | null>(null);
   const [activityFeed, setActivityFeed] = useState<ActivityItem[]>([]);
   const [toastNotifications, setToastNotifications] = useState<ActivityItem[]>([]);
+  const [currentPersona, setCurrentPersona] = useState<AgentRole>("producer");
 
   // Q9-11: surface console.error paths to the user. Many error handlers
   // logged to console but the UI never saw them — operators staring at a
@@ -936,6 +1076,13 @@ export function useCommandRoom() {
   currentSessionRef.current = currentSession;
   const producerSessionIdRef = useRef(producerSessionId);
   producerSessionIdRef.current = producerSessionId;
+  // 32-H-persona-rollback: track the persisted persona so switchPersona
+  // can roll back its optimistic update if the API call fails. Without
+  // this ref, a failed switch leaves the UI showing a persona the
+  // backend never accepted, so the next LLM call uses the wrong system
+  // prompt while the header claims otherwise.
+  const currentPersonaRef = useRef(currentPersona);
+  currentPersonaRef.current = currentPersona;
   const sessionsRef = useRef<Map<string, AgentSession>>(new Map());
   const subagentsRef = useRef<Map<string, SubagentInfo>>(new Map());
   const contextUsageMapRef = useRef(contextUsageMap);
@@ -1113,6 +1260,8 @@ export function useCommandRoom() {
             ? cachedForMerge.currentSession
             : producerSession.id;
         setCurrentSession(restoredTab);
+        // Sync the active persona from the producer session (default producer).
+        setCurrentPersona(producerSession.currentPersona ?? "producer");
         // 10-C3: only randomize threadId/threadTitle if the cache didn't
         // already provide them. The previous code unconditionally overwrote
         // the cached values on every page load, so the user saw
@@ -1422,6 +1571,13 @@ export function useCommandRoom() {
           });
           return next;
         });
+        break;
+      }
+
+      case "chat:persona:switched": {
+        if (event.sessionId === producerSessionIdRef.current) {
+          setCurrentPersona(event.persona);
+        }
         break;
       }
 
@@ -1900,6 +2056,50 @@ export function useCommandRoom() {
       const cmd = parts[0];
       const args = parts.slice(1).join(" ");
 
+      // All 7 lifecycle pipeline slash commands share one launch path: POST
+      // /api/pipeline/start with a skillName, then surface a per-command status
+      // message. launchPipeline is the single implementation; each case below just
+      // passes its {skillName, defaultArgs, message} spec (plan risk R4 — keeps the
+      // command surface, CommandInput suggestions, and /help text aligned).
+      const launchPipeline = (spec: {
+        skillName: string;
+        defaultArgs?: string;
+        message: (r: { runId: string; gateMode: string }) => string;
+      }) => {
+        const sid = producerSessionIdRef.current;
+        if (!sid) {
+          addSessionMessage(producerSessionIdRef.current, { type: "system", sender: "SYSTEM", content: `/${cmd} requires an active project (open one on /dashboard first).` });
+          return;
+        }
+        addSessionMessage(sid, { type: "user", sender: "DIRECTOR", content: trimmed });
+        setIsLoading(true);
+        apiFetch<{ success: boolean; data?: { runId: string; status: string; gateMode: string }; error?: string }>(
+          "/api/pipeline/start",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              skillName: spec.skillName,
+              sessionId: sid,
+              projectId: currentProjectIdRef.current || undefined,
+              taskArgs: args?.trim() || spec.defaultArgs || "",
+            }),
+          },
+        )
+          .then((result) => {
+            setIsLoading(false);
+            if (result.success && result.data) {
+              addSessionMessage(sid, { type: "system", sender: "producer", content: spec.message(result.data), showActions: false });
+            } else {
+              addSessionMessage(sid, { type: "system", sender: "SYSTEM", content: `/${cmd} failed: ${result.error || "Unknown error"}` });
+            }
+          })
+          .catch((err) => {
+            setIsLoading(false);
+            addSessionMessage(sid, { type: "system", sender: "SYSTEM", content: `/${cmd} failed: ${err instanceof Error ? err.message : "Unknown error"}` });
+          });
+      };
+
       switch (cmd) {
         case "clear": {
           // 6F-6th: read the active session / project from refs, not state.
@@ -1990,6 +2190,13 @@ Session:
 
 Workflows:
   /ralphloop <task>    — Run research→plan→code→verify loop
+  /concept <idea>      — Start a /concept pipeline (research → pillars → CD-PILLARS gate)
+  /design <idea>       — Start a /design pipeline (research → GDD → art/ADRs → CD-GDD-ALIGN, TD-FEASIBILITY, TD-ARCHITECTURE gates)
+  /sprint              — Start a /sprint pipeline (reads available tickets, dispatches each to its feature team, PR-SPRINT gate)
+  /slice               — Start a /slice pipeline (scope + prototype a vertical slice; TD-SYSTEM-BOUNDARY gate)
+  /polish              — Start a /polish pipeline (profile + visual/audio polish; AD-PHASE-GATE gate)
+  /release             — Start a /release pipeline (checklist + build export; PR-MILESTONE gate)
+  /make-game           — Start a /make-game orchestrator (full lifecycle concept→release; one /advance per stage)
 
 Utilities:
   /diff                — Show recent changes
@@ -2374,6 +2581,50 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
             });
           return;
         }
+        case "concept":
+          launchPipeline({
+            skillName: "pipeline-concept",
+            defaultArgs: "an unreleased game concept",
+            message: (r) => `▶ /concept pipeline started (runId: ${r.runId}, gateMode: ${r.gateMode}). Waiting for MiroMind research → creative-director pillars → CD-PILLARS gate. Use /advance to approve gates, /stop <runId> to cancel.`,
+          });
+          return;
+        case "design":
+          launchPipeline({
+            skillName: "pipeline-design",
+            defaultArgs: "an unreleased game concept",
+            message: (r) => `▶ /design pipeline started (runId: ${r.runId}, gateMode: ${r.gateMode}). Waiting for market-research → GDD draft (auto-ingested to board) → art bible/ADRs through CD-GDD-ALIGN, TD-FEASIBILITY, TD-ARCHITECTURE gates. Use /advance to approve each gate, /stop <runId> to cancel.`,
+          });
+          return;
+        case "sprint":
+          launchPipeline({
+            skillName: "pipeline-sprint",
+            message: (r) => `▶ /sprint pipeline started (runId: ${r.runId}, gateMode: ${r.gateMode}). Reading available tickets → dispatching each to its feature team (CODE→team-combat, UI→team-ui, NARRATIVE→team-narrative, …) → PR-SPRINT gate. Use /advance to approve the gate, /stop <runId> to cancel.`,
+          });
+          return;
+        case "slice":
+          launchPipeline({
+            skillName: "pipeline-slice",
+            message: (r) => `▶ /slice pipeline started (runId: ${r.runId}, gateMode: ${r.gateMode}). Will scope + prototype a vertical slice → TD-SYSTEM-BOUNDARY gate. Use /advance to approve the gate, /stop <runId> to cancel.`,
+          });
+          return;
+        case "polish":
+          launchPipeline({
+            skillName: "pipeline-polish",
+            message: (r) => `▶ /polish pipeline started (runId: ${r.runId}, gateMode: ${r.gateMode}). Will profile + visual/audio polish → AD-PHASE-GATE gate. Use /advance to approve the gate, /stop <runId> to cancel.`,
+          });
+          return;
+        case "release":
+          launchPipeline({
+            skillName: "pipeline-release",
+            message: (r) => `▶ /release pipeline started (runId: ${r.runId}, gateMode: ${r.gateMode}). Will release checklist + build export → PR-MILESTONE gate. Use /advance to approve the gate, /stop <runId> to cancel.`,
+          });
+          return;
+        case "make-game":
+          launchPipeline({
+            skillName: "pipeline-make-game",
+            message: (r) => `▶ /make-game orchestrator started (runId: ${r.runId}, gateMode: ${r.gateMode}). Full lifecycle: concept → design → slice → sprint → polish → release. Each stage runs to completion then pauses at a PR-PHASE-GATE for your approval. Use /advance to move to the next stage, /stop <runId> to cancel.`,
+          });
+          return;
         default: {
           addSessionMessage(producerSessionIdRef.current, { type: "system", sender: "SYSTEM", content: `Unknown command: /${cmd}. Type /help for available commands.` });
           return;
@@ -2701,6 +2952,25 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
     }
   }, []);
 
+  const switchPersona = useCallback(async (persona: AgentRole) => {
+    if (!currentProjectId || !producerSessionId) return;
+    const previous = currentPersonaRef.current;
+    setCurrentPersona(persona);
+    try {
+      await apiFetch(`/api/chat/sessions/${encodeURIComponent(producerSessionId)}/persona`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ persona }),
+      });
+    } catch (err) {
+      logger.error("Failed to switch persona", { err });
+      pushToast("failed", "Persona switch failed", err instanceof Error ? err.message : String(err));
+      // Roll back the optimistic update so the header matches the
+      // backend's still-persisted persona.
+      setCurrentPersona(previous);
+    }
+  }, [currentProjectId, producerSessionId, pushToast]);
+
   // Derived state — memoized to avoid unnecessary re-renders
   const currentMessages = useMemo(() => sessions.get(currentSession)?.messages ?? [], [sessions, currentSession]);
   const totalProgress = useMemo(() => {
@@ -2854,6 +3124,8 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
     messageQueue,
     producerSessionId,
     producerUIState,
+    currentPersona,
+    switchPersona,
     activityFeed,
     toastNotifications,
     dismissToast,

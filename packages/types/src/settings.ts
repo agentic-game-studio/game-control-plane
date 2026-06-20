@@ -70,6 +70,8 @@ export interface UsageLogEntry {
   taskName: string;
   creditsUsed: number;
   timestamp: string;
+  /** Optional agent session id that triggered this credit consumption. */
+  sessionId?: string;
 }
 
 export interface SettingsConfig {

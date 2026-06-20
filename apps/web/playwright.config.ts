@@ -43,6 +43,13 @@ export default defineConfig({
         ENABLE_TEST_ENDPOINTS: "true",
         E2E_API_KEY: process.env.E2E_API_KEY || "e2e-test-only-not-a-secret",
         API_PORT: "3001",
+        // The full pipeline e2e suite issues >10 POST /api/pipeline/start calls
+        // within 60s (each spec starts a run; /make-game + the collision test add
+        // more). The production default rate limit is 10/min/IP (config.ts) — the
+        // suite trips it and later /start calls 429. Raise the limit for the TEST
+        // server only; production keeps the 10/min default. Legitimate because the
+        // test server is single-user on localhost.
+        RATE_LIMIT_REQUESTS: "120",
       },
     },
   ],

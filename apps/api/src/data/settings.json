@@ -1,1 +1,22 @@
-{}
+{
+  "targetEngine": "Unity",
+  "assetModel": "Studio XYZ Optimized (Fast)",
+  "externalApiKey": "",
+  "webhookUrl": "",
+  "tier": "novice",
+  "autoRenew": true,
+  "credits": {
+    "subscription": {
+      "current": 1000,
+      "weeklyAllowance": 1000,
+      "resetAt": "2026-05-22T17:00:00.000Z"
+    },
+    "onTop": {
+      "current": 0,
+      "totalPurchased": 0
+    },
+    "burnRatePerHour": 120
+  },
+  "topUpHistory": [],
+  "usageLog": []
+}
