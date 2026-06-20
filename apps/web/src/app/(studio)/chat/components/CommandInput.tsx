@@ -41,6 +41,7 @@ export const COMMANDS = [
   { cmd: "/ralphloop", desc: "Run research→plan→code→verify loop" },
   { cmd: "/concept", desc: "Start a /concept pipeline (MiroMind research → creative-director pillars)" },
   { cmd: "/design", desc: "Start a /design pipeline (research → GDD → art bible/ADRs; 3 director gates)" },
+  { cmd: "/sprint", desc: "Start a /sprint pipeline (auto-dispatch available tickets to feature teams)" },
 ];
 
 interface PendingImage {

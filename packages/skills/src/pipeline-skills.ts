@@ -14,6 +14,7 @@
  *
  * Phase 1 ship: `/concept` (1 gate, 2 phases, manual mode).
  * Phase 2 ship: `/design` (3 gates, 3 phases, manual mode).
+ * Phase 3 ship: `/sprint` (auto-dispatches available tickets to feature teams).
  */
 
 import type { SkillDefinition } from "@game-studio/types";
@@ -82,6 +83,34 @@ export const pipelineSkills: SkillDefinition[] = [
           "Produce the art bible (style guide, palette, constraints) and capture the technical architecture / ADRs needed to realize the GDD. Output: art bible entry + ADR(s) under workspace/docs/architecture/. The two TD gates confirm the design is buildable and architecturally sound.",
         agents: ["creative-director", "art-director"],
         gates: ["TD-FEASIBILITY", "TD-ARCHITECTURE"],
+        createsTickets: false,
+      },
+    ],
+  },
+  {
+    name: "pipeline-sprint",
+    description:
+      "/sprint — execute a sprint: read available tickets off the Kanban board, group them by area, and auto-dispatch each group to the matching feature team (CODE→team-combat/combat-subarea, UI→team-ui, NARRATIVE→team-narrative, ART→team-world, AUDIO→team-audio, etc. via sprint-dispatcher). Each dispatch creates a Quest ticket and triggers auto-verification. The producer then reviews the sprint, gated by PR-SPRINT. Manual mode: /advance past the PR-SPRINT gate. Note: team-polish and team-release are NOT sprint targets (they are lifecycle-stage teams driven by /polish and /release).",
+    kind: "pipeline",
+    gateMode: "manual",
+    resumable: true,
+    lifecyclePhase: "production",
+    userInvocable: true,
+    phases: [
+      {
+        order: 1,
+        name: "sprint-dispatch",
+        description:
+          "Pre-hook reads the board's available column, groups tickets by area→team, and dispatches each team's lead agent via the Task tool (creates Quest tickets + triggers verification). The producer agent then summarizes the dispatched work.",
+        agents: ["producer"],
+        createsTickets: false,
+      },
+      {
+        order: 2,
+        name: "sprint-review",
+        description: "Producer reviews sprint outcomes against the GDD/scope. PR-SPRINT gate holds for approval.",
+        agents: ["producer"],
+        gates: ["PR-SPRINT"],
         createsTickets: false,
       },
     ],

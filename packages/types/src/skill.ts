@@ -111,6 +111,7 @@ export type SkillName =
   // Lifecycle Pipelines (Phase 1+) — opt into pipeline-runner via kind:"pipeline"
   | "pipeline-concept"
   | "pipeline-design"
+  | "pipeline-sprint"
   // Local Godot CLI
   | "godot-cli-ops";
 

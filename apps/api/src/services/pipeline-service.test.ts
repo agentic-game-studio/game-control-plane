@@ -57,6 +57,14 @@ vi.mock("./gdd-ingest-service.js", () => ({
     errorCount: 0,
   })),
 }));
+vi.mock("./ticket-board.js", () => ({
+  readTicketsBoard: vi.fn(async () => ({ columns: [{ id: "available", label: "Available", tickets: [] }] })),
+  resolveProjectIdForSession: vi.fn(async () => "p-test"),
+}));
+vi.mock("./quest-bridge.js", () => ({
+  createQuestTicket: vi.fn(async () => ({ id: "ticket-mock" })),
+  moveQuestTicket: vi.fn(async () => undefined),
+}));
 
 import {
   startPipelineRun,
@@ -71,12 +79,17 @@ import { executeGate } from "./gate-service.js";
 import { invokeAgent } from "./llm-service.js";
 import { runDeepResearch, isDeepResearchAvailable } from "./deep-research-service.js";
 import { ingestGDD } from "./gdd-ingest-service.js";
+import { readTicketsBoard } from "./ticket-board.js";
+import { createQuestTicket, moveQuestTicket } from "./quest-bridge.js";
 
 const executeGateMock = executeGate as unknown as ReturnType<typeof vi.fn>;
 const invokeAgentMock = invokeAgent as unknown as ReturnType<typeof vi.fn>;
 const runDeepResearchMock = runDeepResearch as unknown as ReturnType<typeof vi.fn>;
 const isDeepResearchAvailableMock = isDeepResearchAvailable as unknown as ReturnType<typeof vi.fn>;
 const ingestGDDMock = ingestGDD as unknown as ReturnType<typeof vi.fn>;
+const readTicketsBoardMock = readTicketsBoard as unknown as ReturnType<typeof vi.fn>;
+const createQuestTicketMock = createQuestTicket as unknown as ReturnType<typeof vi.fn>;
+const moveQuestTicketMock = moveQuestTicket as unknown as ReturnType<typeof vi.fn>;
 
 /** Build a 3-phase dummy pipeline skill (each phase has 1 agent for simplicity, except phase 1 which has 3 to exercise the once-per-phase gate placement). */
 function buildDummySkill(opts: { withGate?: boolean; subSkillsOnPipeline?: boolean } = {}) {
@@ -612,5 +625,80 @@ describe("pipeline-service /design (Phase 2)", () => {
     expect(ingestGDDMock).toHaveBeenCalledTimes(1);
     expect(executeGateMock).toHaveBeenCalledTimes(1);
     expect(getRun(runId)?.status).toBe("paused-at-gate");
+  });
+});
+
+/**
+ * Pipeline-sprint tests — Phase 3. Verifies /sprint reads available tickets off
+ * the board, groups by area→team, dispatches each team's lead agent via the
+ * Task-tool recipe (createQuestTicket + moveQuestTicket("qa")), and ends with
+ * the PR-SPRINT gate.
+ */
+
+function buildSprintSkill() {
+  return {
+    name: "pipeline-sprint" as const,
+    description: "/sprint — dispatch available tickets to feature teams",
+    userInvocable: true,
+    kind: "pipeline" as const,
+    gateMode: "manual" as const,
+    resumable: true,
+    lifecyclePhase: "production" as const,
+    phases: [
+      { order: 1, name: "sprint-dispatch", description: "Dispatch", agents: ["producer"] as any, createsTickets: false },
+      { order: 2, name: "sprint-review", description: "Review", agents: ["producer"] as any, gates: ["PR-SPRINT"], createsTickets: false },
+    ],
+  } as any;
+}
+
+describe("pipeline-service /sprint (Phase 3)", () => {
+  beforeEach(() => {
+    readTicketsBoardMock.mockClear();
+    createQuestTicketMock.mockClear();
+    moveQuestTicketMock.mockClear();
+    executeGateMock.mockResolvedValue({ gateId: "x", verdict: "APPROVE", details: "ok", agent: "producer", timestamp: new Date().toISOString() });
+  });
+
+  it("sprint-dispatch reads available tickets and dispatches one agent per team area via the Task recipe", async () => {
+    readTicketsBoardMock.mockResolvedValue({
+      columns: [
+        { id: "available", label: "Available", tickets: [
+          { id: "t1", title: "Build HUD", area: "ui", status: "available" },
+          { id: "t2", title: "Write intro", area: "narrative", status: "available" },
+        ] },
+      ],
+    } as any);
+
+    const run = await startPipelineRun(buildSprintSkill(), "sess-sprint-1", { projectId: "p-test", reviewMode: "full" });
+    await awaitLoop(run.runId);
+
+    // 2 distinct areas → 2 dispatched team agents (ui-programmer, writer), each
+    // via createQuestTicket (the Task-tool recipe). NOT the producer.
+    expect(createQuestTicketMock).toHaveBeenCalledTimes(2);
+    const dispatchedAgents = createQuestTicketMock.mock.calls.map((c) => c[2]); // agentRole arg
+    expect(dispatchedAgents).toEqual(expect.arrayContaining(["ui-programmer", "writer"]));
+    // Each dispatch does in_progress + qa → 2 moveQuestTicket per ticket.
+    expect(moveQuestTicketMock).toHaveBeenCalledTimes(4);
+    // producer ran for both phases (sprint-dispatch + sprint-review).
+    expect(invokeAgentMock).toHaveBeenCalledTimes(4); // 2 dispatched + 2 producer
+    expect(getRun(run.runId)?.status).toBe("paused-at-gate"); // PR-SPRINT manual pause
+  });
+
+  it("PR-SPRINT gate fires once and pauses in manual mode", async () => {
+    readTicketsBoardMock.mockResolvedValue({
+      columns: [{ id: "available", label: "Available", tickets: [{ id: "t1", title: "X", area: "qa", status: "available" }] }],
+    } as any);
+    const run = await startPipelineRun(buildSprintSkill(), "sess-sprint-gate", { projectId: "p-test", reviewMode: "full" });
+    await awaitLoop(run.runId);
+    expect(executeGateMock).toHaveBeenCalledWith("PR-SPRINT", "sess-sprint-gate", expect.any(String));
+    expect(getRun(run.runId)?.status).toBe("paused-at-gate");
+  });
+
+  it("sprint-dispatch with no available tickets is a graceful no-op (producer still runs, PR-SPRINT still fires)", async () => {
+    readTicketsBoardMock.mockResolvedValue({ columns: [{ id: "available", label: "Available", tickets: [] }] } as any);
+    const run = await startPipelineRun(buildSprintSkill(), "sess-sprint-empty", { projectId: "p-test", reviewMode: "full" });
+    await awaitLoop(run.runId);
+    expect(createQuestTicketMock).not.toHaveBeenCalled(); // nothing to dispatch
+    expect(getRun(run.runId)?.status).toBe("paused-at-gate"); // PR-SPRINT still fires
   });
 });

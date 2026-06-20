@@ -33,6 +33,9 @@ import { executeGate } from "./gate-service.js";
 import { isGatePassing } from "./milestone-gate-service.js";
 import { runDeepResearch, isDeepResearchAvailable } from "./deep-research-service.js";
 import { ingestGDD } from "./gdd-ingest-service.js";
+import { createQuestTicket, moveQuestTicket } from "./quest-bridge.js";
+import { readTicketsBoard, resolveProjectIdForSession } from "./ticket-board.js";
+import { planSprintDispatch } from "./sprint-dispatcher.js";
 import { broadcast } from "./websocket.js";
 import { readData } from "./data-store.js";
 import { newId } from "../utils/ids.js";
@@ -159,6 +162,7 @@ async function runPhaseHook(
 ): Promise<PhaseHookResult> {
   if (when === "pre" && phase.name === "market-research") return runDeepResearchHook(run, projectContext);
   if (when === "post" && phase.name === "gdd-draft") return runGddIngestHook(run);
+  if (when === "pre" && phase.name === "sprint-dispatch") return runSprintDispatchHook(run);
   return { ran: false, ok: true };
 }
 
@@ -232,10 +236,57 @@ async function runGddIngestHook(run: PipelineRunState): Promise<PhaseHookResult>
 }
 
 /**
- * Run a single phase's agents sequentially (v1). `createsTickets:true` phases
- * SHOULD dispatch via the Task tool (the only Quest-ticket creator), but that
- * wiring lands in Phase 3 (/sprint). No Phase 0 pipeline skill sets it, so this
- * branch is dormant; flagged so Phase 3 can swap invokeAgent → executeTool("Task").
+ * pre-hook: /sprint's sprint-dispatch phase. Reads available tickets off the
+ * Kanban board, groups them by area→team (sprint-dispatcher), and dispatches each
+ * team's lead agent via the Task-tool recipe (spawnTicketedAgent → Quest ticket +
+ * triggerVerification). This is what makes /sprint auto-route work to the right
+ * feature team. Graceful: no projectId / no available tickets / failure → logged,
+ * non-blocking (the producer agent still runs to summarize).
+ */
+async function runSprintDispatchHook(run: PipelineRunState): Promise<PhaseHookResult> {
+  const projectId = run.projectId ?? (await resolveProjectIdForSession(run.sessionId)) ?? undefined;
+  if (!projectId) {
+    logger.warn(
+      { runId: run.runId, event: "pipeline_sprint_no_project" },
+      "sprint-dispatch phase has no projectId (and session resolved to none) — skipping dispatch",
+    );
+    return { ran: true, ok: true, summary: "skipped: no projectId on run" };
+  }
+  try {
+    const board = await readTicketsBoard(projectId);
+    const available = board.columns.find((c) => c.id === "available")?.tickets ?? [];
+    if (available.length === 0) {
+      return { ran: true, ok: true, summary: "no available tickets to dispatch" };
+    }
+    const units = planSprintDispatch(available);
+    let dispatched = 0;
+    for (const unit of units) {
+      if (isCancelled(run)) break;
+      const task = `SPRINT DISPATCH — ${unit.ticketCount} ticket(s) in area "${unit.area}" routed to ${unit.teamSkill} (lead agent: ${unit.agent}). Tickets: ${unit.ticketTitles.slice(0, 6).join("; ") || "(untitled)"}. Implement/resolve these and report completion.`;
+      await spawnTicketedAgent(run, "pipeline-sprint", unit.agent, task);
+      dispatched += 1;
+    }
+    return {
+      ran: true,
+      ok: true,
+      summary: `dispatched ${dispatched} team(s) (${units.map((u) => u.teamSkill).join(", ")}) across ${available.length} available ticket(s)`,
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error(
+      { runId: run.runId, err: msg, event: "pipeline_sprint_dispatch_failed" },
+      "sprint-dispatch failed — producer agent still runs; gate enforcement proceeds",
+    );
+    return { ran: true, ok: false, summary: `failed: ${msg}` };
+  }
+}
+
+/**
+ * Run a single phase's agents sequentially (v1). When `phase.createsTickets` is
+ * true, each agent is dispatched via the Task-tool recipe (createQuestTicket →
+ * in_progress → invokeAgent → qa) — the only path that creates Quest tickets AND
+ * triggers auto-verification (moveQuestTicket("qa") fires triggerVerification).
+ * This serves ticket-producing phases (e.g. /polish's QA pass, /sprint dispatch).
  */
 async function runPhaseAgents(
   run: PipelineRunState,
@@ -249,29 +300,80 @@ async function runPhaseAgents(
   for (const agentRole of phase.agents) {
     if (isCancelled(run)) break;
     const task = buildTask(skill, phase, taskArgs, total);
-    if (phase.createsTickets) {
-      // Phase 3 TODO: dispatch via executeTool("Task", {...}) so Quest tickets are
-      // created + auto-verification triggered. For now (no pipeline skill uses it),
-      // fall through to invokeAgent.
-      logger.warn(
-        { runId: run.runId, phase: phase.name, event: "pipeline_creates_tickets_unwired" },
-        `Phase ${phase.name} declares createsTickets but Task-tool dispatch is wired in Phase 3; using invokeAgent`,
-      );
-    }
-    const result = await invokeAgent(
-      agentRole as AgentRole,
-      task,
-      run.sessionId,
-      undefined,
-      undefined,
-      undefined,
-      true,
-      1,
-      projectContext,
-    );
+    const result = await dispatchPhaseAgent(run, skill, agentRole as AgentRole, task, phase, projectContext);
     results.push({ agent: agentRole, ok: true, summary: result.content.slice(0, 200) });
   }
   return results;
+}
+
+/**
+ * Spawn one agent wrapped in the Task-tool recipe (createQuestTicket → in_progress
+ * → invokeAgent → qa). moveQuestTicket("qa") is what fires triggerVerification.
+ * Shared by createsTickets phase dispatch AND /sprint team dispatch. Degrades
+ * gracefully: a ticket-creation failure logs and runs the agent bare; a qa-move
+ * failure logs (verification may not fire). invokeAgent runs exactly once.
+ */
+async function spawnTicketedAgent(
+  run: PipelineRunState,
+  skillName: string,
+  agentRole: AgentRole,
+  task: string,
+  projectContext?: ProjectContext,
+) {
+  const invoke = () =>
+    invokeAgent(agentRole, task, run.sessionId, undefined, undefined, undefined, true, 1, projectContext);
+
+  let ticketId: string | undefined;
+  try {
+    const ticket = await createQuestTicket(
+      run.sessionId,
+      task.slice(0, 80),
+      agentRole,
+      task,
+      "WORKFLOW",
+      `pipeline:${skillName}`,
+      run.projectId,
+    );
+    ticketId = ticket.id;
+    await moveQuestTicket(ticketId, "in_progress", agentRole, run.projectId);
+  } catch (err) {
+    logger.error(
+      { runId: run.runId, agent: agentRole, err: String(err), event: "pipeline_ticket_create_failed" },
+      "createQuestTicket failed — running agent without a Quest ticket",
+    );
+    return invoke();
+  }
+
+  const result = await invoke();
+
+  try {
+    // moveQuestTicket("qa") fires triggerVerification (quest-bridge).
+    await moveQuestTicket(ticketId, "qa", agentRole, run.projectId);
+  } catch (err) {
+    logger.warn(
+      { runId: run.runId, agent: agentRole, ticketId, err: String(err), event: "pipeline_ticket_qa_failed" },
+      "moveQuestTicket(qa) failed — auto-verification may not fire for this ticket",
+    );
+  }
+  return result;
+}
+
+/**
+ * Dispatch one phase agent. createsTickets phases route through spawnTicketedAgent
+ * (Quest ticket + auto-verification); otherwise a bare invokeAgent.
+ */
+async function dispatchPhaseAgent(
+  run: PipelineRunState,
+  skill: SkillDefinition,
+  agentRole: AgentRole,
+  task: string,
+  phase: SkillDefinition["phases"][number],
+  projectContext?: ProjectContext,
+) {
+  if (!phase.createsTickets) {
+    return invokeAgent(agentRole, task, run.sessionId, undefined, undefined, undefined, true, 1, projectContext);
+  }
+  return spawnTicketedAgent(run, skill.name, agentRole, task, projectContext);
 }
 
 type GateOutcome = "passed" | "paused" | "error";
