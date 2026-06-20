@@ -826,15 +826,17 @@ export function listRuns(sessionId?: string): PipelineRunState[] {
 }
 
 /**
- * True if a run for this session is still ACTIVE (running or paused-at-gate).
- * Completed/cancelled/error runs do NOT count — a fresh /start is allowed once
- * the previous run has reached a terminal state. Used by routes/pipeline.ts to
- * reject a second concurrent run for the same session (409 collision), which
- * Phase 5 (/make-game) would otherwise amplify into a write race on the same
- * project artifacts.
+ * True if a run for this session is still ACTIVE (idle/running/paused-at-gate).
+ * "idle" is included because startPipelineRun registers the run in activeRuns
+ * with status "idle" before the detached loop flips it to "running" — a second
+ * /start issued in that window must still see the first run as active (otherwise
+ * the 409 collision guard races and lets a duplicate through). Completed/
+ * cancelled/error runs do NOT count. Used by routes/pipeline.ts to reject a
+ * second concurrent run for the same session (409 collision), which Phase 5
+ * (/make-game) would otherwise amplify into a write race on project artifacts.
  */
 export function hasActiveRunForSession(sessionId: string): boolean {
-  return listRuns(sessionId).some((r) => r.status === "running" || r.status === "paused-at-gate");
+  return listRuns(sessionId).some((r) => r.status === "idle" || r.status === "running" || r.status === "paused-at-gate");
 }
 
 /** Await a run's detached loop (reaches terminal/paused state). For callers/tests. */

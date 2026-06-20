@@ -2056,6 +2056,50 @@ export function useCommandRoom() {
       const cmd = parts[0];
       const args = parts.slice(1).join(" ");
 
+      // All 7 lifecycle pipeline slash commands share one launch path: POST
+      // /api/pipeline/start with a skillName, then surface a per-command status
+      // message. launchPipeline is the single implementation; each case below just
+      // passes its {skillName, defaultArgs, message} spec (plan risk R4 — keeps the
+      // command surface, CommandInput suggestions, and /help text aligned).
+      const launchPipeline = (spec: {
+        skillName: string;
+        defaultArgs?: string;
+        message: (r: { runId: string; gateMode: string }) => string;
+      }) => {
+        const sid = producerSessionIdRef.current;
+        if (!sid) {
+          addSessionMessage(producerSessionIdRef.current, { type: "system", sender: "SYSTEM", content: `/${cmd} requires an active project (open one on /dashboard first).` });
+          return;
+        }
+        addSessionMessage(sid, { type: "user", sender: "DIRECTOR", content: trimmed });
+        setIsLoading(true);
+        apiFetch<{ success: boolean; data?: { runId: string; status: string; gateMode: string }; error?: string }>(
+          "/api/pipeline/start",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              skillName: spec.skillName,
+              sessionId: sid,
+              projectId: currentProjectIdRef.current || undefined,
+              taskArgs: args?.trim() || spec.defaultArgs || "",
+            }),
+          },
+        )
+          .then((result) => {
+            setIsLoading(false);
+            if (result.success && result.data) {
+              addSessionMessage(sid, { type: "system", sender: "producer", content: spec.message(result.data), showActions: false });
+            } else {
+              addSessionMessage(sid, { type: "system", sender: "SYSTEM", content: `/${cmd} failed: ${result.error || "Unknown error"}` });
+            }
+          })
+          .catch((err) => {
+            setIsLoading(false);
+            addSessionMessage(sid, { type: "system", sender: "SYSTEM", content: `/${cmd} failed: ${err instanceof Error ? err.message : "Unknown error"}` });
+          });
+      };
+
       switch (cmd) {
         case "clear": {
           // 6F-6th: read the active session / project from refs, not state.
@@ -2537,216 +2581,50 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
             });
           return;
         }
-        case "concept": {
-          const sid = producerSessionIdRef.current;
-          if (!sid) {
-            addSessionMessage(producerSessionIdRef.current, { type: "system", sender: "SYSTEM", content: "/concept requires an active project (open one on /dashboard first)." });
-            return;
-          }
-          const description = args?.trim() || "an unreleased game concept";
-          addSessionMessage(sid, { type: "user", sender: "DIRECTOR", content: trimmed });
-          setIsLoading(true);
-          apiFetch<{ success: boolean; data?: { runId: string; status: string; gateMode: string }; error?: string }>(
-            "/api/pipeline/start",
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                skillName: "pipeline-concept",
-                sessionId: sid,
-                projectId: currentProjectIdRef.current || undefined,
-                taskArgs: description,
-              }),
-            },
-          )
-            .then((result) => {
-              setIsLoading(false);
-              if (result.success && result.data) {
-                addSessionMessage(sid, {
-                  type: "system",
-                  sender: "producer",
-                  content: `▶ /concept pipeline started (runId: ${result.data.runId}, gateMode: ${result.data.gateMode}). Waiting for MiroMind research → creative-director pillars → CD-PILLARS gate. Use /advance to approve gates, /stop <runId> to cancel.`,
-                  showActions: false,
-                });
-              } else {
-                addSessionMessage(sid, { type: "system", sender: "SYSTEM", content: `/concept failed: ${result.error || "Unknown error"}` });
-              }
-            })
-            .catch((err) => {
-              setIsLoading(false);
-              addSessionMessage(sid, { type: "system", sender: "SYSTEM", content: `/concept failed: ${err instanceof Error ? err.message : "Unknown error"}` });
-            });
+        case "concept":
+          launchPipeline({
+            skillName: "pipeline-concept",
+            defaultArgs: "an unreleased game concept",
+            message: (r) => `▶ /concept pipeline started (runId: ${r.runId}, gateMode: ${r.gateMode}). Waiting for MiroMind research → creative-director pillars → CD-PILLARS gate. Use /advance to approve gates, /stop <runId> to cancel.`,
+          });
           return;
-        }
-        case "design": {
-          const sid = producerSessionIdRef.current;
-          if (!sid) {
-            addSessionMessage(producerSessionIdRef.current, { type: "system", sender: "SYSTEM", content: "/design requires an active project (open one on /dashboard first)." });
-            return;
-          }
-          const description = args?.trim() || "an unreleased game concept";
-          addSessionMessage(sid, { type: "user", sender: "DIRECTOR", content: trimmed });
-          setIsLoading(true);
-          apiFetch<{ success: boolean; data?: { runId: string; status: string; gateMode: string }; error?: string }>(
-            "/api/pipeline/start",
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                skillName: "pipeline-design",
-                sessionId: sid,
-                projectId: currentProjectIdRef.current || undefined,
-                taskArgs: description,
-              }),
-            },
-          )
-            .then((result) => {
-              setIsLoading(false);
-              if (result.success && result.data) {
-                addSessionMessage(sid, {
-                  type: "system",
-                  sender: "producer",
-                  content: `▶ /design pipeline started (runId: ${result.data.runId}, gateMode: ${result.data.gateMode}). Waiting for market-research → GDD draft (auto-ingested to board) → art bible/ADRs through CD-GDD-ALIGN, TD-FEASIBILITY, TD-ARCHITECTURE gates. Use /advance to approve each gate, /stop <runId> to cancel.`,
-                  showActions: false,
-                });
-              } else {
-                addSessionMessage(sid, { type: "system", sender: "SYSTEM", content: `/design failed: ${result.error || "Unknown error"}` });
-              }
-            })
-            .catch((err) => {
-              setIsLoading(false);
-              addSessionMessage(sid, { type: "system", sender: "SYSTEM", content: `/design failed: ${err instanceof Error ? err.message : "Unknown error"}` });
-            });
+        case "design":
+          launchPipeline({
+            skillName: "pipeline-design",
+            defaultArgs: "an unreleased game concept",
+            message: (r) => `▶ /design pipeline started (runId: ${r.runId}, gateMode: ${r.gateMode}). Waiting for market-research → GDD draft (auto-ingested to board) → art bible/ADRs through CD-GDD-ALIGN, TD-FEASIBILITY, TD-ARCHITECTURE gates. Use /advance to approve each gate, /stop <runId> to cancel.`,
+          });
           return;
-        }
-        case "sprint": {
-          const sid = producerSessionIdRef.current;
-          if (!sid) {
-            addSessionMessage(producerSessionIdRef.current, { type: "system", sender: "SYSTEM", content: "/sprint requires an active project (open one on /dashboard first)." });
-            return;
-          }
-          addSessionMessage(sid, { type: "user", sender: "DIRECTOR", content: trimmed });
-          setIsLoading(true);
-          apiFetch<{ success: boolean; data?: { runId: string; status: string; gateMode: string }; error?: string }>(
-            "/api/pipeline/start",
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                skillName: "pipeline-sprint",
-                sessionId: sid,
-                projectId: currentProjectIdRef.current || undefined,
-                taskArgs: args?.trim() || "",
-              }),
-            },
-          )
-            .then((result) => {
-              setIsLoading(false);
-              if (result.success && result.data) {
-                addSessionMessage(sid, {
-                  type: "system",
-                  sender: "producer",
-                  content: `▶ /sprint pipeline started (runId: ${result.data.runId}, gateMode: ${result.data.gateMode}). Reading available tickets → dispatching each to its feature team (CODE→team-combat, UI→team-ui, NARRATIVE→team-narrative, …) → PR-SPRINT gate. Use /advance to approve the gate, /stop <runId> to cancel.`,
-                  showActions: false,
-                });
-              } else {
-                addSessionMessage(sid, { type: "system", sender: "SYSTEM", content: `/sprint failed: ${result.error || "Unknown error"}` });
-              }
-            })
-            .catch((err) => {
-              setIsLoading(false);
-              addSessionMessage(sid, { type: "system", sender: "SYSTEM", content: `/sprint failed: ${err instanceof Error ? err.message : "Unknown error"}` });
-            });
+        case "sprint":
+          launchPipeline({
+            skillName: "pipeline-sprint",
+            message: (r) => `▶ /sprint pipeline started (runId: ${r.runId}, gateMode: ${r.gateMode}). Reading available tickets → dispatching each to its feature team (CODE→team-combat, UI→team-ui, NARRATIVE→team-narrative, …) → PR-SPRINT gate. Use /advance to approve the gate, /stop <runId> to cancel.`,
+          });
           return;
-        }
-        case "make-game": {
-          const sid = producerSessionIdRef.current;
-          if (!sid) {
-            addSessionMessage(producerSessionIdRef.current, { type: "system", sender: "SYSTEM", content: "/make-game requires an active project (open one on /dashboard first)." });
-            return;
-          }
-          addSessionMessage(sid, { type: "user", sender: "DIRECTOR", content: trimmed });
-          setIsLoading(true);
-          apiFetch<{ success: boolean; data?: { runId: string; status: string; gateMode: string }; error?: string }>(
-            "/api/pipeline/start",
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                skillName: "pipeline-make-game",
-                sessionId: sid,
-                projectId: currentProjectIdRef.current || undefined,
-                taskArgs: args?.trim() || "",
-              }),
-            },
-          )
-            .then((result) => {
-              setIsLoading(false);
-              if (result.success && result.data) {
-                addSessionMessage(sid, {
-                  type: "system",
-                  sender: "producer",
-                  content: `▶ /make-game orchestrator started (runId: ${result.data.runId}, gateMode: ${result.data.gateMode}). Full lifecycle: concept → design → slice → sprint → polish → release. Each stage runs to completion then pauses at a PR-PHASE-GATE for your approval. Use /advance to move to the next stage, /stop <runId> to cancel.`,
-                  showActions: false,
-                });
-              } else {
-                addSessionMessage(sid, { type: "system", sender: "SYSTEM", content: `/make-game failed: ${result.error || "Unknown error"}` });
-              }
-            })
-            .catch((err) => {
-              setIsLoading(false);
-              addSessionMessage(sid, { type: "system", sender: "SYSTEM", content: `/make-game failed: ${err instanceof Error ? err.message : "Unknown error"}` });
-            });
-          return;
-        }
         case "slice":
-        case "polish":
-        case "release": {
-          const sid = producerSessionIdRef.current;
-          if (!sid) {
-            addSessionMessage(producerSessionIdRef.current, { type: "system", sender: "SYSTEM", content: `/${cmd} requires an active project (open one on /dashboard first).` });
-            return;
-          }
-          const skillName = cmd === "slice" ? "pipeline-slice" : cmd === "polish" ? "pipeline-polish" : "pipeline-release";
-          const describe = cmd === "slice"
-            ? "scope + prototype a vertical slice → TD-SYSTEM-BOUNDARY gate"
-            : cmd === "polish"
-              ? "profile + visual/audio polish → AD-PHASE-GATE gate"
-              : "release checklist + build export → PR-MILESTONE gate";
-          addSessionMessage(sid, { type: "user", sender: "DIRECTOR", content: trimmed });
-          setIsLoading(true);
-          apiFetch<{ success: boolean; data?: { runId: string; status: string; gateMode: string }; error?: string }>(
-            "/api/pipeline/start",
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                skillName,
-                sessionId: sid,
-                projectId: currentProjectIdRef.current || undefined,
-                taskArgs: args?.trim() || "",
-              }),
-            },
-          )
-            .then((result) => {
-              setIsLoading(false);
-              if (result.success && result.data) {
-                addSessionMessage(sid, {
-                  type: "system",
-                  sender: "producer",
-                  content: `▶ /${cmd} pipeline started (runId: ${result.data.runId}, gateMode: ${result.data.gateMode}). Will ${describe}. Use /advance to approve the gate, /stop <runId> to cancel.`,
-                  showActions: false,
-                });
-              } else {
-                addSessionMessage(sid, { type: "system", sender: "SYSTEM", content: `/${cmd} failed: ${result.error || "Unknown error"}` });
-              }
-            })
-            .catch((err) => {
-              setIsLoading(false);
-              addSessionMessage(sid, { type: "system", sender: "SYSTEM", content: `/${cmd} failed: ${err instanceof Error ? err.message : "Unknown error"}` });
-            });
+          launchPipeline({
+            skillName: "pipeline-slice",
+            message: (r) => `▶ /slice pipeline started (runId: ${r.runId}, gateMode: ${r.gateMode}). Will scope + prototype a vertical slice → TD-SYSTEM-BOUNDARY gate. Use /advance to approve the gate, /stop <runId> to cancel.`,
+          });
           return;
-        }
+        case "polish":
+          launchPipeline({
+            skillName: "pipeline-polish",
+            message: (r) => `▶ /polish pipeline started (runId: ${r.runId}, gateMode: ${r.gateMode}). Will profile + visual/audio polish → AD-PHASE-GATE gate. Use /advance to approve the gate, /stop <runId> to cancel.`,
+          });
+          return;
+        case "release":
+          launchPipeline({
+            skillName: "pipeline-release",
+            message: (r) => `▶ /release pipeline started (runId: ${r.runId}, gateMode: ${r.gateMode}). Will release checklist + build export → PR-MILESTONE gate. Use /advance to approve the gate, /stop <runId> to cancel.`,
+          });
+          return;
+        case "make-game":
+          launchPipeline({
+            skillName: "pipeline-make-game",
+            message: (r) => `▶ /make-game orchestrator started (runId: ${r.runId}, gateMode: ${r.gateMode}). Full lifecycle: concept → design → slice → sprint → polish → release. Each stage runs to completion then pauses at a PR-PHASE-GATE for your approval. Use /advance to move to the next stage, /stop <runId> to cancel.`,
+          });
+          return;
         default: {
           addSessionMessage(producerSessionIdRef.current, { type: "system", sender: "SYSTEM", content: `Unknown command: /${cmd}. Type /help for available commands.` });
           return;
