@@ -869,4 +869,28 @@ describe("pipeline-service /make-game (Phase 5)", () => {
     const skill = buildMakeGameSkill();
     expect(skill.phases.every((p: { subSkills?: unknown }) => !p.subSkills)).toBe(true);
   });
+
+  it("stopPipelineRun cascades cancellation to active child runs (no orphans)", async () => {
+    // Slow the agent so the concept child is still mid-run when we stop the parent.
+    invokeAgentMock.mockImplementation(async () => {
+      await new Promise((r) => setTimeout(r, 400));
+      return { content: "slow" };
+    });
+    const run = await startPipelineRun(buildMakeGameSkill(), "sess-mg-cascade", { projectId: "p-test", reviewMode: "full" });
+    // Let the concept child spawn + reach its (slow) agent before stopping.
+    await new Promise((r) => setTimeout(r, 80));
+    const activeChildren = listRuns("sess-mg-cascade").filter(
+      (r) => r.parentRunId === run.runId && (r.status === "running" || r.status === "paused-at-gate"),
+    );
+    expect(activeChildren.length).toBeGreaterThanOrEqual(1); // concept child is running
+
+    await stopPipelineRun(run.runId);
+    expect(getRun(run.runId)?.status).toBe("cancelled");
+    // Allow the cascade + child loops to settle.
+    await new Promise((r) => setTimeout(r, 80));
+    const stillActive = listRuns("sess-mg-cascade").filter(
+      (r) => r.parentRunId === run.runId && (r.status === "running" || r.status === "paused-at-gate"),
+    );
+    expect(stillActive.length).toBe(0); // child was cascade-cancelled, not orphaned
+  });
 });

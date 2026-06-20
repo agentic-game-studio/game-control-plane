@@ -798,6 +798,17 @@ export async function stopPipelineRun(runId: string): Promise<PipelineRunState |
   run.status = "cancelled";
   run.cancelledAt = cancelledAt;
   emit({ type: "pipeline:cancelled", runId, sessionId: run.sessionId, cancelledAt, atPhaseIndex });
+
+  // Cascade: cancel any active CHILD runs (e.g. /make-game's child pipelines) so
+  // a stopped orchestrator doesn't leave orphan runs still consuming agents. Only
+  // /make-game spawns children, and its children aren't orchestrators, so the
+  // recursion is bounded (depth ≤ 2). A cancelled/completed child is left as-is.
+  const children = Array.from(activeRuns.values()).filter(
+    (r) => r.parentRunId === runId && (r.status === "running" || r.status === "paused-at-gate"),
+  );
+  for (const child of children) {
+    await stopPipelineRun(child.runId);
+  }
   return run;
 }
 
