@@ -13,6 +13,7 @@
  * sequences child runs manually instead.
  *
  * Phase 1 ship: `/concept` (1 gate, 2 phases, manual mode).
+ * Phase 2 ship: `/design` (3 gates, 3 phases, manual mode).
  */
 
 import type { SkillDefinition } from "@game-studio/types";
@@ -43,6 +44,44 @@ export const pipelineSkills: SkillDefinition[] = [
           "Read the research report and produce a concept brief: 3-5 design pillars (each pillar = a sentence + a 'why it matters' line), a one-paragraph pitch, and a 'risks & open questions' section. Output: workspace/design/concept/<slug>-concept.md.",
         agents: ["creative-director"],
         gates: ["CD-PILLARS"],
+        createsTickets: false,
+      },
+    ],
+  },
+  {
+    name: "pipeline-design",
+    description:
+      "/design — turn a concept into a production-ready design. Phase 1 (market-research) reuses MiroMind deep research. Phase 2 (gdd-draft) has the game-designer author an 8-section GDD written to workspace/design/gdd/<slug>.md, then the pipeline auto-ingests it onto the Kanban board (gdd:ingested); the CD-GDD-ALIGN gate holds for creative-direction sign-off. Phase 3 (art-architecture) has the creative-director + art-director produce the art bible and the technical-director's feasibility/architecture concerns are captured, gated by TD-FEASIBILITY then TD-ARCHITECTURE. Manual mode: a /advance is required at each of the 3 gates.",
+    kind: "pipeline",
+    gateMode: "manual",
+    resumable: true,
+    lifecyclePhase: "design",
+    userInvocable: true,
+    phases: [
+      {
+        order: 1,
+        name: "market-research",
+        description:
+          "Run MiroMind multi-angle deep research on the concept to ground the design in market/competitive/audience reality. Output: workspace/design/concept/<slug>-research.md (reused by the gdd-draft phase).",
+        agents: ["market-researcher"],
+        createsTickets: false,
+      },
+      {
+        order: 2,
+        name: "gdd-draft",
+        description:
+          "Author the 8-section Game Design Document (Overview, Player Fantasy, Detailed Rules, Formulas, Edge Cases, Dependencies, Tuning Knobs, Acceptance Criteria) at workspace/design/gdd/<slug>.md, grounded in the research report. On phase completion the pipeline auto-ingests the GDD onto the Kanban board as Quest tickets.",
+        agents: ["game-designer"],
+        gates: ["CD-GDD-ALIGN"],
+        createsTickets: false,
+      },
+      {
+        order: 3,
+        name: "art-architecture",
+        description:
+          "Produce the art bible (style guide, palette, constraints) and capture the technical architecture / ADRs needed to realize the GDD. Output: art bible entry + ADR(s) under workspace/docs/architecture/. The two TD gates confirm the design is buildable and architecturally sound.",
+        agents: ["creative-director", "art-director"],
+        gates: ["TD-FEASIBILITY", "TD-ARCHITECTURE"],
         createsTickets: false,
       },
     ],

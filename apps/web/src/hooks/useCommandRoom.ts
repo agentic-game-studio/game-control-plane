@@ -2147,6 +2147,7 @@ Session:
 Workflows:
   /ralphloop <task>    — Run research→plan→code→verify loop
   /concept <idea>      — Start a /concept pipeline (research → pillars → CD-PILLARS gate)
+  /design <idea>       — Start a /design pipeline (research → GDD → art/ADRs → CD-GDD-ALIGN, TD-FEASIBILITY, TD-ARCHITECTURE gates)
 
 Utilities:
   /diff                — Show recent changes
@@ -2569,6 +2570,47 @@ Context Fill:  ${pct}% (${usage.lastInputTokens.toLocaleString()} / ${usage.cont
             .catch((err) => {
               setIsLoading(false);
               addSessionMessage(sid, { type: "system", sender: "SYSTEM", content: `/concept failed: ${err instanceof Error ? err.message : "Unknown error"}` });
+            });
+          return;
+        }
+        case "design": {
+          const sid = producerSessionIdRef.current;
+          if (!sid) {
+            addSessionMessage(producerSessionIdRef.current, { type: "system", sender: "SYSTEM", content: "/design requires an active project (open one on /dashboard first)." });
+            return;
+          }
+          const description = args?.trim() || "an unreleased game concept";
+          addSessionMessage(sid, { type: "user", sender: "DIRECTOR", content: trimmed });
+          setIsLoading(true);
+          apiFetch<{ success: boolean; data?: { runId: string; status: string; gateMode: string }; error?: string }>(
+            "/api/pipeline/start",
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                skillName: "pipeline-design",
+                sessionId: sid,
+                projectId: currentProjectIdRef.current || undefined,
+                taskArgs: description,
+              }),
+            },
+          )
+            .then((result) => {
+              setIsLoading(false);
+              if (result.success && result.data) {
+                addSessionMessage(sid, {
+                  type: "system",
+                  sender: "producer",
+                  content: `▶ /design pipeline started (runId: ${result.data.runId}, gateMode: ${result.data.gateMode}). Waiting for market-research → GDD draft (auto-ingested to board) → art bible/ADRs through CD-GDD-ALIGN, TD-FEASIBILITY, TD-ARCHITECTURE gates. Use /advance to approve each gate, /stop <runId> to cancel.`,
+                  showActions: false,
+                });
+              } else {
+                addSessionMessage(sid, { type: "system", sender: "SYSTEM", content: `/design failed: ${result.error || "Unknown error"}` });
+              }
+            })
+            .catch((err) => {
+              setIsLoading(false);
+              addSessionMessage(sid, { type: "system", sender: "SYSTEM", content: `/design failed: ${err instanceof Error ? err.message : "Unknown error"}` });
             });
           return;
         }

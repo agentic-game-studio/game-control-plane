@@ -40,6 +40,7 @@ export const COMMANDS = [
   { cmd: "/export", desc: "Export session as markdown" },
   { cmd: "/ralphloop", desc: "Run research→plan→code→verify loop" },
   { cmd: "/concept", desc: "Start a /concept pipeline (MiroMind research → creative-director pillars)" },
+  { cmd: "/design", desc: "Start a /design pipeline (research → GDD → art bible/ADRs; 3 director gates)" },
 ];
 
 interface PendingImage {
