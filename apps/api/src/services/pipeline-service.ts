@@ -32,6 +32,7 @@ import { invokeAgent, detectEngineFromWorkspace, type ProjectContext } from "./l
 import { executeGate } from "./gate-service.js";
 import { isGatePassing } from "./milestone-gate-service.js";
 import { runDeepResearch, isDeepResearchAvailable } from "./deep-research-service.js";
+import { ingestGDD } from "./gdd-ingest-service.js";
 import { broadcast } from "./websocket.js";
 import { readData } from "./data-store.js";
 import { newId } from "../utils/ids.js";
@@ -132,21 +133,37 @@ function ensurePhaseStatus(run: PipelineRunState, order: number, name: string): 
   return ps;
 }
 
+type PhaseHookResult = { ran: boolean; ok: boolean; summary?: string };
+
 /**
- * Phase-specific prefetch hook. Currently used by `/concept` to run MiroMind
- * deep research BEFORE the market-researcher agent (giving the agent the
- * research report as context). For other phase names this is a no-op.
+ * Phase-specific hooks, centralized so the runner stays generic. Each
+ * (phase.name, when) pair maps to one side-effecting integration; all other
+ * pairs are no-ops.
  *
- * Returns true if a prefetch ran (success OR graceful-skip), false if it
- * threw and the caller should surface the error in the phase status.
+ *   pre  + "market-research" → MiroMind deep research (grounds the agent in a report)
+ *   post + "gdd-draft"       → ingest the drafted GDD onto the Kanban board (gdd:ingested)
+ *
+ * Hooks NEVER block the loop: a failure (or graceful skip) is recorded on
+ * PhaseStatus.lastError and the agent loop / gate enforcement proceeds. This is
+ * deliberate graceful degradation — MiroMind and GDD ingest are external/best-effort.
+ *
+ * (Future deslop: lift these to a `phase.prefetch`/`phase.postProcess` discriminator
+ * on SkillPhase so phase names aren't string-coupled to the runner. Two keyed
+ * branches are fine for now; revisit when a third integration lands.)
  */
-async function runPhasePrefetch(
+async function runPhaseHook(
   run: PipelineRunState,
   phase: SkillDefinition["phases"][number],
+  when: "pre" | "post",
   projectContext: ProjectContext | undefined,
-): Promise<{ ran: boolean; ok: boolean; summary?: string }> {
-  if (phase.name !== "market-research") return { ran: false, ok: true };
+): Promise<PhaseHookResult> {
+  if (when === "pre" && phase.name === "market-research") return runDeepResearchHook(run, projectContext);
+  if (when === "post" && phase.name === "gdd-draft") return runGddIngestHook(run);
+  return { ran: false, ok: true };
+}
 
+/** pre-hook: MiroMind multi-angle deep research for the market-research phase. */
+async function runDeepResearchHook(run: PipelineRunState, projectContext: ProjectContext | undefined): Promise<PhaseHookResult> {
   if (!isDeepResearchAvailable()) {
     logger.warn(
       { runId: run.runId, event: "pipeline_deep_research_unavailable" },
@@ -178,6 +195,37 @@ async function runPhasePrefetch(
     logger.error(
       { runId: run.runId, err: msg, event: "pipeline_deep_research_failed" },
       "MiroMind deep research failed during market-research phase — agents will still run with a degraded prompt",
+    );
+    return { ran: true, ok: false, summary: `failed: ${msg}` };
+  }
+}
+
+/**
+ * post-hook: ingest the GDD drafted in the gdd-draft phase onto the Kanban board
+ * via an in-process call to gdd-ingest-service (NO HTTP hop). ingestGDD creates
+ * Quest tickets (gdd:ingested) but does NOT trigger auto-verification (only the
+ * Task tool does, wired in Phase 3) — that is the intended /design contract.
+ */
+async function runGddIngestHook(run: PipelineRunState): Promise<PhaseHookResult> {
+  if (!run.projectId) {
+    logger.warn(
+      { runId: run.runId, event: "pipeline_gdd_ingest_no_project" },
+      "gdd-draft phase completed but pipeline has no projectId — skipping GDD ingest",
+    );
+    return { ran: true, ok: true, summary: "skipped: no projectId on run" };
+  }
+  try {
+    const result = await ingestGDD(run.sessionId, run.projectId, { broadcast: true });
+    return {
+      ran: true,
+      ok: true,
+      summary: `GDD ingested: ${result.created} created, ${result.skipped} skipped, ${result.errorCount} errors`,
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error(
+      { runId: run.runId, err: msg, event: "pipeline_gdd_ingest_failed" },
+      "GDD ingest failed after gdd-draft phase — agents already ran; gate enforcement proceeds",
     );
     return { ran: true, ok: false, summary: `failed: ${msg}` };
   }
@@ -243,6 +291,12 @@ async function runPhaseGates(
 ): Promise<GateOutcome> {
   const gates = phase.gates ?? [];
   for (const gateId of gates) {
+    // Skip gates already reviewed this run. Manual /advance re-enters the phase
+    // for the NEXT gate; a stored verdict means this gate already executed
+    // (and, in manual mode, the human has chosen to advance past it). This is
+    // what makes multi-gate phases work in manual mode (e.g. /design's
+    // TD-FEASIBILITY then TD-ARCHITECTURE on the same phase).
+    if (run.gateVerdicts[gateId]) continue;
     emit({ type: "pipeline:gate:pending", runId: run.runId, sessionId: run.sessionId, gateId, phaseIndex: run.currentPhaseIndex });
 
     let verdict: string;
@@ -342,24 +396,41 @@ async function runPipelineLoop(
       if (isCancelled(run)) return;
       const phase = skill.phases[run.currentPhaseIndex];
       const ps = ensurePhaseStatus(run, phase.order, phase.name);
-      ps.status = "running";
-      run.status = "running";
-      await persistRun(run);
-      emit({ type: "pipeline:phase:started", runId: run.runId, sessionId: run.sessionId, phaseIndex: run.currentPhaseIndex, phaseName: phase.name, createsTickets: phase.createsTickets });
 
-      // Phase-specific prefetch (e.g. MiroMind for market-research). No-op for phases
-      // that don't declare one. Failures are recorded on PhaseStatus but never block
-      // the agent loop (graceful degradation — agents run with degraded context).
-      const prefetch = await runPhasePrefetch(run, phase, projectContext);
-      if (prefetch.ran && !prefetch.ok) {
-        ps.lastError = `prefetch failed: ${prefetch.summary ?? "unknown"}`;
+      // Fresh phase execution (agents + hooks). Skipped on re-entry after a manual
+      // /advance resumed us mid-phase for the NEXT gate: ps.status flips to
+      // "completed" once agents have run, so a resumed phase goes straight to gate
+      // enforcement without re-invoking agents or re-firing hooks. This makes
+      // per-phase execution idempotent and is what lets multi-gate manual phases
+      // advance gate-by-gate.
+      if (ps.status !== "completed") {
+        ps.status = "running";
+        run.status = "running";
+        await persistRun(run);
+        emit({ type: "pipeline:phase:started", runId: run.runId, sessionId: run.sessionId, phaseIndex: run.currentPhaseIndex, phaseName: phase.name, createsTickets: phase.createsTickets });
+
+        // Pre-phase hook (e.g. MiroMind deep research for market-research). No-op for
+        // phases that don't declare one. Failures are recorded on PhaseStatus but never
+        // block the agent loop (graceful degradation — agents run with degraded context).
+        const pre = await runPhaseHook(run, phase, "pre", projectContext);
+        if (pre.ran && !pre.ok) {
+          ps.lastError = `pre-hook failed: ${pre.summary ?? "unknown"}`;
+        }
+
+        const agentResults = await runPhaseAgents(run, skill, phase, taskArgs, projectContext);
+        if (isCancelled(run)) return;
+        ps.agentResults = agentResults;
+        ps.status = "completed";
+        emit({ type: "pipeline:phase:completed", runId: run.runId, sessionId: run.sessionId, phaseIndex: run.currentPhaseIndex, phaseName: phase.name, agentResults });
+
+        // Post-phase hook (e.g. GDD ingest after gdd-draft). Runs AFTER the phase's
+        // artifact is produced, BEFORE gate enforcement. Same graceful-degradation
+        // contract as the pre-hook: failures are recorded, never block.
+        const post = await runPhaseHook(run, phase, "post", projectContext);
+        if (post.ran && !post.ok) {
+          ps.lastError = `post-hook failed: ${post.summary ?? "unknown"}`;
+        }
       }
-
-      const agentResults = await runPhaseAgents(run, skill, phase, taskArgs, projectContext);
-      if (isCancelled(run)) return;
-      ps.agentResults = agentResults;
-      ps.status = "completed";
-      emit({ type: "pipeline:phase:completed", runId: run.runId, sessionId: run.sessionId, phaseIndex: run.currentPhaseIndex, phaseName: phase.name, agentResults });
 
       // ── Gate enforcement: ONCE per phase, AFTER the agent loop, BEFORE advancing ──
       // (subSkills are rejected on pipeline phases by the registry validator.)
@@ -483,7 +554,12 @@ export async function advanceFromGate(
     logger.warn({ runId, skillName: run.skillName, event: "pipeline_advance_no_skill" }, "Cannot advance pipeline — skill unresolvable");
     return run;
   }
-  run.currentPhaseIndex += 1;
+  // Clear the held gate and re-enter the loop at the SAME phase index (do NOT
+  // increment here). The loop's idempotent per-phase execution skips already-run
+  // agents, and runPhaseGates skips already-reviewed gates — so we resume at the
+  // next unreviewed gate of this phase, or advance to the next phase if all of
+  // this phase's gates are reviewed. Incrementing here would skip the remaining
+  // gates of a multi-gate phase (the bug this fixes for /design's TD-* gates).
   const held = run.phaseStatuses.find((p) => p.gateHeld);
   if (held) held.gateHeld = undefined;
   run.status = "running";

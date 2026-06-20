@@ -44,6 +44,19 @@ vi.mock("./deep-research-service.js", () => ({
   })),
   isDeepResearchAvailable: vi.fn(() => true),
 }));
+vi.mock("./gdd-ingest-service.js", () => ({
+  ingestGDD: vi.fn(async () => ({
+    gddPath: "/tmp/gdd.md",
+    sectionsFound: 8,
+    totalItems: 20,
+    created: 20,
+    skipped: 0,
+    errors: [],
+    createdTitles: [],
+    skippedTitles: [],
+    errorCount: 0,
+  })),
+}));
 
 import {
   startPipelineRun,
@@ -57,11 +70,13 @@ import {
 import { executeGate } from "./gate-service.js";
 import { invokeAgent } from "./llm-service.js";
 import { runDeepResearch, isDeepResearchAvailable } from "./deep-research-service.js";
+import { ingestGDD } from "./gdd-ingest-service.js";
 
 const executeGateMock = executeGate as unknown as ReturnType<typeof vi.fn>;
 const invokeAgentMock = invokeAgent as unknown as ReturnType<typeof vi.fn>;
 const runDeepResearchMock = runDeepResearch as unknown as ReturnType<typeof vi.fn>;
 const isDeepResearchAvailableMock = isDeepResearchAvailable as unknown as ReturnType<typeof vi.fn>;
+const ingestGDDMock = ingestGDD as unknown as ReturnType<typeof vi.fn>;
 
 /** Build a 3-phase dummy pipeline skill (each phase has 1 agent for simplicity, except phase 1 which has 3 to exercise the once-per-phase gate placement). */
 function buildDummySkill(opts: { withGate?: boolean; subSkillsOnPipeline?: boolean } = {}) {
@@ -432,7 +447,7 @@ describe("pipeline-service /concept (Phase 1)", () => {
     expect(invokeAgentMock).toHaveBeenCalledTimes(2);
     // The failure was recorded on the market-research phase status (display-only).
     const mrPhase = getRun(run.runId)?.phaseStatuses.find((p) => p.name === "market-research");
-    expect(mrPhase?.lastError).toMatch(/prefetch failed.*MiroMind 503/);
+    expect(mrPhase?.lastError).toMatch(/pre-hook failed.*MiroMind 503/);
     // The loop was NOT blocked — it advanced to the gate normally (not "error").
     expect(getRun(run.runId)?.status).toBe("paused-at-gate");
   });
@@ -466,5 +481,136 @@ describe("pipeline-service /concept (Phase 1)", () => {
     const stopped = await stopPipelineRun(run.runId);
     expect(stopped?.status).toBe("cancelled");
     expect(stopped?.cancelledAt).toBeTruthy();
+  });
+});
+
+/**
+ * Pipeline-design tests — Phase 2. Verifies the real `/design` shape: 3 phases
+ * (market-research → gdd-draft → art-architecture), 3 gates across 2 phases
+ * (CD-GDD-ALIGN on gdd-draft; TD-FEASIBILITY + TD-ARCHITECTURE on the SAME
+ * art-architecture phase — the multi-gate-manual case). Exercises the runner's
+ * idempotent per-phase execution + gate-skip-on-advance fix.
+ */
+
+function buildDesignSkill() {
+  return {
+    name: "pipeline-design" as const,
+    description: "/design — research → GDD → art/architecture (3 gates)",
+    userInvocable: true,
+    kind: "pipeline" as const,
+    gateMode: "manual" as const,
+    resumable: true,
+    lifecyclePhase: "design" as const,
+    phases: [
+      { order: 1, name: "market-research", description: "MiroMind research", agents: ["market-researcher"] as any, createsTickets: false },
+      { order: 2, name: "gdd-draft", description: "Draft GDD", agents: ["game-designer"] as any, gates: ["CD-GDD-ALIGN"], createsTickets: false },
+      { order: 3, name: "art-architecture", description: "Art bible + ADRs", agents: ["creative-director", "art-director"] as any, gates: ["TD-FEASIBILITY", "TD-ARCHITECTURE"], createsTickets: false },
+    ],
+  } as any;
+}
+
+describe("pipeline-service /design (Phase 2)", () => {
+  beforeEach(() => {
+    runDeepResearchMock.mockClear();
+    isDeepResearchAvailableMock.mockClear();
+    ingestGDDMock.mockClear();
+    isDeepResearchAvailableMock.mockReturnValue(true);
+    runDeepResearchMock.mockResolvedValue({
+      projectId: "p-test", concept: "test", timestamp: new Date().toISOString(), model: "mock",
+      sections: [{ title: "Market", content: "stub" }], citations: [], totalTokens: 0, turns: 2,
+    });
+    ingestGDDMock.mockResolvedValue({
+      gddPath: "/tmp/gdd.md", sectionsFound: 8, totalItems: 20, created: 20, skipped: 0,
+      errors: [], createdTitles: [], skippedTitles: [], errorCount: 0,
+    });
+  });
+
+  it("all 3 design gates fire once each in order; manual advances gate-by-gate through a multi-gate phase", async () => {
+    executeGateMock.mockResolvedValue({ gateId: "x", verdict: "APPROVE", details: "ok", agent: "creative-director", timestamp: new Date().toISOString() });
+    const run = await startPipelineRun(buildDesignSkill(), "sess-design-gates", { projectId: "p-test", reviewMode: "full" });
+    await awaitLoop(run.runId);
+    // Paused at the first gate (CD-GDD-ALIGN, on the gdd-draft phase).
+    expect(getRun(run.runId)?.status).toBe("paused-at-gate");
+    expect(executeGateMock).toHaveBeenCalledTimes(1);
+
+    // Advance past CD-GDD-ALIGN → reaches TD-FEASIBILITY (first gate of art-architecture).
+    await advanceFromGate(run.runId);
+    await awaitLoop(run.runId);
+    expect(executeGateMock).toHaveBeenCalledTimes(2);
+
+    // Advance past TD-FEASIBILITY → reaches TD-ARCHITECTURE (SECOND gate of the SAME phase).
+    // This is the multi-gate-manual case the runner fix addresses.
+    await advanceFromGate(run.runId);
+    await awaitLoop(run.runId);
+    expect(executeGateMock).toHaveBeenCalledTimes(3);
+
+    // Advance past TD-ARCHITECTURE → completes.
+    await advanceFromGate(run.runId);
+    await awaitLoop(run.runId);
+    expect(getRun(run.runId)?.status).toBe("completed");
+
+    // Gates fired in the declared order, once each.
+    const gateOrder = executeGateMock.mock.calls.map((c) => c[0]);
+    expect(gateOrder).toEqual(["CD-GDD-ALIGN", "TD-FEASIBILITY", "TD-ARCHITECTURE"]);
+  });
+
+  it("gdd-draft triggers ingestGDD once and market-research triggers deep research once", async () => {
+    executeGateMock.mockResolvedValue({ gateId: "x", verdict: "APPROVE", details: "ok", agent: "creative-director", timestamp: new Date().toISOString() });
+    const run = await startPipelineRun(buildDesignSkill(), "sess-design-hooks", { projectId: "p-test", reviewMode: "full" });
+    await awaitLoop(run.runId); // paused at CD-GDD-ALIGN
+    // Both hooks already fired by the time we reach the first gate.
+    expect(runDeepResearchMock).toHaveBeenCalledTimes(1); // market-research pre-hook
+    expect(ingestGDDMock).toHaveBeenCalledTimes(1);        // gdd-draft post-hook
+    expect(ingestGDDMock).toHaveBeenCalledWith("sess-design-hooks", "p-test", { broadcast: true });
+  });
+
+  it("a REJECT verdict holds at the gate in manual mode (GDD still ingested before the gate)", async () => {
+    executeGateMock.mockResolvedValue({ gateId: "x", verdict: "REJECT", details: "GDD misaligned", agent: "creative-director", timestamp: new Date().toISOString() });
+    const run = await startPipelineRun(buildDesignSkill(), "sess-design-block", { projectId: "p-test", reviewMode: "full" });
+    await awaitLoop(run.runId);
+    expect(getRun(run.runId)?.status).toBe("paused-at-gate");
+    expect(getRun(run.runId)?.gateVerdicts["CD-GDD-ALIGN"]?.verdict).toBe("REJECT");
+    expect(executeGateMock).toHaveBeenCalledTimes(1); // manual never retries
+    // The post-hook ran (GDD ingested) BEFORE the gate held.
+    expect(ingestGDDMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("resume-after-restart continues from the gdd-draft phase (currentPhaseIndex=1)", async () => {
+    executeGateMock.mockResolvedValue({ gateId: "x", verdict: "APPROVE", details: "ok", agent: "creative-director", timestamp: new Date().toISOString() });
+    const { randomUUID } = await import("node:crypto");
+    const runId = `run-${randomUUID()}`;
+    const now = new Date().toISOString();
+    const skill = buildDesignSkill();
+    const crashed = {
+      runId,
+      sessionId: "sess-design-resume",
+      projectId: "p-test",
+      skillName: skill.name,
+      lifecyclePhase: "design",
+      gateMode: "manual",
+      status: "running",
+      currentPhaseIndex: 1, // market-research done, gdd-draft next
+      phaseStatuses: [
+        { order: 1, name: "market-research", status: "completed", createsTickets: false },
+        { order: 2, name: "gdd-draft", status: "pending", createsTickets: false },
+        { order: 3, name: "art-architecture", status: "pending", createsTickets: false },
+      ],
+      gateVerdicts: {},
+      startedAt: now,
+      updatedAt: now,
+    };
+    require("node:fs").writeFileSync(join(tmpDir, `${runId}.json`), JSON.stringify(crashed, null, 2));
+
+    const resumed = await resumePipelineRun(runId, { skill, reviewMode: "full" });
+    expect(resumed).not.toBeNull();
+    await awaitLoop(runId);
+
+    // Only the gdd-draft phase ran: 1 agent (game-designer), ingestGDD once, CD-GDD-ALIGN once.
+    // market-research did NOT re-run (no runDeepResearch).
+    expect(invokeAgentMock).toHaveBeenCalledTimes(1);
+    expect(runDeepResearchMock).not.toHaveBeenCalled();
+    expect(ingestGDDMock).toHaveBeenCalledTimes(1);
+    expect(executeGateMock).toHaveBeenCalledTimes(1);
+    expect(getRun(runId)?.status).toBe("paused-at-gate");
   });
 });
