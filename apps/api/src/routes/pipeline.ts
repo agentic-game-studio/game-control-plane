@@ -24,6 +24,7 @@ import {
   stopPipelineRun,
   getRunAsync,
   listRuns,
+  hasActiveRunForSession,
 } from "../services/pipeline-service.js";
 
 export const pipelineRouter: Router = Router();
@@ -83,6 +84,21 @@ pipelineRouter.post("/start", async (req: Request, res: Response) => {
 
   if (!(await sessionExists(sessionId))) {
     res.status(404).json({ success: false, error: "Session not found" });
+    return;
+  }
+
+  // Reject a second concurrent run for the same session. A pipeline that is
+  // still running or paused-at-gate owns the session (its agents are writing
+  // to the same project artifacts); a second /start would race on those writes.
+  // Reuses the existing 409 collision pattern (CLAUDE.md). A terminal
+  // (completed/cancelled/error) run does NOT block a fresh start.
+  if (hasActiveRunForSession(sessionId)) {
+    const active = listRuns(sessionId).find((r) => r.status === "running" || r.status === "paused-at-gate");
+    res.status(409).json({
+      success: false,
+      error: "A pipeline is already active for this session. Use POST /api/pipeline/runs/:runId/advance to resume it, or /stop to cancel it first.",
+      runId: active?.runId,
+    });
     return;
   }
 

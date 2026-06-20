@@ -527,6 +527,18 @@ export function listRuns(sessionId?: string): PipelineRunState[] {
   return sessionId ? all.filter((r) => r.sessionId === sessionId) : all;
 }
 
+/**
+ * True if a run for this session is still ACTIVE (running or paused-at-gate).
+ * Completed/cancelled/error runs do NOT count — a fresh /start is allowed once
+ * the previous run has reached a terminal state. Used by routes/pipeline.ts to
+ * reject a second concurrent run for the same session (409 collision), which
+ * Phase 5 (/make-game) would otherwise amplify into a write race on the same
+ * project artifacts.
+ */
+export function hasActiveRunForSession(sessionId: string): boolean {
+  return listRuns(sessionId).some((r) => r.status === "running" || r.status === "paused-at-gate");
+}
+
 /** Await a run's detached loop (reaches terminal/paused state). For callers/tests. */
 export function getRunDone(runId: string): Promise<void> | undefined {
   return runLoops.get(runId);

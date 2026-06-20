@@ -51,6 +51,7 @@ import {
   advanceFromGate,
   stopPipelineRun,
   getRun,
+  hasActiveRunForSession,
   _setRunsDirForTest,
 } from "./pipeline-service.js";
 import { executeGate } from "./gate-service.js";
@@ -415,6 +416,45 @@ describe("pipeline-service /concept (Phase 1)", () => {
     expect(runDeepResearchMock).not.toHaveBeenCalled();
     expect(executeGateMock).toHaveBeenCalledTimes(1);
     expect(getRun(runId)?.status).toBe("paused-at-gate"); // manual + gate
+  });
+
+  it("prefetch failure is recorded on PhaseStatus.lastError but never blocks the agent loop", async () => {
+    // MiroMind is a flaky external API — this is the production-flake path the
+    // Phase 1 code review flagged as untested (MEDIUM #1). A rejected prefetch
+    // must NOT abort the run; agents run on degraded context and the loop still
+    // advances to the gate.
+    runDeepResearchMock.mockRejectedValueOnce(new Error("MiroMind 503"));
+    executeGateMock.mockResolvedValue({ gateId: "CD-PILLARS", verdict: "APPROVE", details: "ok", agent: "creative-director", timestamp: new Date().toISOString() });
+    const run = await startPipelineRun(buildConceptSkill(), "sess-concept-prefetch-fail", { projectId: "p-test" });
+    await awaitLoop(run.runId);
+
+    // Agents STILL ran despite the prefetch failure (graceful degradation).
+    expect(invokeAgentMock).toHaveBeenCalledTimes(2);
+    // The failure was recorded on the market-research phase status (display-only).
+    const mrPhase = getRun(run.runId)?.phaseStatuses.find((p) => p.name === "market-research");
+    expect(mrPhase?.lastError).toMatch(/prefetch failed.*MiroMind 503/);
+    // The loop was NOT blocked — it advanced to the gate normally (not "error").
+    expect(getRun(run.runId)?.status).toBe("paused-at-gate");
+  });
+
+  it("hasActiveRunForSession is true while paused/running, false once terminal (409 collision guard)", async () => {
+    // Phase 1 code review MEDIUM #2: a second concurrent /start for the same
+    // session must 409. The guard keys on hasActiveRunForSession — covered here
+    // at the service layer (the route is a thin caller).
+    executeGateMock.mockResolvedValue({ gateId: "CD-PILLARS", verdict: "APPROVE", details: "ok", agent: "creative-director", timestamp: new Date().toISOString() });
+    const run = await startPipelineRun(buildConceptSkill(), "sess-collision", { projectId: "p-test" });
+    await awaitLoop(run.runId);
+    // Manual mode → paused-at-gate → still ACTIVE → a new /start would 409.
+    expect(getRun(run.runId)?.status).toBe("paused-at-gate");
+    expect(hasActiveRunForSession("sess-collision")).toBe(true);
+    // A different session has no active run.
+    expect(hasActiveRunForSession("sess-other")).toBe(false);
+
+    // Advance to completion → terminal → no longer active → new /start allowed.
+    await advanceFromGate(run.runId);
+    await awaitLoop(run.runId);
+    expect(getRun(run.runId)?.status).toBe("completed");
+    expect(hasActiveRunForSession("sess-collision")).toBe(false);
   });
 
   it("stopPipelineRun cancels a /concept run cleanly", async () => {
