@@ -1,9 +1,39 @@
 {
   "name": "enemy-ai-patrol",
-  "description": "A simple enemy patrol AI that moves between two X coordinates for Phaser 3.",
-  "engine": "phaser",
-  "files": ["phaser.ts"],
-  "exports": {
-    "default": "./phaser.ts"
-  }
+  "description": "A simple enemy patrol AI that moves between two X coordinates.",
+  "inputs": [
+    {
+      "name": "sprite",
+      "type": "Sprite",
+      "description": "The enemy sprite or body to move.",
+      "required": true
+    },
+    {
+      "name": "startX",
+      "type": "number",
+      "description": "Left patrol boundary.",
+      "required": true
+    },
+    {
+      "name": "endX",
+      "type": "number",
+      "description": "Right patrol boundary.",
+      "required": true
+    },
+    {
+      "name": "speed",
+      "type": "number",
+      "description": "Patrol speed in pixels per second.",
+      "default": 100
+    }
+  ],
+  "outputs": [
+    {
+      "name": "ai",
+      "type": "AI",
+      "description": "Update function that moves the enemy between boundaries."
+    }
+  ],
+  "dependencies": [],
+  "engines": ["phaser", "godot", "unity"]
 }

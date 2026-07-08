@@ -22,6 +22,7 @@ import { runBootCheckGate, runGUTGate } from "../services/qa-gate-service.js";
 import {
   getGodotInstructions,
   getGodotMCPToolDefinitions,
+  getGodotMCPService,
   getOrCreateGodotMCPService,
   installGodotMCPPlugin,
   launchGodotEditor,
@@ -129,5 +130,20 @@ export class GodotEngineAdapter implements EngineAdapter {
     projectPath: string,
   ): Promise<{ success: boolean; pluginCopied: boolean; pluginEnabled: boolean; error?: string }> {
     return installGodotMCPPlugin(projectPath, projectPath);
+  }
+
+  async executeTool(
+    name: string,
+    input: Record<string, unknown>,
+    projectId?: string,
+  ): Promise<string> {
+    if (!projectId) {
+      return `Error: Godot adapter executeTool requires a projectId.`;
+    }
+    const service = getGodotMCPService(projectId);
+    if (!service?.running()) {
+      return `Error: Godot MCP service is not running for project '${projectId}'. Start the tool bridge first.`;
+    }
+    return service.executeTool(name, input);
   }
 }

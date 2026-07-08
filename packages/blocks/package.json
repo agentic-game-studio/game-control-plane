@@ -12,9 +12,15 @@
     }
   },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@game-studio/types": "workspace:*"
   },
   "devDependencies": {
-    "typescript": "^5.8.2"
+    "@types/node": "^22.13.5",
+    "typescript": "^5.8.2",
+    "vitest": "^3.2.6"
   }
 }

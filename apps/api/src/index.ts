@@ -14,6 +14,7 @@ import { designRouter } from "./routes/design.js";
 import { promptsRouter } from "./routes/prompts.js";
 import { documentsRouter } from "./routes/documents.js";
 import { dashboardRouter } from "./routes/dashboard.js";
+import { enginesRouter } from "./routes/engines.js";
 import { chatRouter } from "./routes/chat.js";
 import { ticketsRouter } from "./routes/tickets.js";
 import { assetsRouter } from "./routes/assets.js";
@@ -294,6 +295,7 @@ app.use("/api/design", designRouter);
 app.use("/api/prompts", promptsRouter);
 app.use("/api/documents", documentsRouter);
 app.use("/api/dashboard", dashboardRouter);
+app.use("/api/engines", enginesRouter);
 // Q2: Rate limit LLM-heavy endpoints (must be before route handlers)
 app.use("/api/chat/sessions/:sessionId/messages", rateLimiter);
 app.use("/api/chat/spawn", rateLimiter);

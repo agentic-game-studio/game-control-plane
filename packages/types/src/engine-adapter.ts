@@ -86,6 +86,9 @@ export interface EngineAdapter {
 
   /** Optional one-time setup for the tool bridge (e.g., plugin install). */
   installToolBridge?(projectPath: string): Promise<{ success: boolean; pluginCopied: boolean; pluginEnabled: boolean; error?: string }>;
+
+  /** Execute a tool exposed by this adapter's tool bridge, if one is running. */
+  executeTool?(name: string, input: Record<string, unknown>, projectId?: string): Promise<string>;
 }
 
 /** Thrown when getEngineAdapter is called for an engine with no registered adapter. */

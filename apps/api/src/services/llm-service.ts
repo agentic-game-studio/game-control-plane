@@ -53,14 +53,6 @@ import { broadcast, broadcastSessionUpdate } from "./websocket.js";
 import { readData, writeData, updateData, broadcastEvent } from "./data-store.js";
 import { getModelForTier } from "../config/model-mapping.js";
 import type { WSEvent, AgentRole, ProjectEngine, BuildPlatform, ToolDefinition, GameAsset, AssetsData, AssetGenerationMeta } from "@game-studio/types";
-import {
-  GodotMCPService,
-  getGodotMCPService,
-  getOrCreateGodotMCPService,
-  removeGodotMCPService,
-  isGodotMCPTool,
-  type GodotMCPServiceOptions,
-} from "./godot-mcp-service.js";
 import { getEngineAdapter, hasEngineAdapter } from "./engine-adapter-factory.js";
 import { startViteDevServer } from "./phaser-vite-service.js";
 import { EngineNotSupportedError, isProjectEngine } from "@game-studio/types";
@@ -2104,24 +2096,31 @@ loop_offset=0
         }
       }
 
-      default:
-        // Check if this is a Godot MCP tool and route to the MCP service
-        if (isGodotMCPTool(name)) {
-          // Use projectId from ProjectContext to lookup the service (shared across sessions)
-          const projectId = projectContext?.projectId;
-          broadcastLogEntry(sessionId, "info", `[${agentRole}] Godot MCP lookup: projectId=${projectId}`, agentRole);
-          const godotService = projectId ? getGodotMCPService(projectId) : null;
-          if (godotService?.running()) {
-            broadcastLogEntry(sessionId, "info", `[${agentRole}] Godot MCP: ${name}`, agentRole);
-            const result = await godotService.executeTool(name, input);
-            return result;
-          } else {
-            broadcastLogEntry(sessionId, "info", `[${agentRole}] Godot MCP service not running for projectId=${projectId}`, agentRole);
-            return `Error: Godot MCP tool '${name}' called but Godot MCP service is not running for this project. ` +
-              `Ensure project engine is "godot" and the Godot editor is running with the MCP plugin enabled.`;
+      default: {
+        const engine = projectContext?.engine;
+        if (engine) {
+          try {
+            const adapter = getEngineAdapter(engine as ProjectEngine);
+            const toolNames = new Set(adapter.getTools().map((tool) => tool.name));
+            if (toolNames.has(name)) {
+              if (adapter.executeTool) {
+                broadcastLogEntry(sessionId, "info", `[${agentRole}] ${adapter.engine}: ${name}`, agentRole);
+                return await adapter.executeTool(name, input, projectContext?.projectId);
+              }
+              return `Error: Tool '${name}' is registered for engine '${adapter.engine}' but this adapter does not implement runtime execution yet.`;
+            }
+          } catch (err) {
+            if (err instanceof EngineNotSupportedError) {
+              // No adapter registered — fall through to unknown tool.
+            } else {
+              const message = err instanceof Error ? err.message : String(err);
+              broadcastLogEntry(sessionId, "error", `[TOOL ERROR: ${name}] ${message}`, agentRole);
+              return `[TOOL ERROR: ${name}] ${message}`;
+            }
           }
         }
         return `Unknown tool: ${name}`;
+      }
     }
   } catch (err: unknown) {
     const error = err as Error;

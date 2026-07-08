@@ -1023,7 +1023,6 @@ dashboardRouter.get("/projects/:id/mcp-health", async (req: Request, res: Respon
   }
 });
 
-// POST /api/dashboard/projects/:id/launch-editor - Launch Godot editor for a project
 dashboardRouter.post("/projects/:id/launch-editor", async (req: Request, res: Response) => {
   const { id } = req.params;
 
