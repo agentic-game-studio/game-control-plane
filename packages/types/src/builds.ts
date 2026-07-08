@@ -25,6 +25,7 @@ export interface CreateBuildRequest {
   version?: string;
   platform: BuildPlatform;
   preset?: string;
+  engine?: ProjectEngine;
 }
 
 export interface BuildsData {

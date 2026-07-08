@@ -4,6 +4,7 @@ import { WebSocketServer } from "ws";
 import { createServer } from "node:http";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { loadConfig } from "./config.js";
+import "./adapters/index.js";
 import { sessionsRouter } from "./routes/sessions.js";
 import { agentsRouter } from "./routes/agents.js";
 import { skillsRouter } from "./routes/skills.js";

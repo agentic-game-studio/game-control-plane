@@ -69,16 +69,23 @@ export interface EngineAdapter {
   runTests(projectPath: string): Promise<TestResult>;
 
   /** Export the project for a target platform. */
-  export(projectPath: string, platform: BuildPlatform): Promise<ExportResult>;
+  export(
+    projectPath: string,
+    platform: BuildPlatform,
+    options?: { preset?: string; projectId?: string; version?: string; bumpVersion?: boolean },
+  ): Promise<ExportResult>;
 
   /** Ordered QA gate chain for this engine (e.g. boot → GUT → smoke for Godot). */
   getQAChain(): string[];
 
   /** Start the tool bridge (MCP, dev server, etc.) if the engine uses one. */
-  startToolBridge?(): Promise<{ running: boolean }>;
+  startToolBridge?(projectId: string, projectPath: string): Promise<{ running: boolean }>;
 
   /** Stop the tool bridge. */
-  stopToolBridge?(): Promise<void>;
+  stopToolBridge?(projectId: string): Promise<void>;
+
+  /** Optional one-time setup for the tool bridge (e.g., plugin install). */
+  installToolBridge?(projectPath: string): Promise<{ success: boolean; pluginCopied: boolean; pluginEnabled: boolean; error?: string }>;
 }
 
 /** Thrown when getEngineAdapter is called for an engine with no registered adapter. */

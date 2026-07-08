@@ -12,7 +12,8 @@ import type { WSEvent } from "@game-studio/types";
 import { broadcast } from "../services/websocket.js";
 import { startWorkflow, advanceStage, completeWorkflow, cleanupWorkflow, getWorkflow, createQuestTicket, moveQuestTicket } from "../services/quest-bridge.js";
 import { triggerVerification } from "../services/verification-service.js";
-import { getOrCreateGodotMCPService, removeGodotMCPService, launchGodotEditor, type GodotMCPServiceOptions } from "../services/godot-mcp-service.js";
+import { getEngineAdapter } from "../services/engine-adapter-factory.js";
+import { EngineNotSupportedError } from "@game-studio/types";
 import { logger } from "../utils/logger.js";
 import { resolveProjectWorkspace } from "../utils/workspace.js";
 import { loadConfig } from "../config.js";
@@ -743,36 +744,20 @@ chatRouter.get("/sessions/producer/:projectId", async (req: Request, res: Respon
     return;
   }
 
-  // Start Godot MCP service for godot projects (even if session exists)
-  if (project.engine === "godot") {
-    const mcpOptions: GodotMCPServiceOptions = {
-      projectPath: project.workspacePath ?? undefined,
-      mode: "lite",
-    };
-    logger.info({ projectId, projectName: project.name, workspacePath: project.workspacePath, event: "godot_mcp_starting" }, "Starting Godot MCP service for project");
-    getOrCreateGodotMCPService(projectId, mcpOptions).then((service) => {
-      logger.info({ projectId, running: service.running(), event: "godot_mcp_started" }, "Godot MCP service started");
+  // Start engine-specific tool bridge for registered adapters (even if session exists)
+  try {
+    const adapter = getEngineAdapter((project.engine ?? "godot") as ProjectEngine);
+    logger.info({ projectId, projectName: project.name, workspacePath: project.workspacePath, event: "tool_bridge_starting" }, "Starting tool bridge for project");
+    adapter.startToolBridge?.(projectId, project.workspacePath ?? "").then((result) => {
+      logger.info({ projectId, running: result?.running, event: "tool_bridge_started" }, "Tool bridge started");
     }).catch((err) => {
-      logger.error({ projectId, error: err.message, event: "godot_mcp_start_error" }, "Failed to start Godot MCP service");
+      logger.error({ projectId, error: err instanceof Error ? err.message : String(err), event: "tool_bridge_start_error" }, "Failed to start tool bridge");
     });
-
-    // Auto-launch Godot editor
-    if (project.workspacePath) {
-      const projectDir = resolveProjectWorkspace(project.workspacePath);
-      // 16-H-launch-godot-fire-forget: launchGodotEditor is now async
-      // (plugin install was made async to avoid blocking the event
-      // loop). We don't want to await it here because the chat session
-      // response shouldn't block on Godot startup — fire-and-forget,
-      // log the outcome when the promise settles.
-      launchGodotEditor(projectDir).then((launchResult) => {
-        if (launchResult.success) {
-          logger.info({ projectId, pid: launchResult.pid, event: "godot_editor_launched" }, "Godot editor auto-launched");
-        } else {
-          logger.warn({ projectId, error: launchResult.error, event: "godot_editor_launch_failed" }, "Could not auto-launch Godot editor");
-        }
-      }).catch((err) => {
-        logger.warn({ projectId, err: err instanceof Error ? err.message : String(err), event: "godot_editor_launch_failed" }, "Could not auto-launch Godot editor");
-      });
+  } catch (err) {
+    if (err instanceof EngineNotSupportedError) {
+      // Engine has no registered adapter; ignore.
+    } else {
+      logger.error({ projectId, error: err instanceof Error ? err.message : String(err), event: "tool_bridge_start_error" }, "Failed to start tool bridge");
     }
   }
 
@@ -2174,29 +2159,20 @@ chatRouter.post("/spawn", async (req: Request, res: Response) => {
   let spawnResponded = false;
   try {
 
-  // Start Godot MCP service for godot projects (if not already running)
-  if (project.engine === "godot") {
-    const mcpOptions: GodotMCPServiceOptions = {
-      projectPath: project.workspacePath ?? undefined,
-      mode: "lite",
-    };
-    logger.info({ projectId, projectName: project.name, role: agentRole, event: "godot_mcp_spawn_check" }, "Checking Godot MCP for agent spawn");
-    getOrCreateGodotMCPService(projectId, mcpOptions).then((service) => {
-      logger.info({ projectId, role: agentRole, running: service.running(), event: "godot_mcp_spawn_ready" }, "Godot MCP service ready for agent");
+  // Start engine-specific tool bridge for registered adapters (if not already running)
+  try {
+    const adapter = getEngineAdapter((project.engine ?? "godot") as ProjectEngine);
+    logger.info({ projectId, projectName: project.name, role: agentRole, event: "tool_bridge_spawn_check" }, "Checking tool bridge for agent spawn");
+    adapter.startToolBridge?.(projectId, project.workspacePath ?? "").then((result) => {
+      logger.info({ projectId, role: agentRole, running: result?.running, event: "tool_bridge_spawn_ready" }, "Tool bridge ready for agent");
     }).catch((err) => {
-      logger.error({ projectId, role: agentRole, error: err.message, event: "godot_mcp_spawn_error" }, "Failed to start Godot MCP for agent");
+      logger.error({ projectId, role: agentRole, error: err instanceof Error ? err.message : String(err), event: "tool_bridge_spawn_error" }, "Failed to start tool bridge for agent");
     });
-
-    // Auto-launch Godot editor (fire-and-forget; see comment at line ~600).
-    if (project.workspacePath) {
-      const projectDir = resolveProjectWorkspace(project.workspacePath);
-      launchGodotEditor(projectDir).then((launchResult) => {
-        if (launchResult.success) {
-          logger.info({ projectId, pid: launchResult.pid, event: "godot_editor_launched" }, "Godot editor auto-launched for agent spawn");
-        }
-      }).catch((err) => {
-        logger.warn({ projectId, err: err instanceof Error ? err.message : String(err), event: "godot_editor_launch_failed" }, "Could not auto-launch Godot editor for agent spawn");
-      });
+  } catch (err) {
+    if (err instanceof EngineNotSupportedError) {
+      // Engine has no registered adapter; ignore.
+    } else {
+      logger.error({ projectId, role: agentRole, error: err instanceof Error ? err.message : String(err), event: "tool_bridge_spawn_error" }, "Failed to start tool bridge for agent");
     }
   }
 

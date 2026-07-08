@@ -24,7 +24,7 @@ import { dirname as pathDirname, join, resolve } from "node:path";
 // place. Drop them so `rg "Sync$" apps/api/src` returns only
 // the live sync sites (accessSync at startup, existsSync /
 // globSync on the binary-detect path).
-import { accessSync, globSync, existsSync } from "node:fs";
+import { accessSync, globSync, existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import type { LLMTool } from "../llm/zai-client.js";
 import { logger } from "../utils/logger.js";
@@ -113,6 +113,21 @@ const GODOT_MCP_PRO_VERSION = "v1.11.0";
 // in production showed a useless ENOENT error.
 const THIS_FILE_DIR = pathDirname(fileURLToPath(import.meta.url));
 const REPO_ROOT_FROM_THIS_FILE = resolve(THIS_FILE_DIR, "..", "..", "..");
+
+// Module-level cache for the Godot MCP Pro instructions file. It is a static
+// file shipped with the godot-mcp-pro package and never changes during a
+// server's lifetime. Read it once at module load and reuse.
+let cachedGodotInstructions: string | null | undefined;
+export function getGodotInstructions(): string | null {
+  if (cachedGodotInstructions !== undefined) return cachedGodotInstructions;
+  const instructionsPath = join(REPO_ROOT_FROM_THIS_FILE, "godot-mcp-pro-v1.11.0", "instructions", "CLAUDE.md");
+  try {
+    cachedGodotInstructions = readFileSync(instructionsPath, "utf-8");
+  } catch {
+    cachedGodotInstructions = null;
+  }
+  return cachedGodotInstructions;
+}
 
 /** Auto-detect MCP server path from env var or relative paths */
 function resolveServerPath(): string {

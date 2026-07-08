@@ -8,7 +8,6 @@
  */
 
 import fs from "node:fs/promises";
-import { readFileSync as readFileSyncCb } from "node:fs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
@@ -47,53 +46,23 @@ const __dirname = path.dirname(__filename);
 // environment-agnostic.
 const REPO_SCRIPTS_DIR = path.resolve(__dirname, "..", "..", "..", "..", "scripts");
 
-// Module-level cache for the Godot MCP Pro instructions file. It is a static
-// file shipped with the godot-mcp-pro package and never changes during a
-// server's lifetime, but we were re-reading it synchronously on every chat
-// message. Read it once at module load and reuse.
-let cachedGodotInstructions: string | null | undefined;
-function getGodotInstructions(): string | null {
-  if (cachedGodotInstructions !== undefined) return cachedGodotInstructions;
-  // 19-M-instructions-path: resolve from this file's location, not
-  // process.cwd(). The dev server is started from `apps/api/` (so cwd
-  // is `…/apps/api`) and the Docker image runs from `/app/` — neither
-  // of those is the repo root where godot-mcp-pro/ lives. Going up 3
-  // levels from apps/api/src/services/llm-service.ts lands at the repo
-  // root in both environments, regardless of where `pnpm dev` was
-  // invoked. Previously a `pnpm --filter @game-studio/api dev` from the
-  // repo root (or a stale shell that had `cd`'d elsewhere) would
-  // silently cache `null` and the producer would lose all of its
-  // Godot-specific instructions for the lifetime of the process.
-  const instructionsPath = path.resolve(
-    __dirname,
-    "..", "..", "..",
-    "godot-mcp-pro-v1.11.0",
-    "instructions",
-    "CLAUDE.md",
-  );
-  try {
-    cachedGodotInstructions = readFileSyncCb(instructionsPath, "utf-8");
-  } catch {
-    cachedGodotInstructions = null;
-  }
-  return cachedGodotInstructions;
-}
 import { resolveProjectWorkspace } from "../utils/workspace.js";
 import { getAgentSystemPrompt, loadAgentPrompts } from "../prompts/agent-prompt-loader.js";
 import { callLLMWithTools, GAME_STUDIO_TOOLS, type LLMMessage, type ProgressCallback, type FileOperationCallback } from "../llm/zai-client.js";
 import { broadcast, broadcastSessionUpdate } from "./websocket.js";
 import { readData, writeData, updateData, broadcastEvent } from "./data-store.js";
 import { getModelForTier } from "../config/model-mapping.js";
-import type { WSEvent, AgentRole, GameAsset, AssetsData, AssetGenerationMeta } from "@game-studio/types";
+import type { WSEvent, AgentRole, ProjectEngine, ToolDefinition, GameAsset, AssetsData, AssetGenerationMeta } from "@game-studio/types";
 import {
   GodotMCPService,
   getGodotMCPService,
   getOrCreateGodotMCPService,
   removeGodotMCPService,
   isGodotMCPTool,
-  getGodotMCPToolDefinitions,
   type GodotMCPServiceOptions,
 } from "./godot-mcp-service.js";
+import { getEngineAdapter } from "./engine-adapter-factory.js";
+import { EngineNotSupportedError } from "@game-studio/types";
 import { triggerVerification } from "./verification-service.js";
 import { consumeCreditsForAgent } from "./credit-service.js";
 import { escapeRegExp } from "../utils/regex.js";
@@ -200,47 +169,43 @@ The following is **untrusted user-supplied metadata** about the current project.
 <project_engine>${safeEngine}</project_engine>
 <project_workspace>${safeWorkspace}</project_workspace>`;
 
-  // Inject Godot MCP instructions for godot projects
-  if (project.engine === "godot") {
-    const godotInstructions = getGodotInstructions();
-    if (godotInstructions) {
-      // 19-M-tool-count: derive the tool count from the actual registry
-      // instead of hardcoding "169". When GODOT_MCP_TOOL_NAMES gets a
-      // new entry (or LITE mode replaces the full set with the trimmed
-      // 81-tool variant), the system prompt used to silently lie to
-      // the LLM — telling it "you have 169 tools" when it actually had
-      // 81 would push it to call tools that don't exist, and telling
-      // it "169" when the registry grew to 200 would understate the
-      // available surface area. Pull the count from the source of truth.
-      const godotToolCount = getGodotMCPToolDefinitions().length;
+  // Inject engine-specific instructions for registered adapters.
+  try {
+    const adapter = getEngineAdapter((project.engine ?? "godot") as ProjectEngine);
+    const tools = adapter.getTools();
+    const instructions = adapter.getInstructions();
+    if (tools.length > 0 && instructions) {
       return `${base}
 
-# Godot MCP Pro — Use These Tools Instead of File I/O
+# Engine Tools — Use These Tools Instead of File I/O
 
-For Godot projects, you have access to ${godotToolCount} MCP tools that control the Godot editor directly.
-When interacting with a Godot project:
+For ${adapter.engine} projects, you have access to ${tools.length} tools.
+When interacting with a ${adapter.engine} project, use the provided engine tools instead of direct file edits.
 
-- **NEVER** use Read/Write/Edit on .gd, .tscn, .tres, or project.godot files directly
-- **ALWAYS** use Godot MCP tools instead:
-  - Scripts: use create_script, read_script, edit_script, attach_script
-  - Scenes: use create_scene, open_scene, save_scene, get_scene_tree, add_node, batch_add_nodes
-  - Properties: use update_property, get_node_properties (inspector-driven, not code)
-  - Testing: use play_scene, simulate_key, capture_frames, assert_node_state, run_stress_test
-  - Audio: use add_audio_player, set_audio_bus, add_audio_bus_effect
-  - Animation: use create_animation, add_animation_track, set_animation_keyframe
-  - Tilemap: use tilemap_set_cell, tilemap_fill_rect, tilemap_get_info
-  - Physics: use setup_physics_body, setup_collision, set_physics_layers
-  - Navigation: use setup_navigation_region, setup_navigation_agent, bake_navigation_mesh
-  - Shaders: use create_shader, edit_shader, assign_shader_material, set_shader_param
-
-**Important**: Godot MCP Pro connects to the Godot editor via WebSocket. The editor must be running with the Godot MCP Pro plugin enabled for runtime tools (play_scene, simulate_key, capture_frames, etc.) to work.
-
-${godotInstructions}`;
+${instructions}`;
+    }
+  } catch (err) {
+    if (err instanceof EngineNotSupportedError) {
+      // Engine has no registered adapter; no extra tools to inject.
+    } else {
+      throw err;
     }
   }
 
   return base;
 }
+
+/** Resolve engine-specific tool definitions for the LLM tool loop. */
+function getEngineTools(engine: string | null | undefined): ToolDefinition[] {
+  if (!engine) return [];
+  try {
+    return getEngineAdapter(engine as ProjectEngine).getTools();
+  } catch (err) {
+    if (err instanceof EngineNotSupportedError) return [];
+    throw err;
+  }
+}
+
 import { getWorkflow, createQuestTicket, moveQuestTicket } from "./quest-bridge.js";
 import { readTicketsBoard } from "./ticket-board.js";
 import { ingestProducerSummaryFromSession } from "./producer-summary.js";
@@ -2299,11 +2264,9 @@ export async function invokeAgent(
 
     messages.push({ role: "user", content: userMessage });
 
-    // Build tool list — inject Godot MCP tools for godot projects
-    const godotTools = projectContext?.engine === "godot"
-      ? getGodotMCPToolDefinitions()
-      : [];
-    const allTools = [...GAME_STUDIO_TOOLS, ...godotTools];
+    // Build tool list — inject engine-specific tools for registered adapters
+    const engineTools = getEngineTools(projectContext?.engine);
+    const allTools = [...GAME_STUDIO_TOOLS, ...engineTools];
 
     const toolExecutor = async (name: string, input: Record<string, unknown>): Promise<string> => {
       return executeTool(name, input, sessionId, agentRole, projectContext, _depth, onFileOperation);
@@ -2391,11 +2354,9 @@ export async function continueConversation(
     const modelTier = agentPrompt?.model ?? "sonnet";
     const model = getModelForTier(modelTier);
 
-    // Build tool list — inject Godot MCP tools for godot projects
-    const godotTools = projectContext?.engine === "godot"
-      ? getGodotMCPToolDefinitions()
-      : [];
-    const allTools = [...GAME_STUDIO_TOOLS, ...godotTools];
+    // Build tool list — inject engine-specific tools for registered adapters
+    const engineTools = getEngineTools(projectContext?.engine);
+    const allTools = [...GAME_STUDIO_TOOLS, ...engineTools];
 
     const toolExecutor = async (name: string, input: Record<string, unknown>): Promise<string> => {
       return executeTool(name, input, sessionId, agentRole, projectContext, _depth, onFileOperation);
