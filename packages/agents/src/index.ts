@@ -7,6 +7,8 @@ import { phaserAgents } from "./engine-phaser.js";
 import { godotAgents } from "./engine-godot.js";
 import { unityAgents } from "./engine-unity.js";
 import { unrealAgents } from "./engine-unreal.js";
+import { threejsAgents } from "./engine-threejs.js";
+import { babylonAgents } from "./engine-babylon.js";
 import { codeReviewerAgents } from "./code-reviewer.js";
 import { delegationMap } from "./delegation-map.js";
 import { agentTiers } from "./tiers.js";
@@ -20,6 +22,8 @@ export const agents: Partial<Record<AgentRole, AgentDefinition>> = {
   ...godotAgents,
   ...unityAgents,
   ...unrealAgents,
+  ...threejsAgents,
+  ...babylonAgents,
   ...codeReviewerAgents,
 };
 

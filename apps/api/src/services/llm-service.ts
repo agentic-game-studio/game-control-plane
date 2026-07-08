@@ -52,7 +52,7 @@ import { callLLMWithTools, GAME_STUDIO_TOOLS, type LLMMessage, type ProgressCall
 import { broadcast, broadcastSessionUpdate } from "./websocket.js";
 import { readData, writeData, updateData, broadcastEvent } from "./data-store.js";
 import { getModelForTier } from "../config/model-mapping.js";
-import type { WSEvent, AgentRole, ProjectEngine, ToolDefinition, GameAsset, AssetsData, AssetGenerationMeta } from "@game-studio/types";
+import type { WSEvent, AgentRole, ProjectEngine, BuildPlatform, ToolDefinition, GameAsset, AssetsData, AssetGenerationMeta } from "@game-studio/types";
 import {
   GodotMCPService,
   getGodotMCPService,
@@ -61,8 +61,9 @@ import {
   isGodotMCPTool,
   type GodotMCPServiceOptions,
 } from "./godot-mcp-service.js";
-import { getEngineAdapter } from "./engine-adapter-factory.js";
-import { EngineNotSupportedError } from "@game-studio/types";
+import { getEngineAdapter, hasEngineAdapter } from "./engine-adapter-factory.js";
+import { startViteDevServer } from "./phaser-vite-service.js";
+import { EngineNotSupportedError, isProjectEngine } from "@game-studio/types";
 import { triggerVerification } from "./verification-service.js";
 import { consumeCreditsForAgent } from "./credit-service.js";
 import { escapeRegExp } from "../utils/regex.js";
@@ -1932,15 +1933,175 @@ loop_offset=0
         if (!command) return "Error: command is required";
         if (!projectPath) return "Error: projectPath is required";
         broadcastLogEntry(sessionId, "info", `[${agentRole}] PhaserCLI: ${command} @ ${projectPath}`, agentRole);
-        // Runtime execution is delegated to PhaserEngineAdapter in T-004.
-        return `PhaserCLI '${command}' received for ${projectPath}. Full adapter execution will be wired in T-004.`;
+
+        if (!hasEngineAdapter("phaser")) {
+          return `PhaserCLI '${command}' received for ${projectPath}. Full adapter execution will be wired in T-004.`;
+        }
+
+        const adapter = getEngineAdapter("phaser");
+        try {
+          switch (command) {
+            case "init": {
+              const name = (input.name as string) ?? "phaser-game";
+              await adapter.scaffold(projectPath, name);
+              return `Phaser project '${name}' scaffolded at ${projectPath}.`;
+            }
+            case "test": {
+              const result = await adapter.runTests(projectPath);
+              return `Phaser test result: ok=${result.ok}\n${result.output}`;
+            }
+            case "build": {
+              const result = await adapter.export(projectPath, "web");
+              return `Phaser build result: artifactPath=${result.artifactPath}`;
+            }
+            case "dev": {
+              const port = (input.port as number) ?? 5173;
+              const { url } = await startViteDevServer(projectPath, port);
+              return `Phaser dev server started at ${url}`;
+            }
+            case "preview": {
+              const port = (input.port as number) ?? 5173;
+              const { url } = await startViteDevServer(projectPath, port);
+              return `Phaser preview server started at ${url}`;
+            }
+            default:
+              return `Error: unsupported PhaserCLI command: ${command}`;
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return `Error: PhaserCLI ${command} failed: ${msg}`;
+        }
       }
 
       case "RunPhaserHeadless": {
         const projectPath = input.projectPath as string;
         if (!projectPath) return "Error: projectPath is required";
         broadcastLogEntry(sessionId, "info", `[${agentRole}] RunPhaserHeadless @ ${projectPath}`, agentRole);
-        return `RunPhaserHeadless received for ${projectPath}. Headless renderer harness will be wired in T-004.`;
+
+        if (!hasEngineAdapter("phaser")) {
+          return `RunPhaserHeadless received for ${projectPath}. Headless renderer harness will be wired in T-004.`;
+        }
+
+        const adapter = getEngineAdapter("phaser");
+        try {
+          const result = await adapter.runTests(projectPath);
+          return `RunPhaserHeadless result: ok=${result.ok}\n${result.output}`;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return `Error: RunPhaserHeadless failed: ${msg}`;
+        }
+      }
+
+      case "Web3DCLI": {
+        const command = typeof input.command === "string" ? input.command : "";
+        const projectPath = typeof input.projectPath === "string" ? input.projectPath : "";
+        const framework = typeof input.framework === "string" ? input.framework : "";
+        if (!command) return "Error: command is required (init, dev, build, test, preview)";
+        if (!projectPath) return "Error: projectPath is required";
+        if (!framework) return "Error: framework is required ('threejs' or 'babylon')";
+        if (!isProjectEngine(framework) || (framework !== "threejs" && framework !== "babylon")) {
+          return `Error: unsupported framework '${framework}'. Use 'threejs' or 'babylon'.`;
+        }
+
+        broadcastLogEntry(sessionId, "info", `[${agentRole}] Web3DCLI: ${command} (${framework}) @ ${projectPath}`, agentRole);
+
+        if (!hasEngineAdapter(framework)) {
+          return `Web3DCLI '${command}' received for ${framework} project at ${projectPath}. Adapter will be registered in a follow-up step.`;
+        }
+
+        const adapter = getEngineAdapter(framework);
+        try {
+          switch (command) {
+            case "init": {
+              const name = typeof input.name === "string" ? input.name : `${framework}-game`;
+              await adapter.scaffold(projectPath, name);
+              return `${framework} project '${name}' scaffolded at ${projectPath}.`;
+            }
+            case "test": {
+              const result = await adapter.runTests(projectPath);
+              return `${framework} test result: ok=${result.ok}\n${result.output}`;
+            }
+            case "build": {
+              const result = await adapter.export(projectPath, "web");
+              return `${framework} build result: artifactPath=${result.artifactPath}`;
+            }
+            case "dev": {
+              const port = typeof input.port === "number" ? input.port : 5173;
+              const { url } = await startViteDevServer(projectPath, port);
+              return `${framework} dev server started at ${url}`;
+            }
+            case "preview": {
+              const port = typeof input.port === "number" ? input.port : 5173;
+              const { url } = await startViteDevServer(projectPath, port);
+              return `${framework} preview server started at ${url}`;
+            }
+            default:
+              return `Error: unsupported Web3DCLI command: ${command}`;
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return `Error: Web3DCLI ${command} failed: ${msg}`;
+        }
+      }
+
+      case "TextTo3D": {
+        const provider = typeof input.provider === "string" ? input.provider : "";
+        const configured = provider && process.env.TEXT_TO_3D_PROVIDER === provider;
+        if (!configured) {
+          return "TextTo3D not yet implemented: no 3D generation provider is configured.";
+        }
+        return `TextTo3D provider '${provider}' is configured but the generation backend is not yet implemented.`;
+      }
+
+      case "UnityCLI": {
+        const command = input.command as string;
+        const projectPath = input.projectPath as string;
+        if (!command) return "Error: command is required (create-project, run-tests, build)";
+        if (!projectPath) return "Error: projectPath is required";
+        if (command === "create-project" && !input.name) return "Error: name is required for create-project command";
+        if (command === "build" && !input.platform) return "Error: platform is required for build command";
+        broadcastLogEntry(sessionId, "info", `[${agentRole}] UnityCLI: ${command} @ ${projectPath}`, agentRole);
+        // Runtime execution is delegated to UnityEngineAdapter.
+        return `UnityCLI '${command}' received for ${projectPath}. Full adapter execution is wired through UnityEngineAdapter.`;
+      }
+
+      case "UnrealCLI": {
+        const command = input.command as string;
+        const projectPath = input.projectPath as string;
+        if (!command) return "Error: command is required (create-project, run-tests, build)";
+        if (!projectPath) return "Error: projectPath is required";
+        if (command === "create-project" && !input.name) return "Error: name is required for create-project command";
+        if (command === "build" && !input.platform) return "Error: platform is required for build command";
+        broadcastLogEntry(sessionId, "info", `[${agentRole}] UnrealCLI: ${command} @ ${projectPath}`, agentRole);
+
+        if (!hasEngineAdapter("unreal")) {
+          return `UnrealCLI '${command}' received for ${projectPath}. Full adapter execution will be wired once the Unreal adapter is registered.`;
+        }
+
+        const adapter = getEngineAdapter("unreal");
+        try {
+          switch (command) {
+            case "create-project": {
+              const name = (input.name as string) ?? "unreal-game";
+              await adapter.scaffold(projectPath, name);
+              return `Unreal project '${name}' scaffolded at ${projectPath}.`;
+            }
+            case "run-tests": {
+              const result = await adapter.runTests(projectPath);
+              return `Unreal test result: ok=${result.ok}\n${result.output}`;
+            }
+            case "build": {
+              const platform = (input.platform as BuildPlatform) ?? "windows";
+              const result = await adapter.export(projectPath, platform);
+              return `Unreal build result: artifactPath=${result.artifactPath}`;
+            }
+            default:
+              return `Error: unsupported UnrealCLI command: ${command}`;
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return `Error: UnrealCLI ${command} failed: ${msg}`;
+        }
       }
 
       default:

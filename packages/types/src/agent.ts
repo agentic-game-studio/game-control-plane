@@ -52,6 +52,9 @@ export type AgentRole =
   | "phaser-scaffolder"
   | "phaser-specialist"
   | "phaser-typescript-specialist"
+  // Web3D specialists
+  | "threejs-specialist"
+  | "babylon-specialist"
   | "godot-scaffolder"
   | "godot-specialist"
   | "godot-gdscript-specialist"
@@ -104,6 +107,8 @@ type AgentRoleTuple = [
   "accessibility-specialist", "live-ops-designer", "community-manager",
   // Engine specialists
   "phaser-scaffolder", "phaser-specialist", "phaser-typescript-specialist",
+  // Web3D specialists
+  "threejs-specialist", "babylon-specialist",
   "godot-scaffolder", "godot-specialist", "godot-gdscript-specialist",
   "godot-csharp-specialist", "godot-shader-specialist",
   "godot-gdextension-specialist", "unity-specialist", "unity-dots-specialist",
@@ -133,6 +138,8 @@ export const AGENT_ROLES = [
   "accessibility-specialist", "live-ops-designer", "community-manager",
   // Engine specialists
   "phaser-scaffolder", "phaser-specialist", "phaser-typescript-specialist",
+  // Web3D specialists
+  "threejs-specialist", "babylon-specialist",
   "godot-scaffolder", "godot-specialist", "godot-gdscript-specialist",
   "godot-csharp-specialist", "godot-shader-specialist",
   "godot-gdextension-specialist", "unity-specialist", "unity-dots-specialist",
@@ -160,7 +167,10 @@ export type AgentTool =
   | "AskUserQuestion"
   | "PhaserCLI"
   | "RunPhaserHeadless"
+  | "Web3DCLI"
   | "GodotCLI"
+  | "UnityCLI"
+  | "UnrealCLI"
   | "DeepResearch";
 
 export interface AgentDefinition {

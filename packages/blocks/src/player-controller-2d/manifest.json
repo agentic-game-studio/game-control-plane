@@ -1,0 +1,9 @@
+{
+  "name": "player-controller-2d",
+  "description": "A simple 2D player movement controller for Phaser 3 Arcade physics.",
+  "engine": "phaser",
+  "files": ["phaser.ts"],
+  "exports": {
+    "default": "./phaser.ts"
+  }
+}

@@ -5,12 +5,34 @@ import {
   phaserQASkills,
   phaserReleaseSkills,
 } from "./phaser-skills.js";
+import {
+  unityOnboardingSkills,
+  unityImplementationSkills,
+  unityQASkills,
+  unityReleaseSkills,
+} from "./unity-skills.js";
+import {
+  unrealOnboardingSkills,
+  unrealImplementationSkills,
+  unrealQASkills,
+  unrealReleaseSkills,
+} from "./unreal-skills.js";
+import {
+  web3dOnboardingSkills,
+  web3dImplementationSkills,
+  web3dQASkills,
+  web3dReleaseSkills,
+  web3dCreativeSkills,
+} from "./web3d-skills.js";
 import type { AgentRole } from "@game-studio/types";
 
 /** Skills organized by production phase */
 export const skillsByPhase: Record<string, SkillDefinition[]> = {
   onboarding: [
     ...phaserOnboardingSkills,
+    ...unityOnboardingSkills,
+    ...unrealOnboardingSkills,
+    ...web3dOnboardingSkills,
     {
       name: "start",
       description: "First-time onboarding — asks where you are, then guides you to the right workflow",
@@ -89,6 +111,9 @@ export const skillsByPhase: Record<string, SkillDefinition[]> = {
 
   implementation: [
     ...phaserImplementationSkills,
+    ...unityImplementationSkills,
+    ...unrealImplementationSkills,
+    ...web3dImplementationSkills,
     {
       name: "compose-scene",
       description: "Build a Godot scene from assets and scripts: wire nodes, connect signals, configure physics bodies, tilemaps, and cameras. Reads the GDD system spec and generates a complete, runnable scene with all required components.",
@@ -974,6 +999,9 @@ export const skillsByPhase: Record<string, SkillDefinition[]> = {
 
   qa: [
     ...phaserQASkills,
+    ...unityQASkills,
+    ...unrealQASkills,
+    ...web3dQASkills,
     {
       name: "qa-plan",
       description: "Generate a QA test plan for a sprint or feature",
@@ -1221,6 +1249,9 @@ export const skillsByPhase: Record<string, SkillDefinition[]> = {
 
   release: [
     ...phaserReleaseSkills,
+    ...unityReleaseSkills,
+    ...unrealReleaseSkills,
+    ...web3dReleaseSkills,
     {
       name: "release-checklist",
       description: "Generate and validate a pre-release checklist",
@@ -1340,6 +1371,7 @@ export const skillsByPhase: Record<string, SkillDefinition[]> = {
   ],
 
   "creative-content": [
+    ...web3dCreativeSkills,
     {
       name: "prototype",
       description: "Rapid throwaway prototype to validate a mechanic",

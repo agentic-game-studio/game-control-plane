@@ -1,0 +1,9 @@
+{
+  "name": "enemy-ai-patrol",
+  "description": "A simple enemy patrol AI that moves between two X coordinates for Phaser 3.",
+  "engine": "phaser",
+  "files": ["phaser.ts"],
+  "exports": {
+    "default": "./phaser.ts"
+  }
+}
