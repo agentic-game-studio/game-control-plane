@@ -1,9 +1,10 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import type { SettingsConfig, GameEngine } from "@game-studio/types";
+import type { SettingsConfig, ProjectEngine } from "@game-studio/types";
+import { PROJECT_ENGINES } from "@game-studio/types";
 
-const ENGINE_OPTIONS: GameEngine[] = ["Unity", "Unreal", "Godot"];
+const ENGINE_OPTIONS: ProjectEngine[] = [...PROJECT_ENGINES];
 const MODEL_OPTIONS = [
   "Studio XYZ Optimized (Fast)",
   "Studio XYZ Ultra (High-Res)",
@@ -17,7 +18,7 @@ interface ConfigFormProps {
 }
 
 export function ConfigForm({ settings, onSave, saving }: ConfigFormProps) {
-  const [engine, setEngine] = useState<GameEngine>(settings.targetEngine);
+  const [engine, setEngine] = useState<ProjectEngine>(settings.targetEngine);
   const [assetModel, setAssetModel] = useState(settings.assetModel);
   const [apiKey, setApiKey] = useState(settings.externalApiKey ?? "");
   const [webhook, setWebhook] = useState(settings.webhookUrl ?? "");

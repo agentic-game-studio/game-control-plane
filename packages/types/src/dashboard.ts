@@ -1,4 +1,30 @@
-export type ProjectEngine = "unity" | "unreal" | "godot" | "phaser" | "threejs";
+export type ProjectEngine =
+  | "godot"
+  | "unity"
+  | "unreal"
+  | "phaser"
+  | "threejs"
+  | "babylon"
+  | "bevy"
+  | "playcanvas";
+
+/** Exhaustive runtime list of all ProjectEngine values. */
+export const PROJECT_ENGINES: readonly ProjectEngine[] = [
+  "godot",
+  "unity",
+  "unreal",
+  "phaser",
+  "threejs",
+  "babylon",
+  "bevy",
+  "playcanvas",
+] as const;
+
+/** Type guard: is the value a valid ProjectEngine? */
+export function isProjectEngine(value: unknown): value is ProjectEngine {
+  return typeof value === "string" && (PROJECT_ENGINES as readonly string[]).includes(value);
+}
+
 export type ProjectStatus = "active" | "paused" | "archived";
 
 export type ProjectIcon =
@@ -24,6 +50,7 @@ export interface Project {
   status: ProjectStatus;
   workspacePath: string | null;
   icon: ProjectIcon;
+  webgpu?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -34,6 +61,7 @@ export interface CreateProjectRequest {
   engine?: ProjectEngine;
   workspacePath?: string | null;
   icon?: ProjectIcon;
+  webgpu?: boolean;
 }
 
 export interface UpdateProjectRequest {
@@ -44,6 +72,7 @@ export interface UpdateProjectRequest {
   status?: ProjectStatus;
   workspacePath?: string | null;
   icon?: ProjectIcon;
+  webgpu?: boolean;
 }
 
 export interface CreditSummary {
