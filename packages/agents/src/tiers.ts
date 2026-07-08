@@ -44,6 +44,9 @@ export const agentTiers: Record<AgentRole, { tier: 1 | 2 | 3; model: ModelTier }
   "live-ops-designer": { tier: 3, model: "sonnet" },
   "community-manager": { tier: 3, model: "sonnet" },
   // Engine specialists
+  "phaser-scaffolder": { tier: 3, model: "sonnet" },
+  "phaser-specialist": { tier: 3, model: "sonnet" },
+  "phaser-typescript-specialist": { tier: 3, model: "sonnet" },
   "godot-scaffolder": { tier: 3, model: "sonnet" },
   "godot-specialist": { tier: 3, model: "sonnet" },
   "godot-gdscript-specialist": { tier: 3, model: "sonnet" },

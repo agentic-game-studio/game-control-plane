@@ -39,6 +39,7 @@ export const delegationMap: Record<AgentRole, AgentRole[]> = {
     "network-programmer",
     "tools-programmer",
     "ui-programmer",
+    "phaser-specialist",
     "godot-specialist",
     "unity-specialist",
     "unreal-specialist",
@@ -53,6 +54,9 @@ export const delegationMap: Record<AgentRole, AgentRole[]> = {
   prototyper: [],
   "security-engineer": ["network-programmer", "lead-programmer"],
   "accessibility-specialist": ["ux-designer", "ui-programmer", "qa-tester"],
+  "phaser-specialist": ["phaser-typescript-specialist", "code-reviewer"],
+  "phaser-scaffolder": [],
+  "phaser-typescript-specialist": [],
   "godot-specialist": ["godot-gdscript-specialist", "godot-shader-specialist", "godot-gdextension-specialist", "code-reviewer"],
   "unity-specialist": [
     "unity-dots-specialist",

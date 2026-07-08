@@ -49,6 +49,9 @@ export type AgentRole =
   | "live-ops-designer"
   | "community-manager"
   // Engine specialists
+  | "phaser-scaffolder"
+  | "phaser-specialist"
+  | "phaser-typescript-specialist"
   | "godot-scaffolder"
   | "godot-specialist"
   | "godot-gdscript-specialist"
@@ -100,6 +103,7 @@ type AgentRoleTuple = [
   "analytics-engineer", "security-engineer", "prototyper",
   "accessibility-specialist", "live-ops-designer", "community-manager",
   // Engine specialists
+  "phaser-scaffolder", "phaser-specialist", "phaser-typescript-specialist",
   "godot-scaffolder", "godot-specialist", "godot-gdscript-specialist",
   "godot-csharp-specialist", "godot-shader-specialist",
   "godot-gdextension-specialist", "unity-specialist", "unity-dots-specialist",
@@ -128,6 +132,7 @@ export const AGENT_ROLES = [
   "analytics-engineer", "security-engineer", "prototyper",
   "accessibility-specialist", "live-ops-designer", "community-manager",
   // Engine specialists
+  "phaser-scaffolder", "phaser-specialist", "phaser-typescript-specialist",
   "godot-scaffolder", "godot-specialist", "godot-gdscript-specialist",
   "godot-csharp-specialist", "godot-shader-specialist",
   "godot-gdextension-specialist", "unity-specialist", "unity-dots-specialist",
@@ -153,6 +158,8 @@ export type AgentTool =
   | "Bash"
   | "Task"
   | "AskUserQuestion"
+  | "PhaserCLI"
+  | "RunPhaserHeadless"
   | "GodotCLI"
   | "DeepResearch";
 

@@ -1,9 +1,16 @@
 import type { SkillDefinition, SkillName } from "@game-studio/types";
+import {
+  phaserOnboardingSkills,
+  phaserImplementationSkills,
+  phaserQASkills,
+  phaserReleaseSkills,
+} from "./phaser-skills.js";
 import type { AgentRole } from "@game-studio/types";
 
 /** Skills organized by production phase */
 export const skillsByPhase: Record<string, SkillDefinition[]> = {
   onboarding: [
+    ...phaserOnboardingSkills,
     {
       name: "start",
       description: "First-time onboarding — asks where you are, then guides you to the right workflow",
@@ -81,6 +88,7 @@ export const skillsByPhase: Record<string, SkillDefinition[]> = {
   ],
 
   implementation: [
+    ...phaserImplementationSkills,
     {
       name: "compose-scene",
       description: "Build a Godot scene from assets and scripts: wire nodes, connect signals, configure physics bodies, tilemaps, and cameras. Reads the GDD system spec and generates a complete, runnable scene with all required components.",
@@ -965,6 +973,7 @@ export const skillsByPhase: Record<string, SkillDefinition[]> = {
   ],
 
   qa: [
+    ...phaserQASkills,
     {
       name: "qa-plan",
       description: "Generate a QA test plan for a sprint or feature",
@@ -1211,6 +1220,7 @@ export const skillsByPhase: Record<string, SkillDefinition[]> = {
   ],
 
   release: [
+    ...phaserReleaseSkills,
     {
       name: "release-checklist",
       description: "Generate and validate a pre-release checklist",

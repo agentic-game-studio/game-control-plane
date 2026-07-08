@@ -73,6 +73,14 @@ export type SkillName =
   | "prototype"
   | "onboard"
   | "localize"
+  // Phaser
+  | "setup-phaser-project"
+  | "implement-phaser-scene"
+  | "implement-phaser-physics"
+  | "implement-phaser-tilemap"
+  | "automated-phaser-playtest"
+  | "export-web-project"
+  | "phaser-cli-ops"
   // Godot Production
   | "setup-godot-project"
   | "compose-scene"

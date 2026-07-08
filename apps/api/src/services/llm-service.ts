@@ -1926,6 +1926,23 @@ loop_offset=0
         }
       }
 
+      case "PhaserCLI": {
+        const command = input.command as string;
+        const projectPath = input.projectPath as string;
+        if (!command) return "Error: command is required";
+        if (!projectPath) return "Error: projectPath is required";
+        broadcastLogEntry(sessionId, "info", `[${agentRole}] PhaserCLI: ${command} @ ${projectPath}`, agentRole);
+        // Runtime execution is delegated to PhaserEngineAdapter in T-004.
+        return `PhaserCLI '${command}' received for ${projectPath}. Full adapter execution will be wired in T-004.`;
+      }
+
+      case "RunPhaserHeadless": {
+        const projectPath = input.projectPath as string;
+        if (!projectPath) return "Error: projectPath is required";
+        broadcastLogEntry(sessionId, "info", `[${agentRole}] RunPhaserHeadless @ ${projectPath}`, agentRole);
+        return `RunPhaserHeadless received for ${projectPath}. Headless renderer harness will be wired in T-004.`;
+      }
+
       default:
         // Check if this is a Godot MCP tool and route to the MCP service
         if (isGodotMCPTool(name)) {

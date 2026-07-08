@@ -3,6 +3,7 @@ import { AGENT_ROLES, isAgentRole } from "@game-studio/types";
 import { leadershipAgents } from "./leadership.js";
 import { departmentLeadAgents } from "./department-leads.js";
 import { specialistAgents } from "./specialists.js";
+import { phaserAgents } from "./engine-phaser.js";
 import { godotAgents } from "./engine-godot.js";
 import { unityAgents } from "./engine-unity.js";
 import { unrealAgents } from "./engine-unreal.js";
@@ -15,6 +16,7 @@ export const agents: Partial<Record<AgentRole, AgentDefinition>> = {
   ...leadershipAgents,
   ...departmentLeadAgents,
   ...specialistAgents,
+  ...phaserAgents,
   ...godotAgents,
   ...unityAgents,
   ...unrealAgents,
