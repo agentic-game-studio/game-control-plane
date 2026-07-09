@@ -27,7 +27,7 @@ for (const role of allAgentRoles) {
 
 // 12-H20: catch orphan agent files. The previous version only
 // validated agents that index.ts already imported, so a contributor
-// who added a new agent file (e.g. `godot-csharp-specialist.ts`)
+// who added a new agent file (e.g. `godot-gdextension-specialist.ts`)
 // but forgot the import in index.ts would pass validation, ship
 // a "registered" agent that never reaches production, and the
 // silent gap would only surface when the new agent's role was

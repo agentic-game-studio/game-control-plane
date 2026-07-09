@@ -45,15 +45,4 @@ export const unrealAgents: Partial<Record<AgentRole, AgentDefinition>> = {
     memory: "session",
     reportsTo: ["unreal-specialist", "network-programmer"],
   },
-  "ue-umg-specialist": {
-    name: "ue-umg-specialist",
-    description: "UI: UMG, CommonUI, widget hierarchy, data binding.",
-    tier: 3,
-    model: "sonnet",
-    tools: ["Read", "Write", "Edit", "Glob", "Grep", "UnrealCLI"],
-    maxTurns: 25,
-    skills: ["ux-design", "dev-story", "setup-unreal-project", "implement-ue-blueprint", "implement-ue-gas", "implement-ue-replication", "automated-ue-playtest", "unreal-cli-ops"],
-    memory: "session",
-    reportsTo: ["unreal-specialist", "ui-programmer"],
-  },
 };

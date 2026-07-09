@@ -200,18 +200,6 @@ export const specialistAgents: Partial<Record<AgentRole, AgentDefinition>> = {
     memory: "session",
     reportsTo: ["producer"],
   },
-  "security-engineer": {
-    name: "security-engineer",
-    description: "Security auditing, anti-cheat, vulnerability assessment.",
-    tier: 3,
-    model: "sonnet",
-    tools: ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
-    maxTurns: 30,
-    skills: ["security-audit"],
-    memory: "session",
-    reportsTo: ["technical-director"],
-    experimental: true,
-  },
   prototyper: {
     name: "prototyper",
     description: "Rapid throwaway prototypes, concept validation.",

@@ -932,7 +932,7 @@ export const skillsByPhase: Record<string, SkillDefinition[]> = {
     },
     {
       name: "security-audit",
-      description: "Audit game code and infrastructure for security vulnerabilities — input validation, auth flows, secret handling, dependency CVEs. Referenced by security-engineer agent.",
+      description: "Audit game code and infrastructure for security vulnerabilities — input validation, auth flows, secret handling, dependency CVEs.",
       phases: [],
       userInvocable: true,
     },
