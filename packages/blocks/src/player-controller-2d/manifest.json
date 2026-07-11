@@ -1,0 +1,27 @@
+{
+  "name": "player-controller-2d",
+  "description": "A simple 2D player movement controller with keyboard input.",
+  "inputs": [
+    {
+      "name": "sprite",
+      "type": "Sprite",
+      "description": "The player sprite or body to move.",
+      "required": true
+    },
+    {
+      "name": "speed",
+      "type": "number",
+      "description": "Movement speed in pixels per second.",
+      "default": 200
+    }
+  ],
+  "outputs": [
+    {
+      "name": "controller",
+      "type": "Controller",
+      "description": "Update function that applies movement each frame."
+    }
+  ],
+  "dependencies": [],
+  "engines": ["phaser", "godot", "unity"]
+}

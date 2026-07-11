@@ -16,12 +16,16 @@ import { stat as statAsync } from "fs/promises";
 import { readFile } from "node:fs/promises";
 import { join } from "path";
 import { loadConfig } from "../config.js";
+import { readData } from "./data-store.js";
 import { createQuestTicket } from "./quest-bridge.js";
 import { readTicketsBoard } from "./ticket-board.js";
 import { broadcast } from "./websocket.js";
 import { logger } from "../utils/logger.js";
 import { resolveProjectWorkspace } from "../utils/workspace.js";
-import type { AgentRole, TicketsBoard, WSEvent } from "@game-studio/types";
+import { getEngineAdapter } from "./engine-adapter-factory.js";
+import "../adapters/index.js";
+import { EngineNotSupportedError } from "@game-studio/types";
+import type { AgentRole, DashboardData, ProjectEngine, TicketsBoard, WSEvent } from "@game-studio/types";
 
 const AREA_MAP: Record<string, { area: string; subarea: string; assignee: AgentRole }> = {
   player: { area: "engineering", subarea: "player", assignee: "godot-specialist" },
@@ -98,6 +102,23 @@ function resolveTicketMeta(section: string): { area: string; subarea: string; as
     if (k.startsWith(key + "/")) return v;
   }
   return { area: "engineering", subarea: "misc", assignee: "godot-specialist" };
+}
+
+function resolveEngineSpecialist(engine: ProjectEngine | null | undefined): AgentRole {
+  if (!engine) {
+    logger.warn({ engine, event: "gdd_engine_unknown" }, "No engine set for project; falling back to godot-specialist for engineering tickets");
+    return "godot-specialist";
+  }
+  try {
+    const adapter = getEngineAdapter(engine);
+    return adapter.getSpecialist();
+  } catch (err) {
+    if (err instanceof EngineNotSupportedError) {
+      logger.warn({ engine, event: "gdd_engine_not_supported" }, `Engine "${engine}" has no registered adapter; falling back to godot-specialist for engineering tickets`);
+      return "godot-specialist";
+    }
+    throw err;
+  }
 }
 
 export function parseGDDSections(content: string): Map<string, ParsedGDDItem[]> {
@@ -325,6 +346,10 @@ export async function ingestGDD(
   const gddContent = await readFile(gddPath, "utf-8");
   const sections = parseGDDSections(gddContent);
 
+  const dashboard = await readData<DashboardData>("dashboard.json");
+  const project = dashboard.projects.find((p) => p.id === projectId);
+  const engineeringSpecialist = resolveEngineSpecialist(project?.engine ?? null);
+
   const MAX_ITEMS = 200;
   let totalParsed = 0;
   for (const items of sections.values()) totalParsed += items.length;
@@ -395,10 +420,11 @@ export async function ingestGDD(
 
       try {
         const meta = resolveTicketMeta(section);
+        const assignee = meta.area === "engineering" ? engineeringSpecialist : meta.assignee;
         const ticket = await createQuestTicket(
           sessionId,
           item.title,
-          meta.assignee,
+          assignee,
           item.description || `From GDD section: ${section}`,
           meta.area,
           meta.subarea,

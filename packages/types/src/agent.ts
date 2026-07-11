@@ -43,28 +43,29 @@ export type AgentRole =
   | "performance-analyst"
   | "devops-engineer"
   | "analytics-engineer"
-  | "security-engineer"
   | "prototyper"
   | "accessibility-specialist"
   | "live-ops-designer"
   | "community-manager"
   // Engine specialists
+  | "phaser-scaffolder"
+  | "phaser-specialist"
+  | "phaser-typescript-specialist"
+  // Web3D specialists
+  | "threejs-specialist"
+  | "babylon-specialist"
   | "godot-scaffolder"
   | "godot-specialist"
   | "godot-gdscript-specialist"
-  | "godot-csharp-specialist"
   | "godot-shader-specialist"
   | "godot-gdextension-specialist"
   | "unity-specialist"
   | "unity-dots-specialist"
   | "unity-shader-specialist"
-  | "unity-addressables-specialist"
-  | "unity-ui-specialist"
   | "unreal-specialist"
   | "ue-gas-specialist"
   | "ue-blueprint-specialist"
   | "ue-replication-specialist"
-  | "ue-umg-specialist"
   // Code review
   | "code-reviewer"
   | "market-researcher";
@@ -97,15 +98,17 @@ type AgentRoleTuple = [
   "network-programmer", "tools-programmer", "ui-programmer",
   "technical-artist", "writer", "world-builder", "sound-designer",
   "qa-tester", "performance-analyst", "devops-engineer",
-  "analytics-engineer", "security-engineer", "prototyper",
+  "analytics-engineer", "prototyper",
   "accessibility-specialist", "live-ops-designer", "community-manager",
   // Engine specialists
+  "phaser-scaffolder", "phaser-specialist", "phaser-typescript-specialist",
+  // Web3D specialists
+  "threejs-specialist", "babylon-specialist",
   "godot-scaffolder", "godot-specialist", "godot-gdscript-specialist",
-  "godot-csharp-specialist", "godot-shader-specialist",
+  "godot-shader-specialist",
   "godot-gdextension-specialist", "unity-specialist", "unity-dots-specialist",
-  "unity-shader-specialist", "unity-addressables-specialist",
-  "unity-ui-specialist", "unreal-specialist", "ue-gas-specialist",
-  "ue-blueprint-specialist", "ue-replication-specialist", "ue-umg-specialist",
+  "unity-shader-specialist", "unreal-specialist", "ue-gas-specialist",
+  "ue-blueprint-specialist", "ue-replication-specialist",
   // Code review
   "code-reviewer",
   // Research
@@ -125,15 +128,17 @@ export const AGENT_ROLES = [
   "network-programmer", "tools-programmer", "ui-programmer",
   "technical-artist", "writer", "world-builder", "sound-designer",
   "qa-tester", "performance-analyst", "devops-engineer",
-  "analytics-engineer", "security-engineer", "prototyper",
+  "analytics-engineer", "prototyper",
   "accessibility-specialist", "live-ops-designer", "community-manager",
   // Engine specialists
+  "phaser-scaffolder", "phaser-specialist", "phaser-typescript-specialist",
+  // Web3D specialists
+  "threejs-specialist", "babylon-specialist",
   "godot-scaffolder", "godot-specialist", "godot-gdscript-specialist",
-  "godot-csharp-specialist", "godot-shader-specialist",
+  "godot-shader-specialist",
   "godot-gdextension-specialist", "unity-specialist", "unity-dots-specialist",
-  "unity-shader-specialist", "unity-addressables-specialist",
-  "unity-ui-specialist", "unreal-specialist", "ue-gas-specialist",
-  "ue-blueprint-specialist", "ue-replication-specialist", "ue-umg-specialist",
+  "unity-shader-specialist", "unreal-specialist", "ue-gas-specialist",
+  "ue-blueprint-specialist", "ue-replication-specialist",
   // Code review
   "code-reviewer",
   // Research
@@ -153,7 +158,12 @@ export type AgentTool =
   | "Bash"
   | "Task"
   | "AskUserQuestion"
+  | "PhaserCLI"
+  | "RunPhaserHeadless"
+  | "Web3DCLI"
   | "GodotCLI"
+  | "UnityCLI"
+  | "UnrealCLI"
   | "DeepResearch";
 
 export interface AgentDefinition {

@@ -2,7 +2,8 @@
 
 import { useState, useCallback } from "react";
 import { Modal, FormField } from "@/components/Modal";
-import type { ProjectIcon, CreateProjectRequest } from "@game-studio/types";
+import { EnginePicker, recommendEngine } from "@/components/engine-picker";
+import type { ProjectIcon, CreateProjectRequest, ProjectEngine } from "@game-studio/types";
 import { apiFetch } from "@/lib/api";
 import { DirectoryBrowser } from "./DirectoryBrowser";
 
@@ -39,6 +40,7 @@ export function NewProjectModal({ isOpen, onClose, onSubmit }: NewProjectModalPr
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [icon, setIcon] = useState<ProjectIcon>("folder");
+  const [engine, setEngine] = useState<ProjectEngine>(recommendEngine(""));
   const [workspacePath, setWorkspacePath] = useState<string | null>(null);
   const [pathValidation, setPathValidation] = useState<PathValidation | null>(null);
   const [validating, setValidating] = useState(false);
@@ -148,12 +150,13 @@ export function NewProjectModal({ isOpen, onClose, onSubmit }: NewProjectModalPr
         description: description.trim() || undefined,
         icon,
         workspacePath,
-        engine: undefined,
+        engine,
       });
       // Reset form
       setName("");
       setDescription("");
       setIcon("folder");
+      setEngine(recommendEngine(""));
       setWorkspacePath(null);
       setPathValidation(null);
       onClose();
@@ -162,7 +165,7 @@ export function NewProjectModal({ isOpen, onClose, onSubmit }: NewProjectModalPr
     } finally {
       setSubmitting(false);
     }
-  }, [name, description, icon, workspacePath, pathValidation, validatePath, onSubmit, onClose]);
+  }, [name, description, icon, engine, workspacePath, pathValidation, validatePath, onSubmit, onClose]);
 
   const handleClose = useCallback(() => {
     setSubmitError(null);
@@ -224,6 +227,16 @@ export function NewProjectModal({ isOpen, onClose, onSubmit }: NewProjectModalPr
               </button>
             ))}
           </div>
+        </FormField>
+
+        {/* Engine */}
+        <FormField label="Engine">
+          <EnginePicker
+            value={engine}
+            onChange={setEngine}
+            showRecommendation
+            concept={`${name} ${description}`}
+          />
         </FormField>
 
         {/* Workspace Directory */}

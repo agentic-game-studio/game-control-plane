@@ -1,4 +1,4 @@
-export type GameEngine = "Unity" | "Unreal" | "Godot";
+import type { ProjectEngine } from "./dashboard.js";
 
 export type SubscriptionTier = "novice" | "artisan" | "master" | "legend";
 
@@ -75,7 +75,7 @@ export interface UsageLogEntry {
 }
 
 export interface SettingsConfig {
-  targetEngine: GameEngine;
+  targetEngine: ProjectEngine;
   assetModel: string;
   externalApiKey?: string;
   webhookUrl?: string;
@@ -87,7 +87,7 @@ export interface SettingsConfig {
 }
 
 export const DEFAULT_SETTINGS: SettingsConfig = {
-  targetEngine: "Unity",
+  targetEngine: "unity",
   assetModel: "Studio XYZ Optimized (Fast)",
   externalApiKey: "",
   webhookUrl: "",

@@ -16,3 +16,4 @@ export * from "./settings.js";
 export * from "./builds.js";
 export * from "./metrics.js";
 export * from "./pipeline.js";
+export * from "./engine-adapter.js";

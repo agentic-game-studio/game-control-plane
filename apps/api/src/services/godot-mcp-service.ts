@@ -12,7 +12,7 @@
  *     → Response read from MCP server stdout
  */
 
-import { spawn, ChildProcess, execFile } from "node:child_process";
+import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -24,12 +24,18 @@ import { dirname as pathDirname, join, resolve } from "node:path";
 // place. Drop them so `rg "Sync$" apps/api/src` returns only
 // the live sync sites (accessSync at startup, existsSync /
 // globSync on the binary-detect path).
-import { accessSync, globSync, existsSync } from "node:fs";
+import { accessSync, globSync, existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import type { LLMTool } from "../llm/zai-client.js";
 import { logger } from "../utils/logger.js";
 import { loadConfig } from "../config.js";
 import { resolveHomeDir } from "../utils/paths.js";
+import {
+  startMCPBridge,
+  stopMCPBridge,
+  getMCPBridge,
+  type MCPBridge,
+} from "./mcp-lifecycle-manager.js";
 
 // 28-H-godot-mcp-async-exec: hoist a promisified execFile to module
 // scope. The 27th pass converted the same pattern in qa-gate-service
@@ -44,41 +50,9 @@ const execFileAsync = promisify(execFile);
 // Re-export tool type for consumers
 export type { LLMTool } from "../llm/zai-client.js";
 
-interface MCPRequest {
-  jsonrpc: "2.0";
-  id: string;
-  method: string;
-  params?: Record<string, unknown>;
-}
-
-interface MCPResponse {
-  jsonrpc: "2.0";
-  id: string;
-  result?: unknown;
-  error?: {
-    code: number;
-    message: string;
-    data?: unknown;
-  };
-}
-
-interface MCPTool {
-  name: string;
-  description?: string;
-  inputSchema?: {
-    type: "object";
-    properties?: Record<string, { description?: string; type?: string }>;
-    required?: string[];
-  };
-}
-
-interface PendingRequest {
-  resolve: (value: unknown) => void;
-  reject: (reason: Error) => void;
-  timeout: ReturnType<typeof setTimeout>;
-}
-
 export interface GodotMCPServiceOptions {
+  /** Project identifier used to key the underlying MCP bridge. */
+  projectId?: string;
   /** Path to the godot-mcp-pro server entry point (auto-detected if not provided) */
   serverPath?: string;
   /** Path to the Godot project directory */
@@ -113,6 +87,21 @@ const GODOT_MCP_PRO_VERSION = "v1.11.0";
 // in production showed a useless ENOENT error.
 const THIS_FILE_DIR = pathDirname(fileURLToPath(import.meta.url));
 const REPO_ROOT_FROM_THIS_FILE = resolve(THIS_FILE_DIR, "..", "..", "..");
+
+// Module-level cache for the Godot MCP Pro instructions file. It is a static
+// file shipped with the godot-mcp-pro package and never changes during a
+// server's lifetime. Read it once at module load and reuse.
+let cachedGodotInstructions: string | null | undefined;
+export function getGodotInstructions(): string | null {
+  if (cachedGodotInstructions !== undefined) return cachedGodotInstructions;
+  const instructionsPath = join(REPO_ROOT_FROM_THIS_FILE, "godot-mcp-pro-v1.11.0", "instructions", "CLAUDE.md");
+  try {
+    cachedGodotInstructions = readFileSync(instructionsPath, "utf-8");
+  } catch {
+    cachedGodotInstructions = null;
+  }
+  return cachedGodotInstructions;
+}
 
 /** Auto-detect MCP server path from env var or relative paths */
 function resolveServerPath(): string {
@@ -303,51 +292,34 @@ export function clearCachedToolsForProject(projectId: string): void {
 
 /** Godot MCP Service — manages the MCP server lifecycle */
 export class GodotMCPService {
-  private process: ChildProcess | null = null;
-  private pendingRequests = new Map<string, PendingRequest>();
-  private isRunning = false;
+  private projectId: string;
+  private projectPath: string | null = null;
+  private serverPath: string;
   private mode: "full" | "lite" | "minimal";
   private timeout: number;
-  private serverPath: string;
-  private initialized = false;
-  private stdoutBuffer = "";
-  private readonly MAX_STDOUT_BUFFER = 1024 * 1024; // 1MB cap to prevent OOM
-  /** 11-M7: set true by `stop()` so the child-process "exit" listener
-   * can distinguish a graceful shutdown from a crash and avoid emitting
-   * a misleading warning. */
-  private intentionalStop = false;
   /** Absolute path of the Godot project (detected from MCP responses) */
   private godotProjectDir: string | null = null;
   /** Workspace-relative path for rewriting Godot paths */
   private workspaceRelativePath: string | null = null;
 
   constructor(options?: GodotMCPServiceOptions) {
+    this.projectId = options?.projectId ?? randomUUID();
+    this.projectPath = options?.projectPath ?? null;
+    this.workspaceRelativePath = options?.projectPath ?? null;
     this.serverPath = options?.serverPath ?? resolveServerPath();
     this.mode = options?.mode ?? "lite";
     this.timeout = options?.timeout ?? DEFAULT_TIMEOUT_MS;
-    // Store workspace-relative path (e.g., "godot-test-1")
-    this.workspaceRelativePath = options?.projectPath ?? null;
+  }
+
+  private get bridge(): MCPBridge | undefined {
+    return getMCPBridge(this.projectId);
   }
 
   /** Start the MCP server (stdio mode) */
   async start(): Promise<void> {
-    if (this.isRunning) return;
-
-    // 15-H-start-reentry: if a previous start() partially failed (spawn
-    // succeeded but handshake errored, or setupGodotMCPServer threw
-    // after we attached listeners), this.process may be set while
-    // isRunning is false. Without this guard, re-calling start() would
-    // spawn a SECOND child, leak the first one (its listeners are
-    // overwritten when we re-assign this.process), and never call
-    // cleanup on the orphan. The orphan runs forever, holds a stdin
-    // pipe, and would surface as a zombie process on every project.
-    if (this.process) {
-      logger.warn({ event: "godot_mcp_start_reentry_cleanup" }, "start() called with orphaned process — cleaning up before re-spawn");
-      this.cleanup();
-    }
+    if (this.running()) return;
 
     // Auto-setup: install dependencies and build if needed
-    // 28-H-godot-mcp-async-exec: setupGodotMCPServer is now async.
     const setupResult = await setupGodotMCPServer();
     if (!setupResult.success) {
       throw new Error(`Failed to setup Godot MCP server: ${setupResult.error}`);
@@ -361,241 +333,109 @@ export class GodotMCPService {
     // 12-C13: do NOT inherit the full parent env. The MCP server is a
     // Godot-editor bridge — it only needs to resolve `node` and the
     // Godot binary on PATH. Inheriting the full env leaks the parent
-    // process's secrets (ZAI_API_KEY, API_SECRET, DATABASE_URL, etc.)
-    // into a child process that, if compromised via the Godot plugin
-    // surface, would expose every backend credential. Pass only the
-    // minimal set the stdio transport actually needs.
+    // process's secrets into a child process.
     const childEnv: NodeJS.ProcessEnv = {};
     if (process.env.PATH) childEnv.PATH = process.env.PATH;
     if (process.env.HOME) childEnv.HOME = process.env.HOME;
     if (process.platform === "win32" && process.env.SYSTEMROOT) {
       childEnv.SYSTEMROOT = process.env.SYSTEMROOT;
     }
-    this.process = spawn("node", [this.serverPath, ...modeArgs], {
-      stdio: ["pipe", "pipe", "pipe"],
+
+    await startMCPBridge(this.projectId, this.projectPath ?? "", {
+      command: "node",
+      args: [this.serverPath, ...modeArgs],
       env: childEnv,
     });
-
-    // Handle stdout — read JSON-RPC responses
-    this.process.stdout?.on("data", (chunk: Buffer) => {
-      this.stdoutBuffer += chunk.toString();
-      // Cap buffer to prevent OOM from runaway MCP output. Slice at the last
-      // newline before the cap so we never throw away the start of an
-      // in-flight JSON-RPC message. The previous implementation sliced at a
-      // raw byte offset, which could straddle a message boundary and silently
-      // drop a response.
-      if (this.stdoutBuffer.length > this.MAX_STDOUT_BUFFER) {
-        const excess = this.stdoutBuffer.length - this.MAX_STDOUT_BUFFER;
-        const lastNewline = this.stdoutBuffer.indexOf("\n", excess);
-        if (lastNewline === -1) {
-          // No newline found in the excess — fall back to dropping the
-          // entire pre-excess region as malformed input (better than OOM).
-          this.stdoutBuffer = this.stdoutBuffer.slice(excess);
-          logger.warn({ excess, event: "godot_mcp_buffer_overflow_no_newline" }, "MCP stdout buffer overflow with no newline — dropped pre-excess data");
-        } else {
-          this.stdoutBuffer = this.stdoutBuffer.slice(lastNewline + 1);
-          logger.warn({ droppedBytes: lastNewline, event: "godot_mcp_buffer_overflow" }, "MCP stdout buffer overflow — dropped data up to last newline");
-        }
-      }
-      this.processStdout();
-    });
-
-    // Handle stderr — log MCP server output
-    this.process.stderr?.on("data", (chunk: Buffer) => {
-      const text = chunk.toString();
-      if (text.includes("[MCP]")) {
-        logger.info({ line: text, event: "godot_mcp_stderr" }, "MCP stderr");
-      }
-    });
-
-    // Handle process exit.
-    // 11-M7: distinguish an intentional `stop()` from an unexpected
-    // exit. `this.intentionalStop` is set to true at the top of
-    // `stop()`, so when SIGTERM fires this listener we log at info
-    // instead of warn. Without this, every graceful service shutdown
-    // emitted a misleading "MCP server exited" warning into the logs.
-    this.process.on("exit", (code, signal) => {
-      if (this.intentionalStop) {
-        logger.info({ code, signal, event: "godot_mcp_exit_clean" }, "MCP server stopped cleanly");
-      } else {
-        logger.warn({ code, signal, event: "godot_mcp_exit" }, "MCP server exited unexpectedly");
-      }
-      this.cleanup();
-    });
-
-    this.process.on("error", (err) => {
-      logger.error({ error: err.message, event: "godot_mcp_error" }, "MCP process error");
-      // 15-H-error-no-cleanup: Node's spawn fires `error` (and NOT
-      // `exit`) on ENOENT/EACCES for the binary, or on EPIPE if the
-      // process dies before the handshake. Without this call, the
-      // pendingRequests map is never cleared, this.process is never
-      // nulled, and a subsequent executeTool() races against a dead
-      // stdin. cleanup() nulls the process and aborts the in-flight
-      // requests with a clear error.
-      this.cleanup();
-    });
-
-    // Wait for the MCP `initialize` JSON-RPC handshake to actually complete
-    // before flipping isRunning. The previous 1-second setTimeout was a
-    // best-effort guess — the server may take longer to import modules, and
-    // `executeTool` calls in the meantime could race with init and receive
-    // "method not found" responses. We send the standard MCP initialize
-    // request and await the result, with a generous timeout.
-    try {
-      await this.sendInitializeHandshake();
-      this.initialized = true;
-    } catch (initErr) {
-      logger.warn(
-        { error: initErr instanceof Error ? initErr.message : String(initErr), event: "godot_mcp_init_failed" },
-        "MCP initialize handshake did not complete — service will start in degraded mode",
-      );
-    }
-    this.isRunning = true;
 
     logger.info({ mode: this.mode, event: "godot_mcp_start" }, "Service started");
   }
 
-  /** Send the standard MCP `initialize` JSON-RPC request and await the
-   * server's `result` (which contains its protocol version and capabilities).
-   * This replaces the previous "sleep 1s and hope" pattern. */
-  private sendInitializeHandshake(): Promise<unknown> {
-    return new Promise((resolve, reject) => {
-      // 23-M-init-handshake-id: use randomUUID() (already imported at
-      // line 16) for the JSON-RPC request id instead of
-      // `init-${Date.now()}`. Low real-world risk — there's only one
-      // initialize per process lifetime, the response is matched by
-      // the `pendingRequests` Map — but the pattern was wrong and
-      // easy to copy into other call sites. Line 488 already uses
-      // `randomUUID()` for the other MCP requests; this was the
-      // leftover.
-      const id = randomUUID();
-      const timer = setTimeout(
-        () => reject(new Error("MCP initialize handshake timed out after 5s")),
-        5000,
-      );
-      this.pendingRequests.set(id, {
-        resolve: (val) => { clearTimeout(timer); resolve(val); },
-        reject: (err) => { clearTimeout(timer); reject(err); },
-        // Store the real timer so the centralized timeout-clear path
-        // (when a response arrives) clears the right handle.
-        timeout: timer,
-      });
-      const initRequest = {
-        jsonrpc: "2.0" as const,
-        id,
-        method: "initialize",
-        params: {
-          protocolVersion: "2024-11-05",
-          capabilities: {},
-          clientInfo: { name: "game-control-plane", version: "0.1.0" },
-        },
-      };
-      try {
-        this.process?.stdin?.write(JSON.stringify(initRequest) + "\n");
-      } catch (writeErr) {
-        clearTimeout(timer);
-        this.pendingRequests.delete(id);
-        reject(writeErr);
-      }
-    });
-  }
+  /** Execute a Godot MCP tool and return the result as a string */
+  async executeTool(name: string, params: Record<string, unknown>): Promise<string> {
+    if (!this.running()) {
+      return `Error: GodotMCPService is not running. Call start() first.`;
+    }
+    if (!this.bridge?.bridgeInitialized()) {
+      return `Error: GodotMCPService is starting up — initialize handshake has not completed. Retry shortly.`;
+    }
 
-  private processStdout() {
-    // MCP protocol: each line is a JSON-RPC message
-    const lines = this.stdoutBuffer.split("\n");
-    this.stdoutBuffer = lines.pop() ?? "";
-
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      if (!line.startsWith("{")) {
-        // Log non-JSON output (debug info, etc.)
-        if (line.includes("[MCP]") || line.includes("error") || line.includes("Error")) {
-          logger.info({ line, event: "godot_mcp_stdout" }, `MCP stdout: ${line}`);
-        }
-        continue;
-      }
-      try {
-        const msg = JSON.parse(line) as MCPResponse;
-        if (msg.id && this.pendingRequests.has(msg.id)) {
-          const pending = this.pendingRequests.get(msg.id)!;
-          clearTimeout(pending.timeout);
-          this.pendingRequests.delete(msg.id);
-          if (msg.error) {
-            logger.error({ error: msg.error, id: msg.id, event: "godot_mcp_response_error" }, `MCP error response: ${JSON.stringify(msg.error)}`);
-            pending.reject(new Error(`${msg.error.code}: ${msg.error.message}`));
-          } else {
-            logger.info({ id: msg.id, event: "godot_mcp_response" }, `MCP response received for id: ${msg.id}`);
-            pending.resolve(msg.result);
-          }
-        }
-      } catch (err) {
-        // Not JSON — ignore
-      }
+    try {
+      const raw = await this.bridge.executeTool(name, params);
+      return this.rewritePaths(raw);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error({ tool: name, error: message, event: "godot_mcp_tool_error" }, `MCP tool error: ${message}`);
+      return `Error: ${message}`;
     }
   }
 
-  /** Send a JSON-RPC request to the MCP server via stdin */
-  private async sendRequest(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
-    if (!this.process?.stdin || !this.process?.stdout) {
-      throw new Error("MCP server process not running (stdin/stdout not available)");
+  /** Check if the service is running */
+  running(): boolean {
+    return this.bridge?.running() ?? false;
+  }
+
+  /** Get MCP server status */
+  getStatus(): { running: boolean; connected: boolean; mode: string } {
+    return {
+      running: this.running(),
+      connected: this.bridge?.bridgeInitialized() ?? false,
+      mode: this.mode,
+    };
+  }
+
+  /**
+   * Health check - verify the MCP server and Godot editor connection.
+   * Returns details about the connection status.
+   */
+  async healthCheck(): Promise<{
+    serverRunning: boolean;
+    godotConnected: boolean;
+    projectInfo?: Record<string, unknown>;
+    error?: string;
+  }> {
+    const result: {
+      serverRunning: boolean;
+      godotConnected: boolean;
+      projectInfo?: Record<string, unknown>;
+      error?: string;
+    } = {
+      serverRunning: this.running(),
+      godotConnected: false,
+    };
+
+    if (!result.serverRunning) {
+      result.error = "MCP server is not running";
+      return result;
     }
 
-    const id = randomUUID();
-    const request: MCPRequest = { jsonrpc: "2.0", id, method, params };
-
-    // Log the request for debugging
-    logger.info({ method, id, event: "godot_mcp_request" }, `Sending MCP request: ${method}`);
-
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.pendingRequests.delete(id);
-        // 18-H-mcp-no-cancel: best-effort JSON-RPC cancellation
-        // notification to the MCP server. The server doesn't know
-        // we gave up; its `tools/call` continues to run on the
-        // Godot side (a long mcp__godot_run_project test), holding
-        // the Godot editor's WS connection. When the response
-        // eventually arrives, processStdout sees no matching id and
-        // silently drops it — the work was wasted, and the orphan
-        // call blocks subsequent calls. JSON-RPC 2.0 § 4.5 allows
-        // notifications/cancelled as a hint; the server is free to
-        // ignore it, but Godot's MCP server honors the cancellation
-        // request. Failures here are non-fatal — the timeout
-        // rejection is what the caller sees.
-        try {
-          const cancelNotification = {
-            jsonrpc: "2.0",
-            method: "notifications/cancelled",
-            params: { id, reason: "client timeout" },
-          };
-          this.process!.stdin!.write(JSON.stringify(cancelNotification) + "\n");
-        } catch (cancelErr) {
-          logger.warn(
-            { method, id, err: cancelErr instanceof Error ? cancelErr.message : String(cancelErr), event: "godot_mcp_cancel_write_failed" },
-            "Failed to send MCP cancel notification — server will receive late response that will be dropped",
-          );
-        }
-        logger.error({ method, id, event: "godot_mcp_timeout" }, `MCP request timed out: ${method}`);
-        reject(new Error(`Request '${method}' timed out after ${this.timeout}ms`));
-      }, this.timeout);
-
-      this.pendingRequests.set(id, { resolve, reject, timeout });
-
-      // Write JSON-RPC request to stdin. If the MCP server's stdin has
-      // been closed (server died, but the `exit` event hasn't fired yet),
-      // Node raises EPIPE synchronously here. Without the try/catch that
-      // bubbles up as an unhandled promise rejection, leaving the
-      // pending request in the Map until the timeout eventually fires.
-      // Rejecting eagerly keeps the error visible at the request site
-      // and frees the id for the next caller.
-      const data = JSON.stringify(request) + "\n";
-      try {
-        this.process!.stdin!.write(data);
-      } catch (err) {
-        clearTimeout(timeout);
-        this.pendingRequests.delete(id);
-        reject(err instanceof Error ? err : new Error(String(err)));
+    try {
+      // Try to get project info to verify Godot connection
+      const projectInfo = await this.executeTool("get_project_info", {});
+      if (projectInfo.startsWith("Error:")) {
+        result.error = projectInfo;
+        return result;
       }
-    });
+      result.godotConnected = true;
+      try {
+        result.projectInfo = JSON.parse(projectInfo);
+      } catch {
+        // Not JSON, but connection worked
+      }
+      return result;
+    } catch (err) {
+      result.error = err instanceof Error ? err.message : String(err);
+      return result;
+    }
+  }
+
+  /** Stop the MCP server and clean up resources */
+  async stop(): Promise<void> {
+    if (!this.running()) return;
+
+    logger.info({ event: "godot_mcp_stop" }, "Stopping service");
+    await stopMCPBridge(this.projectId);
+    this.godotProjectDir = null;
+    logger.info({ event: "godot_mcp_stopped" }, "Service stopped");
   }
 
   /**
@@ -621,10 +461,10 @@ export class GodotMCPService {
       // The trailing segment is the project-name; everything before the
       // project-name is the prefix we want to substitute.
       const projectMatch = result.match(
-        new RegExp(`(?:${escapedHome}[/\\\\][^/\\\\]+(?:[/\\\\][^/\\\\]+)*[/\\\\]${escapedProjectName})[/\\\\]`),
+        new RegExp(`(?:${escapedHome}[/\\][^/\\]+(?:[/\\][^/\\]+)*[/\\]${escapedProjectName})[/\\]`),
       );
       if (projectMatch) {
-        this.godotProjectDir = projectMatch[0].replace(/[/\\\\]$/, "");
+        this.godotProjectDir = projectMatch[0].replace(/[/\\]$/, "");
         logger.info(
           { godotDir: this.godotProjectDir, workspaceRelative: this.workspaceRelativePath, event: "godot_project_dir_detected" },
           "Detected Godot project directory",
@@ -640,199 +480,6 @@ export class GodotMCPService {
     // e.g., /home/ci-runner/.../godot-test-1 → ./workspace/godot-test-1
     const relativeWorkspace = `./workspace/${this.workspaceRelativePath}`;
     return result.split(this.godotProjectDir).join(relativeWorkspace);
-  }
-
-  /** Execute a Godot MCP tool and return the result as a string */
-  async executeTool(name: string, params: Record<string, unknown>): Promise<string> {
-    if (!this.isRunning) {
-      return `Error: GodotMCPService is not running. Call start() first.`;
-    }
-    // 10-H9: refuse tool calls until the JSON-RPC handshake has completed.
-    // The previous code accepted requests as soon as the child process was
-    // spawned — but the server may take 1-2s to import modules before it
-    // can answer `tools/call`. Calls arriving in that window would return
-    // "method not found" errors that look like real Godot failures.
-    if (!this.initialized) {
-      return `Error: GodotMCPService is starting up — initialize handshake has not completed. Retry shortly.`;
-    }
-
-    try {
-      // MCP tool call: tools/call with { name, arguments }
-      const result = await this.sendRequest("tools/call", {
-        name,
-        arguments: params,
-      });
-
-      // Log raw result for debugging
-      logger.info({ tool: name, event: "godot_mcp_result" }, `Got result for ${name}: ${String(result).slice(0, 200)}`);
-
-      // Format result for LLM consumption
-      if (result === undefined || result === null) {
-        return JSON.stringify({ success: true });
-      }
-
-      // Handle MCP response format { content: [...] }
-      if (typeof result === "object" && result !== null && "content" in result) {
-        const mcpResult = result as { content: Array<{ type: string; text?: string; data?: string; mimeType?: string }> };
-        const parts: string[] = [];
-
-        for (const item of mcpResult.content) {
-          if (item.type === "text") {
-            // Rewrite absolute paths to workspace-relative paths
-            parts.push(this.rewritePaths(item.text ?? ""));
-          } else if (item.type === "image" && item.data) {
-            const sizeKB = Math.round(item.data.length * 0.75 / 1024);
-            parts.push(`[Image: ${sizeKB}KB, mime=${item.mimeType ?? "image/png"}]`);
-          }
-        }
-
-        return parts.join("\n") || JSON.stringify(result);
-      }
-
-      const formattedResult = typeof result === "string" ? result : JSON.stringify(result, null, 2);
-      return this.rewritePaths(formattedResult);
-    } catch (err) {
-      const error = err as Error;
-      logger.error({ tool: name, error: error.message, event: "godot_mcp_tool_error" }, `MCP tool error: ${error.message}`);
-      return `Error: ${error.message}`;
-    }
-  }
-
-  /** Check if the service is running */
-  running(): boolean {
-    return this.isRunning;
-  }
-
-  /** Get MCP server status */
-  getStatus(): { running: boolean; connected: boolean; mode: string } {
-    return {
-      running: this.isRunning,
-      connected: this.isRunning,
-      mode: this.mode,
-    };
-  }
-
-  /**
-   * Health check - verify the MCP server and Godot editor connection.
-   * Returns details about the connection status.
-   */
-  async healthCheck(): Promise<{
-    serverRunning: boolean;
-    godotConnected: boolean;
-    projectInfo?: Record<string, unknown>;
-    error?: string;
-  }> {
-    const result: {
-      serverRunning: boolean;
-      godotConnected: boolean;
-      projectInfo?: Record<string, unknown>;
-      error?: string;
-    } = {
-      serverRunning: this.isRunning,
-      godotConnected: false,
-    };
-
-    if (!this.isRunning) {
-      result.error = "MCP server is not running";
-      return result;
-    }
-
-    try {
-      // Try to get project info to verify Godot connection
-      const projectInfo = await this.executeTool("get_project_info", {});
-      if (projectInfo.startsWith("Error:")) {
-        result.error = projectInfo;
-        return result;
-      }
-      result.godotConnected = true;
-      try {
-        result.projectInfo = JSON.parse(projectInfo);
-      } catch {
-        // Not JSON, but connection worked
-      }
-      return result;
-    } catch (err) {
-      result.error = (err as Error).message;
-      return result;
-    }
-  }
-
-  /** Stop the MCP server and clean up resources */
-  async stop(): Promise<void> {
-    if (!this.isRunning) return;
-
-    logger.info({ event: "godot_mcp_stop" }, "Stopping service");
-    // 11-M7: tell the child-process "exit" listener this is graceful.
-    this.intentionalStop = true;
-
-    // Clear pending requests
-    for (const [, pending] of this.pendingRequests) {
-      clearTimeout(pending.timeout);
-      pending.reject(new Error("Service stopped"));
-    }
-    this.pendingRequests.clear();
-
-    // Kill the MCP server process — try graceful shutdown, then force kill
-    if (this.process) {
-      const proc = this.process;
-      this.process.stdin?.write(JSON.stringify({ jsonrpc: "2.0", method: "shutdown" }) + "\n");
-      proc.kill("SIGTERM");
-      this.process = null;
-
-      // Force kill if SIGTERM didn't work within 5s. Track the handle on
-      // the proc so the process-exit path can clearTimeout it — otherwise
-      // a process that dies within 5s of SIGTERM leaves a phantom timer
-      // whose callback fires and tries to kill a PID that's been reused.
-      const forceKillTimer = setTimeout(() => {
-        try {
-          // 12-C9: guard against PID reuse. Between SIGTERM and the 5s
-          // timer, the proc may have exited and the OS could have
-          // assigned the same PID to another process. Using
-          // `proc.kill(SIGKILL)` (instead of `process.kill(proc.pid, ...)`)
-          // is safer because Node tracks the proc handle's state — if
-          // the proc already exited, this is a no-op. We also check
-          // exitCode/killed defensively in case the exit listener
-          // hasn't run yet.
-          if (proc.exitCode !== null || proc.killed) return;
-          if (proc.kill("SIGKILL")) {
-            logger.warn({ pid: proc.pid, event: "godot_mcp_force_kill" }, "Force-killed hung MCP server process");
-          }
-        } catch { /* already dead */ }
-      }, 5000);
-      forceKillTimer.unref();
-      (proc as { _forceKillTimer?: ReturnType<typeof setTimeout> })._forceKillTimer = forceKillTimer;
-      proc.once("exit", () => {
-        const t = (proc as { _forceKillTimer?: ReturnType<typeof setTimeout> })._forceKillTimer;
-        if (t) clearTimeout(t);
-      });
-    }
-
-    this.isRunning = false;
-    logger.info({ event: "godot_mcp_stopped" }, "Service stopped");
-  }
-
-  private cleanup() {
-    this.isRunning = false;
-    this.process = null;
-    // Reject any pending requests that will never get a response
-    for (const [, pending] of this.pendingRequests) {
-      clearTimeout(pending.timeout);
-      pending.reject(new Error("MCP server process exited"));
-    }
-    this.pendingRequests.clear();
-    // 12-H1: clear the stdout buffer. Without this, a tail of
-    // partial-JSON data from a previous run sits in the buffer until
-    // the next start() appends to it. processStdout() then sees a
-    // mix of stale tail + new chunks and tries to parse the
-    // concatenation — JSON.parse fails on most lines, but a lucky
-    // concatenation could parse as a malformed response and either
-    // get dropped (best case) or be misinterpreted as a legitimate
-    // response with a new id (worst case, but pendingRequests is
-    // empty post-cleanup so the new id wouldn't match anything).
-    // Either way, parsing stale input burns CPU on every event and
-    // pollutes the logs with `godot_mcp_stdout` noise. Reset to a
-    // known-empty state.
-    this.stdoutBuffer = "";
   }
 }
 
@@ -864,7 +511,7 @@ export async function getOrCreateGodotMCPService(
 
   const creationPromise = (async () => {
     try {
-      const service = new GodotMCPService(options);
+      const service = new GodotMCPService({ ...options, projectId });
       await service.start();
       activeServices.set(projectId, service);
       return service;

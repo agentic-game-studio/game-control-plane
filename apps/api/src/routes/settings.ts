@@ -4,10 +4,10 @@ import { readData, writeData, updateData, broadcastEvent } from "../services/dat
 import { logger } from "../utils/logger.js";
 import { newId } from "../utils/ids.js";
 import type { SettingsConfig, SubscriptionTier } from "@game-studio/types";
-import { DEFAULT_SETTINGS, TIER_DEFINITIONS, createDefaultSettings } from "@game-studio/types";
+import { DEFAULT_SETTINGS, TIER_DEFINITIONS, createDefaultSettings, isProjectEngine } from "@game-studio/types";
 import type { WSEvent } from "@game-studio/types";
 
-const VALID_ENGINES = ["Unity", "Unreal", "Godot"];
+
 
 /** Q6-6th: whitelist of top-level fields PATCH /api/settings will accept.
  * Anything else in the request body is silently dropped. Without this,
@@ -131,7 +131,7 @@ settingsRouter.patch("/", async (req: Request, res: Response) => {
     }
   }
 
-  if (updates.targetEngine && !VALID_ENGINES.includes(updates.targetEngine)) {
+  if (updates.targetEngine && !isProjectEngine(updates.targetEngine)) {
     res.status(400).json({ success: false, error: "Invalid target engine" });
     return;
   }
