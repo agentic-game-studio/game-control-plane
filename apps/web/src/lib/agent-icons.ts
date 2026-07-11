@@ -42,7 +42,6 @@ export const AGENT_ICONS: Record<string, string> = {
   "network-programmer": "router",
   "tools-programmer": "build",
   "ui-programmer": "web",
-  "security-engineer": "shield",
 
   // Tier 3 — Specialists (Production)
   "devops-engineer": "cloud_upload",
@@ -57,7 +56,6 @@ export const AGENT_ICONS: Record<string, string> = {
   // Tier 3 — Engine: Godot
   "godot-specialist": "videogame_asset",
   "godot-gdscript-specialist": "data_object",
-  "godot-csharp-specialist": "terminal",
   "godot-shader-specialist": "gradient",
   "godot-gdextension-specialist": "extension",
 
@@ -65,22 +63,19 @@ export const AGENT_ICONS: Record<string, string> = {
   "unity-specialist": "gamepad",
   "unity-dots-specialist": "view_in_ar",
   "unity-shader-specialist": "blur_on",
-  "unity-addressables-specialist": "inventory",
-  "unity-ui-specialist": "web_asset",
 
   // Tier 3 — Engine: Unreal
   "unreal-specialist": "joystick",
   "ue-gas-specialist": "bolt",
   "ue-blueprint-specialist": "account_tree",
   "ue-replication-specialist": "content_copy",
-  "ue-umg-specialist": "desktop_windows",
 };
 
 export function getAgentIcon(role: string): string {
   return AGENT_ICONS[role] ?? "smart_toy";
 }
 
-/** Agent hierarchy tree — Game Director first, all 49 agents */
+/** Agent hierarchy tree — Game Director first, all 44 agents */
 export interface AgentTreeNode {
   role: string;
   tier: number;
@@ -125,23 +120,18 @@ export const AGENT_TREE: AgentTreeNode[] = [
         { role: "ui-programmer", tier: 3, children: [] },
         { role: "godot-specialist", tier: 3, children: [
           { role: "godot-gdscript-specialist", tier: 3, children: [] },
-          { role: "godot-csharp-specialist", tier: 3, children: [] },
           { role: "godot-shader-specialist", tier: 3, children: [] },
           { role: "godot-gdextension-specialist", tier: 3, children: [] },
         ]},
         { role: "unity-specialist", tier: 3, children: [
           { role: "unity-dots-specialist", tier: 3, children: [] },
           { role: "unity-shader-specialist", tier: 3, children: [] },
-          { role: "unity-addressables-specialist", tier: 3, children: [] },
-          { role: "unity-ui-specialist", tier: 3, children: [] },
         ]},
         { role: "unreal-specialist", tier: 3, children: [
           { role: "ue-gas-specialist", tier: 3, children: [] },
           { role: "ue-blueprint-specialist", tier: 3, children: [] },
           { role: "ue-replication-specialist", tier: 3, children: [] },
-          { role: "ue-umg-specialist", tier: 3, children: [] },
         ]},
-        { role: "security-engineer", tier: 3, children: [] },
         { role: "analytics-engineer", tier: 3, children: [] },
       ]},
       { role: "qa-lead", tier: 2, children: [

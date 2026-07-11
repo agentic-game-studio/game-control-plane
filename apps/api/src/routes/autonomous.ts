@@ -25,9 +25,10 @@ import { broadcast } from "../services/websocket.js";
 import { logger } from "../utils/logger.js";
 import { resolveProjectWorkspace } from "../utils/workspace.js";
 import { resolveHomeDir } from "../utils/paths.js";
-import type { AgentRole, WSEvent } from "@game-studio/types";
+import type { AgentRole, ProjectEngine, WSEvent } from "@game-studio/types";
+import { EngineNotSupportedError } from "@game-studio/types";
 import type { TicketsBoard, Ticket, DashboardData } from "@game-studio/types";
-import { getOrCreateGodotMCPService, launchGodotEditor, type GodotMCPServiceOptions } from "../services/godot-mcp-service.js";
+import { getEngineAdapter } from "../services/engine-adapter-factory.js";
 import { safeIngestProducerSummaryFact } from "../services/producer-summary.js";
 import { ingestGDD } from "../services/gdd-ingest-service.js";
 import { runQAGateChain, saveTestEvidenceArtifact } from "../services/qa-gate-service.js";
@@ -36,7 +37,7 @@ import { advanceMilestoneIfReady } from "../services/milestone-service.js";
 import { upsertRunMetrics, listRunMetrics, getRunMetrics, recordTokenUsage } from "../services/run-metrics-service.js";
 import { externalizeProductionNote } from "../services/wiki-memory-service.js";
 import { fireWebhook } from "../services/webhook-service.js";
-import { executeGodotExport } from "../services/build-service.js";
+import { executeExport } from "../services/build-service.js";
 import { newId } from "../utils/ids.js";
 import { generateProjectChangelog } from "../services/changelog-service.js";
 
@@ -977,7 +978,7 @@ async function runIteration(state: LoopState, board: TicketsBoard, projectContex
           void fireWebhook("autonomous:completed", { projectId: state.projectId, sessionId: state.sessionId, completedCount: totalCompleted });
           try {
             await generateProjectChangelog(state.projectId, projectContext.workspacePath);
-            await executeGodotExport(state.projectId, projectContext.workspacePath, "web", undefined, true);
+            await executeExport(state.projectId, projectContext.workspacePath, "web", projectContext.engine as ProjectEngine | undefined, undefined, true);
           } catch { /* non-fatal ship step */ }
           return { ticket: null, done: true };
         } else {
@@ -1679,40 +1680,25 @@ autonomousRouter.post("/start", async (req: Request, res: Response) => {
 
     debugLog(`batch ${state.sessionId}] validated projectContext engine=${readyProjectContext.engine}, workspacePath=${readyProjectContext.workspacePath}`);
 
-    // Start Godot MCP service for godot projects (mirrors chat.ts logic)
-    if (readyProjectContext.engine === "godot") {
-      const mcpOptions: GodotMCPServiceOptions = {
-        projectPath: readyProjectContext.workspacePath,
-        mode: "lite",
-      };
-      logger.info({ projectId: state.projectId, engine: readyProjectContext.engine, event: "autonomous_mcp_starting" },
-        "Starting Godot MCP service for autonomous loop");
-      getOrCreateGodotMCPService(state.projectId, mcpOptions).then((service) => {
-        logger.info({ projectId: state.projectId, running: service.running(), event: "autonomous_mcp_started" },
-          "Godot MCP service ready");
+    // Start engine-specific tool bridge for registered adapters.
+    try {
+      const adapter = getEngineAdapter((readyProjectContext.engine ?? "godot") as ProjectEngine);
+      logger.info({ projectId: state.projectId, engine: readyProjectContext.engine, event: "autonomous_tool_bridge_starting" },
+        "Starting tool bridge for autonomous loop");
+      adapter.startToolBridge?.(state.projectId, readyProjectContext.workspacePath).then((result) => {
+        logger.info({ projectId: state.projectId, running: result?.running, event: "autonomous_tool_bridge_started" },
+          "Tool bridge ready");
       }).catch((err) => {
-        logger.error({ projectId: state.projectId, error: err.message, event: "autonomous_mcp_start_error" },
-          "Failed to start Godot MCP service — agents will fall back to file I/O");
+        logger.error({ projectId: state.projectId, error: err instanceof Error ? err.message : String(err), event: "autonomous_tool_bridge_start_error" },
+          "Failed to start tool bridge — agents will fall back to file I/O");
       });
-
-      // Auto-launch Godot editor if workspace path is known.
-      // 16-H-launch-godot-fire-forget: launchGodotEditor is now async
-      // because the plugin install was made async to avoid blocking
-      // the event loop. The autonomous loop must not block on Godot
-      // startup, so fire-and-forget and log the outcome when settled.
-      const projectDir = resolveProjectWorkspace(readyProjectContext.workspacePath);
-      launchGodotEditor(projectDir).then((launchResult) => {
-        if (launchResult.success) {
-          logger.info({ projectId: state.projectId, pid: launchResult.pid, event: "godot_editor_launched" },
-            `Godot editor launched (pid=${launchResult.pid})`);
-        } else {
-          logger.warn({ projectId: state.projectId, error: launchResult.error, event: "godot_editor_launch_failed" },
-            `Godot editor launch failed: ${launchResult.error}`);
-        }
-      }).catch((err) => {
-        logger.warn({ projectId: state.projectId, err: err instanceof Error ? err.message : String(err), event: "godot_editor_launch_failed" },
-          "Godot editor launch failed (rejected promise)");
-      });
+    } catch (err) {
+      if (err instanceof EngineNotSupportedError) {
+        // Engine has no registered adapter; agents will use file I/O.
+      } else {
+        logger.error({ projectId: state.projectId, error: err instanceof Error ? err.message : String(err), event: "autonomous_tool_bridge_start_error" },
+          "Failed to start tool bridge — agents will fall back to file I/O");
+      }
     }
 
     let currentState = (await loadLoopState(state.sessionId))!;

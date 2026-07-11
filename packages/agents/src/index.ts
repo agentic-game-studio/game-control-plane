@@ -3,9 +3,12 @@ import { AGENT_ROLES, isAgentRole } from "@game-studio/types";
 import { leadershipAgents } from "./leadership.js";
 import { departmentLeadAgents } from "./department-leads.js";
 import { specialistAgents } from "./specialists.js";
+import { phaserAgents } from "./engine-phaser.js";
 import { godotAgents } from "./engine-godot.js";
 import { unityAgents } from "./engine-unity.js";
 import { unrealAgents } from "./engine-unreal.js";
+import { threejsAgents } from "./engine-threejs.js";
+import { babylonAgents } from "./engine-babylon.js";
 import { codeReviewerAgents } from "./code-reviewer.js";
 import { delegationMap } from "./delegation-map.js";
 import { agentTiers } from "./tiers.js";
@@ -15,9 +18,12 @@ export const agents: Partial<Record<AgentRole, AgentDefinition>> = {
   ...leadershipAgents,
   ...departmentLeadAgents,
   ...specialistAgents,
+  ...phaserAgents,
   ...godotAgents,
   ...unityAgents,
   ...unrealAgents,
+  ...threejsAgents,
+  ...babylonAgents,
   ...codeReviewerAgents,
 };
 

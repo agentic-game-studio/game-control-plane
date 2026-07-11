@@ -9,6 +9,10 @@
  */
 
 import { loadConfig } from "../config.js";
+import { PHASER_TOOLS } from "./phaser-tools.js";
+import { WEB3D_TOOLS } from "./web3d-tools.js";
+import { UNITY_TOOLS } from "./unity-tools.js";
+import { UNREAL_TOOLS } from "./unreal-tools.js";
 import { getAgentSystemPrompt, loadAgentPrompts } from "../prompts/agent-prompt-loader.js";
 import { logger } from "../utils/logger.js";
 import { broadcast } from "../services/websocket.js";
@@ -1207,6 +1211,10 @@ Use "Now implementing..." to indicate you're continuing work rather than startin
 
 /** Game studio tool definitions for the LLM */
 export const GAME_STUDIO_TOOLS: LLMTool[] = [
+  ...PHASER_TOOLS,
+  ...UNITY_TOOLS,
+  ...UNREAL_TOOLS,
+  ...WEB3D_TOOLS,
   {
     name: "Read",
     description: "Read the contents of a file from the filesystem. Returns full file contents.",

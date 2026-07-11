@@ -2,14 +2,14 @@ import { Router } from "express";
 import type { Request, Response } from "express";
 import {
   listBuilds,
-  executeGodotExport,
+  executeExport,
   runPostExportSmokeTest,
   bumpProjectVersion,
 } from "../services/build-service.js";
 import { runShipThisExport, isShipThisAvailable } from "../services/shipthis-service.js";
 import { resolveProjectWorkspace } from "../utils/workspace.js";
 import { readData } from "../services/data-store.js";
-import type { BuildPlatform, DashboardData, CreateBuildRequest } from "@game-studio/types";
+import type { BuildPlatform, DashboardData, CreateBuildRequest, ProjectEngine } from "@game-studio/types";
 
 export const buildsRouter: Router = Router();
 
@@ -19,21 +19,16 @@ function getProjectId(req: Request): string | null {
   return q ?? b ?? null;
 }
 
-async function resolveWorkspace(projectId: string): Promise<string | null> {
-  // 28-C-builds-resolve-workspace: previous shape returned
-  // `project?.workspacePath ?? projectId` — a non-null string even
-  // when the project didn't exist. The five downstream routes
-  // (`if (!workspace) res.status(404)`) were dead checks that always
-  // resolved falsy. A bogus projectId would then fall through to
-  // `executeGodotExport(projectId, projectId, ...)` →
-  // `resolveProjectWorkspace(projectId)` → `mkdirSync` on a fake
-  // path, creating a 0-byte build record and a 500 instead of the
-  // expected 404. The single fix: return null when the project is
-  // not found, and let each route's existing guard do its job.
+async function resolveWorkspace(
+  projectId: string,
+): Promise<{ workspace: string | null; engine: ProjectEngine | null }> {
   const data = await readData<DashboardData>("dashboard.json");
   const project = data.projects.find((p) => p.id === projectId);
-  if (!project) return null;
-  return project.workspacePath ?? null;
+  if (!project) return { workspace: null, engine: null };
+  return {
+    workspace: project.workspacePath ?? null,
+    engine: project.engine ?? null,
+  };
 }
 
 // GET /api/builds
@@ -50,12 +45,12 @@ buildsRouter.post("/", async (req: Request, res: Response) => {
     res.status(400).json({ success: false, error: "projectId and platform are required" });
     return;
   }
-  const workspace = await resolveWorkspace(body.projectId);
+  const { workspace, engine } = await resolveWorkspace(body.projectId);
   if (!workspace) {
     res.status(404).json({ success: false, error: "Project not found" });
     return;
   }
-  const build = await executeGodotExport(body.projectId, workspace, body.platform, body.preset);
+  const build = await executeExport(body.projectId, workspace, body.platform, engine ?? undefined, body.preset);
   res.status(201).json({ success: true, data: build });
 });
 
@@ -66,7 +61,7 @@ buildsRouter.post("/:id/smoke", async (req: Request, res: Response) => {
     res.status(400).json({ success: false, error: "projectId is required" });
     return;
   }
-  const workspace = await resolveWorkspace(projectId);
+  const { workspace } = await resolveWorkspace(projectId);
   if (!workspace) {
     res.status(404).json({ success: false, error: "Project not found" });
     return;
@@ -91,12 +86,12 @@ buildsRouter.post("/export", async (req: Request, res: Response) => {
     res.status(400).json({ success: false, error: "projectId and platform are required" });
     return;
   }
-  const workspace = await resolveWorkspace(projectId);
+  const { workspace, engine } = await resolveWorkspace(projectId);
   if (!workspace) {
     res.status(404).json({ success: false, error: "Project not found" });
     return;
   }
-  const build = await executeGodotExport(projectId, workspace, platform, preset, !!bumpVersion);
+  const build = await executeExport(projectId, workspace, platform, engine ?? undefined, preset, !!bumpVersion);
   res.json({ success: true, data: build });
 });
 
@@ -111,7 +106,7 @@ buildsRouter.post("/ship", async (req: Request, res: Response) => {
     res.status(503).json({ success: false, error: "ShipThis CLI not available" });
     return;
   }
-  const workspace = await resolveWorkspace(projectId);
+  const { workspace } = await resolveWorkspace(projectId);
   if (!workspace) {
     res.status(404).json({ success: false, error: "Project not found" });
     return;
@@ -132,7 +127,7 @@ buildsRouter.post("/bump-version", async (req: Request, res: Response) => {
     res.status(400).json({ success: false, error: "projectId is required" });
     return;
   }
-  const workspace = await resolveWorkspace(projectId);
+  const { workspace } = await resolveWorkspace(projectId);
   if (!workspace) {
     res.status(404).json({ success: false, error: "Project not found" });
     return;

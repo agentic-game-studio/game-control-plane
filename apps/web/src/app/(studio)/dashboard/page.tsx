@@ -8,6 +8,8 @@ import { StatsCards } from "./components/StatsCards";
 import { ProjectGrid } from "./components/ProjectGrid";
 import { ActivityLog } from "./components/ActivityLog";
 import { NewProjectModal } from "./components/NewProjectModal";
+import { EngineHealthCard } from "@/components/engine-health-card";
+import type { EngineHealth } from "@/components/engine-health-card";
 import { apiFetch } from "@/lib/api";
 import { DASHBOARD_SERVER_STATUS_POLL_MS, MCP_HEALTH_POLL_MS } from "@/lib/timing";
 const logger = createLogger("page");
@@ -33,6 +35,7 @@ export default function DashboardPage() {
   const { currentProject, selectProject } = useProject();
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [mcpStatuses, setMcpStatuses] = useState<Record<string, MCPStatus>>({});
+  const [engineHealth, setEngineHealth] = useState<EngineHealth[]>([]);
   const [serverStatus, setServerStatus] = useState<ServerStatus | null>(null);
   const [settingUp, setSettingUp] = useState(false);
   const [creatingDemo, setCreatingDemo] = useState(false);
@@ -134,17 +137,32 @@ export default function DashboardPage() {
     setMcpStatuses(statuses);
   }, [data.projects]);
 
-  // Track mounted state so an in-flight checkMCPHealth doesn't
-  // setState on an unmounted dashboard (e.g. user navigates away
-  // mid-poll). StrictMode dev double-mount + a 10s polling interval
-  // makes this easy to hit.
+  // Track mounted state so in-flight checks don't setState on an unmounted
+  // dashboard (e.g. user navigates away mid-poll). StrictMode dev double-mount
+  // + a 10s polling interval makes this easy to hit.
   const mountedRef = useRef(true);
+
+  // Check engine health
+  const checkEngineHealth = useCallback(async () => {
+    try {
+      const result = await apiFetch<{ engines: EngineHealth[] }>("/api/engines");
+      if (!mountedRef.current) return;
+      setEngineHealth(result.engines);
+    } catch {
+      if (!mountedRef.current) return;
+      setEngineHealth([]);
+    }
+  }, []);
+
   useEffect(() => {
     mountedRef.current = true;
+    checkEngineHealth();
+    const interval = setInterval(checkEngineHealth, MCP_HEALTH_POLL_MS);
     return () => {
       mountedRef.current = false;
+      clearInterval(interval);
     };
-  }, []);
+  }, [checkEngineHealth]);
 
   // Poll every 10 seconds
   useEffect(() => {
@@ -240,8 +258,9 @@ export default function DashboardPage() {
           </div>
 
           {/* Activity Log */}
-          <div className="flex-1 min-h-0">
+          <div className="flex-1 min-h-0 flex flex-col gap-4">
             <ActivityLog entries={data.activityLog} />
+            <EngineHealthCard health={engineHealth} />
           </div>
         </div>
       </DataLoader>

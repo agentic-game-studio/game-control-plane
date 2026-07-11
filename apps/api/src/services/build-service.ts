@@ -1,9 +1,9 @@
 /**
- * Build registry — track Godot exports and post-export smoke tests.
+ * Build registry — track engine exports and post-export smoke tests.
  */
 
 import fsPromises from "fs/promises";
-import { join } from "path";
+import { join, relative } from "path";
 import { execFile } from "child_process";
 import { promisify } from "util";
 const execFileAsync = promisify(execFile);
@@ -13,9 +13,10 @@ import { resolveProjectWorkspace } from "../utils/workspace.js";
 import { resolveHomeDir } from "../utils/paths.js";
 import { loadConfig, resolvePipelinePython, SUBPROCESS_MAX_BUFFER } from "../config.js";
 import { readProjectVersion, bumpProjectVersion } from "./qa-gate-service.js";
-import type { BuildPlatform, BuildsData, CreateBuildRequest, GameBuild, WSEvent } from "@game-studio/types";
+import type { BuildPlatform, BuildsData, CreateBuildRequest, ExportResult, GameBuild, ProjectEngine, WSEvent } from "@game-studio/types";
 import { logger } from "../utils/logger.js";
 import { newId } from "../utils/ids.js";
+import { getEngineAdapter } from "./engine-adapter-factory.js";
 
 const DEFAULT_BUILDS: BuildsData = { builds: [] };
 
@@ -48,6 +49,7 @@ export async function createBuild(req: CreateBuildRequest): Promise<GameBuild> {
     version: req.version ?? "0.1.0",
     platform: req.platform,
     preset: req.preset,
+    engine: req.engine,
     status: "pending",
     createdAt: now,
     updatedAt: now,
@@ -103,35 +105,13 @@ export async function updateBuild(build: GameBuild): Promise<void> {
   broadcastEvent({ type: "build:updated", build } as WSEvent);
 }
 
-export async function executeGodotExport(
-  projectId: string,
-  workspacePath: string,
+/** Engine-specific Godot export runner. Delegated to by GodotEngineAdapter. */
+export async function runGodotExport(
+  projectPath: string,
   platform: BuildPlatform,
-  preset?: string,
-  bumpVersion = false,
-): Promise<GameBuild> {
-  const projectPath = resolveProjectWorkspace(workspacePath);
-  const exportPreset = preset ?? defaultPresetForPlatform(platform);
-  const buildsDir = join(projectPath, "builds");
-  // 31-H-build-async-mkdir: async mkdir with recursive:true is a
-  // no-op if the dir exists, so the previous `existsSync` + sync
-  // `mkdirSync` pair was paying for one sync I/O round-trip
-  // unnecessarily. mkdir with recursive:true swallows EEXIST and
-  // is the canonical "ensure directory" idiom in modern Node.
-  await fsPromises.mkdir(buildsDir, { recursive: true });
-
-  // 28-H-qa-gate-async-version-helpers: bumpProjectVersion and
-  // readProjectVersion are now async; await the conditional branch.
-  const version = bumpVersion
-    ? await bumpProjectVersion(projectPath)
-    : await readProjectVersion(projectPath);
-  const artifactName = `${projectId}-${platform}-v${version}-${Date.now()}.pck`;
-  const artifactAbs = join(buildsDir, artifactName);
-
-  const build = await createBuild({ projectId, platform, preset: exportPreset, version });
-  build.status = "building";
-  await updateBuild(build);
-
+  options: { preset?: string; artifactAbs: string },
+): Promise<ExportResult> {
+  const exportPreset = options.preset ?? defaultPresetForPlatform(platform);
   const config = loadConfig();
   const scriptDir = join(config.WORKSPACE_DIR, "scripts", "godot");
   const pythonBin = resolvePipelinePython();
@@ -146,27 +126,55 @@ export async function executeGodotExport(
   // behavior at the empty-string boundary.
   const godotBin = config.GODOT_BIN || (home ? join(home, ".local/bin/godot_bin/Godot") : "");
 
+  // execFileSync (no shell) so a projectPath or exportPreset containing
+  // shell metacharacters can't escalate into a shell pipeline. Each arg
+  // is a single argv element to Python, parsed exactly as written.
+  const args = [
+    join(scriptDir, "run_godot_headless.py"),
+    "--project", projectPath,
+    "--command", "export",
+    "--godot-bin", godotBin,
+    "--export-preset", exportPreset,
+    "--export-output", options.artifactAbs,
+    "--timeout", "180",
+  ];
+  // Q25-6th: execFile (async) instead of execFileSync. A 4-minute
+  // Godot export blocks the entire event loop with the sync variant,
+  // freezing WS broadcasts and HTTP requests on the process. The
+  // async version yields to the event loop so other clients can
+  // proceed while the export runs.
+  await execFileAsync(pythonBin, args, { timeout: 240_000, maxBuffer: SUBPROCESS_MAX_BUFFER });
+  return { artifactPath: relative(projectPath, options.artifactAbs) };
+}
+
+/** Generic export dispatcher — creates the build record, runs the engine-specific export, and persists the result. */
+export async function executeExport(
+  projectId: string,
+  workspacePath: string,
+  platform: BuildPlatform,
+  engine?: ProjectEngine,
+  preset?: string,
+  bumpVersion = false,
+): Promise<GameBuild> {
+  const adapter = getEngineAdapter(engine ?? "godot");
+  const projectPath = resolveProjectWorkspace(workspacePath);
+
+  // 28-H-qa-gate-async-version-helpers: bumpProjectVersion and
+  // readProjectVersion are now async; await the conditional branch.
+  const version = bumpVersion
+    ? await bumpProjectVersion(projectPath)
+    : await readProjectVersion(projectPath);
+
+  const effectiveEngine = engine ?? "godot";
+  const build = await createBuild({ projectId, platform, preset, version, engine: effectiveEngine });
+  build.status = "building";
+  await updateBuild(build);
+
   try {
-    // execFileSync (no shell) so a projectPath or exportPreset containing
-    // shell metacharacters can't escalate into a shell pipeline. Each arg
-    // is a single argv element to Python, parsed exactly as written.
-    const args = [
-      join(scriptDir, "run_godot_headless.py"),
-      "--project", projectPath,
-      "--command", "export",
-      "--godot-bin", godotBin,
-      "--export-preset", exportPreset,
-      "--export-output", artifactAbs,
-      "--timeout", "180",
-    ];
-    // Q25-6th: execFile (async) instead of execFileSync. A 4-minute
-    // Godot export blocks the entire event loop with the sync variant,
-    // freezing WS broadcasts and HTTP requests on the process. The
-    // async version yields to the event loop so other clients can
-    // proceed while the export runs.
-    await execFileAsync(pythonBin, args, { timeout: 240_000, maxBuffer: SUBPROCESS_MAX_BUFFER });
+    const exportResult = await adapter.export(projectPath, platform, { preset, projectId, version, bumpVersion });
     build.status = "success";
-    build.artifactPath = join("builds", artifactName);
+    build.artifactPath = exportResult.artifactPath;
+    build.deployUrl = exportResult.deployUrl;
     // 28-M-build-smoke-premature: previous shape set
     // `smokeTestPassed = existsSync(artifactAbs)` immediately after
     // the export, then later broadcast that "passed" to every
@@ -189,6 +197,17 @@ export async function executeGodotExport(
   build.updatedAt = new Date().toISOString();
   await updateBuild(build);
   return build;
+}
+
+/** Backward-compatible Godot export wrapper. */
+export async function executeGodotExport(
+  projectId: string,
+  workspacePath: string,
+  platform: BuildPlatform,
+  preset?: string,
+  bumpVersion = false,
+): Promise<GameBuild> {
+  return executeExport(projectId, workspacePath, platform, "godot", preset, bumpVersion);
 }
 
 export async function runPostExportSmokeTest(buildId: string, workspacePath: string): Promise<GameBuild | null> {

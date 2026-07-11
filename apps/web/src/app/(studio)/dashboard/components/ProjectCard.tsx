@@ -28,6 +28,9 @@ const ENGINE_COLORS: Record<ProjectEngine, string> = {
   godot: "bg-[#478cbf]",
   phaser: "bg-[#c90000]",
   threejs: "bg-[#000000]",
+  babylon: "bg-[#bb464b]",
+  bevy: "bg-[#232326]",
+  playcanvas: "bg-[#f3714f]",
 };
 
 export function ProjectCard({ project, isSelected, onClick, onRequestDelete, mcpStatus, onLaunchEditor }: ProjectCardProps) {

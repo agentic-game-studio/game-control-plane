@@ -73,6 +73,28 @@ export type SkillName =
   | "prototype"
   | "onboard"
   | "localize"
+  // Phaser
+  | "setup-phaser-project"
+  | "implement-phaser-scene"
+  | "implement-phaser-physics"
+  | "implement-phaser-tilemap"
+  | "automated-phaser-playtest"
+  | "export-web-project"
+  | "phaser-cli-ops"
+  // Web3D Production
+  | "setup-web3d-project"
+  | "implement-3d-scene"
+  | "implement-3d-physics"
+  | "implement-3d-camera"
+  | "generate-3d-asset"
+  | "web3d-cli-ops"
+  // Unity Production
+  | "setup-unity-project"
+  | "implement-unity-mono"
+  | "implement-unity-dots"
+  | "implement-unity-urp"
+  | "automated-unity-playtest"
+  | "unity-cli-ops"
   // Godot Production
   | "setup-godot-project"
   | "compose-scene"
@@ -95,6 +117,13 @@ export type SkillName =
   | "playtest-with-mcp"
   | "implement-shader-effect"
   | "generate-genre-template"
+  // Unreal Production
+  | "setup-unreal-project"
+  | "implement-ue-blueprint"
+  | "implement-ue-gas"
+  | "implement-ue-replication"
+  | "automated-ue-playtest"
+  | "unreal-cli-ops"
   // Team Orchestration
   | "team-combat"
   | "team-narrative"

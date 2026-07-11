@@ -20,7 +20,9 @@ import type {
 } from "@game-studio/types";
 import type { WSEvent } from "@game-studio/types";
 import { orphanProjectSessions, cancelSessionsForProject } from "./chat.js";
-import { removeGodotMCPService, installGodotMCPPlugin, isGodotMCPPluginInstalled, isGodotMCPPluginEnabled, launchGodotEditor, findServerDir, isServerBuilt, isDependenciesInstalled, setupGodotMCPServer, getGodotMCPService } from "../services/godot-mcp-service.js";
+import { EngineNotSupportedError } from "@game-studio/types";
+import { getEngineAdapter } from "../services/engine-adapter-factory.js";
+import { removeGodotMCPService, isGodotMCPPluginInstalled, isGodotMCPPluginEnabled, launchGodotEditor, findServerDir, isServerBuilt, isDependenciesInstalled, setupGodotMCPServer, getGodotMCPService } from "../services/godot-mcp-service.js";
 import { dropProjectStore } from "./documents.js";
 import { unwatchProjectAssets } from "./assets.js";
 import { detectEngineFromWorkspace } from "../services/llm-service.js";
@@ -606,22 +608,26 @@ dashboardRouter.post("/projects", async (req: Request, res: Response) => {
       return;
     }
 
-    // Auto-install Godot MCP plugin for Godot projects with workspacePath
+    // Auto-install tool bridge plugins for registered adapters
     let pluginInstallResult: { success: boolean; pluginCopied: boolean; pluginEnabled: boolean; error?: string } | null = null;
-    if (engine === "godot" && workspacePath) {
-      const projectDir = resolveProjectWorkspace(workspacePath);
-      pluginInstallResult = await installGodotMCPPlugin(projectDir, projectDir);
-      if (!pluginInstallResult.success && pluginInstallResult.error) {
-        // 24-M-logger-event-convention: tag the auto-install failure
-        // with an `event` discriminator. The plugin install runs
-        // fire-and-forget on project create; without a discriminator
-        // these warnings get lost in the noise. Pair with the
-        // existing `dashboard_godot_mcp_install_*` event names so a
-        // single filter catches every plugin install attempt.
-        logger.warn(
-          { error: pluginInstallResult.error, projectDir, event: "dashboard_godot_mcp_auto_install_failed" },
-          "Failed to auto-install Godot MCP plugin",
-        );
+    if (engine && workspacePath) {
+      try {
+        const adapter = getEngineAdapter(engine);
+        const projectDir = resolveProjectWorkspace(workspacePath);
+        pluginInstallResult = await adapter.installToolBridge?.(projectDir) ?? null;
+        if (pluginInstallResult && !pluginInstallResult.success && pluginInstallResult.error) {
+          logger.warn(
+            { error: pluginInstallResult.error, projectDir, event: "dashboard_tool_bridge_auto_install_failed" },
+            "Failed to auto-install tool bridge",
+          );
+        }
+      } catch (err) {
+        if (!(err instanceof EngineNotSupportedError)) {
+          logger.warn(
+            { error: err instanceof Error ? err.message : String(err), workspacePath, event: "dashboard_tool_bridge_auto_install_failed" },
+            "Failed to auto-install tool bridge",
+          );
+        }
       }
     }
 
@@ -805,8 +811,8 @@ dashboardRouter.post("/projects/:id/install-plugin", async (req: Request, res: R
       return;
     }
 
-    if (project.engine !== "godot") {
-      res.status(400).json({ success: false, error: "Project is not a Godot project" });
+    if (!project.engine) {
+      res.status(400).json({ success: false, error: "Project has no engine configured" });
       return;
     }
 
@@ -815,8 +821,14 @@ dashboardRouter.post("/projects/:id/install-plugin", async (req: Request, res: R
       return;
     }
 
+    const adapter = getEngineAdapter(project.engine);
+    if (!adapter.installToolBridge) {
+      res.status(400).json({ success: false, error: "Project engine does not support plugin installation" });
+      return;
+    }
+
     const projectDir = resolveProjectWorkspace(project.workspacePath);
-    const result = await installGodotMCPPlugin(projectDir, projectDir);
+    const result = await adapter.installToolBridge(projectDir);
 
     if (result.success) {
       res.json({
@@ -1011,7 +1023,6 @@ dashboardRouter.get("/projects/:id/mcp-health", async (req: Request, res: Respon
   }
 });
 
-// POST /api/dashboard/projects/:id/launch-editor - Launch Godot editor for a project
 dashboardRouter.post("/projects/:id/launch-editor", async (req: Request, res: Response) => {
   const { id } = req.params;
 
